@@ -41,6 +41,7 @@ set(M4T_CORE_SRCS
     src/m4t_trit_ops.c
     src/m4t_trit_reducers.c
     src/m4t_route.c
+    src/m4t_mtfp_w.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -69,6 +70,10 @@ if(M4T_BUILD_TESTS)
     add_executable(test_m4t_route tests/test_m4t_route.c)
     target_link_libraries(test_m4t_route PRIVATE m4t)
     add_test(NAME m4t_route COMMAND test_m4t_route)
+
+    add_executable(test_m4t_mtfp_w tests/test_m4t_mtfp_w.c)
+    target_link_libraries(test_m4t_mtfp_w PRIVATE m4t)
+    add_test(NAME m4t_mtfp_w COMMAND test_m4t_mtfp_w)
 endif()
 
 option(M4T_BUILD_TOOLS "Build M4T tools (bench, size check)" ON)
