@@ -42,7 +42,7 @@ The contract is not publishable as honored until the following measurements pass
 
 | ID | Measurement | Gating clause | Status |
 |---|---|---|---|
-| M1 | `.text` size ≤ 24 KB | Clause 5 | **Passing** (10.3 KB, 42%) |
+| M1 | `.text` size ≤ 24 KB | Clause 5 | **Passing** (17.7 KB, 71%) |
 | M2 | p99 ≤ 1.5 × mean per opcode | Clause 4 | **Partial** — LayerNorm at small N fails (p99/mean = 1.87) |
 | M3 | L1i miss rate < 0.5% under load | Clause 5 | **Deferred** — no consumer forward pass yet |
 

@@ -48,9 +48,9 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM).
 
 ## Status
 
-- **M4T substrate:** MTFP19 core, 6 TBL trit ops, 3 masked-VCNT reducers, 5 routing primitives (including end-to-end k-of-T routing), ternary matmul, layernorm. 54 tests across 4 binaries. 14.5 KB `.text` (58% of 24 KB budget).
-- **Glyph application layer:** not yet wired to M4T. Transformer block is next.
-- **See:** `m4t/docs/M4T_PIPELINE.md` for the roadmap, `m4t/docs/M4T_CONTRACT.md` for the opcode contract.
+- **M4T substrate:** Four MTFP cell types (4/9/19/39 trits), 6 TBL trit ops, 3 masked-VCNT reducers, 5 routing primitives (including end-to-end k-of-T routing), SDOT-native ternary matmul (MTFP4), ternary matmul (MTFP19), dense matmul (MTFP19/39), layernorm. 68 tests across 6 binaries. 17.7 KB `.text` (71% of 24 KB budget).
+- **Glyph application layer:** not yet wired to M4T. Opcode tables and wrapper layer next.
+- **See:** `m4t/docs/M4T_PIPELINE.md` for the roadmap, `m4t/docs/M4T_CONTRACT.md` for the opcode contract, `m4t/docs/M4T_BEYOND.md` for post-pipeline future work.
 
 ## Origin
 
