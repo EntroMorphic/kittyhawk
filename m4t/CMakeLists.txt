@@ -44,6 +44,8 @@ set(M4T_CORE_SRCS
     src/m4t_mtfp_w.c
     src/m4t_mtfp4.c
     src/m4t_ops.c
+    src/m4t_mtfp_nonlinear.c
+    src/m4t_mtfp_tables.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})

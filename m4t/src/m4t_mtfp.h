@@ -119,6 +119,22 @@ void m4t_mtfp_layernorm(
     int rows, int cols
 );
 
+/* ── Nonlinearities (LUT-backed, pure integer at runtime) ──────────────── */
+
+/* GELU via pre-computed lookup table. Values outside [-6, +6] real are
+ * clamped: GELU(x) ≈ x for large positive, ≈ 0 for large negative.
+ * Call once — the table is a compile-time const array, no init needed. */
+void m4t_mtfp_gelu(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int n);
+
+/* Softmax via pre-computed exp lookup table. Numerically stable
+ * (max-subtract before exp). Optionally causal: each row r has active
+ * columns [0..r]. Result is in MTFP units (cells sum to ~SCALE per row). */
+void m4t_mtfp_softmax(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                       int rows, int cols, int causal);
+
+/* Argmax over rows. Returns the column index with the largest value. */
+void m4t_mtfp_argmax(int* dst, const m4t_mtfp_t* src, int rows, int cols);
+
 /* ── Integer square-root helpers ───────────────────────────────────────── */
 
 /* floor(sqrt(x)) for x >= 0, via Newton-Raphson. Pure integer. */
