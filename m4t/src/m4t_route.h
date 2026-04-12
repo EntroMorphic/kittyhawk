@@ -112,7 +112,11 @@ void m4t_route_apply_signed(
  * signatures layout: T rows of Dp packed bytes.
  *
  * scratch: caller-provided buffer of at least (T + 1) * D int64_t values.
- *   Used for column sums ([T * D]) and means ([D]). */
+ *   Used for column sums ([T * D]) and means ([D]).
+ *
+ * Constraint: D ≤ 4096 (M4T_ROUTE_MAX_DIM). Uses a fixed stack buffer
+ * for row unpacking. This is a setup-time function, not a hot-path opcode. */
+#define M4T_ROUTE_MAX_DIM 4096
 void m4t_route_signature_update(
     uint8_t* signatures,
     const uint8_t* weights,

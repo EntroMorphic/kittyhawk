@@ -57,6 +57,21 @@ void m4t_mtfp_vec_add_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n) {
     for (; i < n; i++) dst[i] = m4t_mtfp_add(dst[i], a[i]);
 }
 
+void m4t_mtfp_vec_sub_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n) {
+    int i = 0;
+#if M4T_HAS_NEON
+    const int32x4_t vmax = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    const int32x4_t vmin = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t s = vsubq_s32(vld1q_s32(dst + i), vld1q_s32(a + i));
+        s = vminq_s32(s, vmax);
+        s = vmaxq_s32(s, vmin);
+        vst1q_s32(dst + i, s);
+    }
+#endif
+    for (; i < n; i++) dst[i] = m4t_mtfp_sub(dst[i], a[i]);
+}
+
 void m4t_mtfp_vec_scale(
     m4t_mtfp_t* dst, const m4t_mtfp_t* src, m4t_mtfp_t scale, int n)
 {

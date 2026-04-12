@@ -74,6 +74,7 @@ static inline m4t_mtfp_t m4t_mtfp_mul_trit(m4t_mtfp_t a, m4t_trit_t t) {
 void m4t_mtfp_vec_zero(m4t_mtfp_t* x, int n);
 void m4t_mtfp_vec_add(m4t_mtfp_t* dst, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n);
 void m4t_mtfp_vec_add_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n);
+void m4t_mtfp_vec_sub_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n);
 void m4t_mtfp_vec_scale(m4t_mtfp_t* dst, const m4t_mtfp_t* src, m4t_mtfp_t scale, int n);
 
 /* ── Dense MTFP × MTFP matmul (int64 accumulator, rescale by SCALE) ──────

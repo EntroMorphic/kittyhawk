@@ -256,37 +256,18 @@ static int test_signature_update(void) {
 /* ── End-to-end mini routing pass ──────────────────────────────────────── */
 
 static int test_route_e2e(void) {
-    /* Minimal routing: T=2 tiles, k=1, D=4.
+    /* T=2, k=1, D=4. Query matches tile 0 exactly.
      *
-     * Signatures (pre-computed):
-     *   tile 0: [+1, -1, +1, +1]
-     *   tile 1: [-1, +1, -1, -1]
-     * Query:    [+1, -1, +1, +1]   (identical to tile 0)
+     * Sigs: tile0=[+1,-1,+1,+1], tile1=[-1,+1,-1,-1], query=tile0.
+     * Packed: query=0x59, tile0=0x59, tile1=0xA6.
+     * Distances: XOR popcount → dist0=0, dist1=8.
      *
-     * Step 1: distances. query vs tile0 → 0, query vs tile1 → all differ.
-     * But popcount_dist measures BIT mismatches, not trit mismatches.
-     * Let me compute packed:
-     *   tile0: 01 10 01 01 → 0x59
-     *   tile1: 10 01 10 10 → 0xA6
-     *   query: 01 10 01 01 → 0x59
-     *   XOR(query, tile0) = 0x00 → popcount = 0
-     *   XOR(query, tile1) = 0xFF → popcount = 8
+     * Convert distance to affinity: score = -distance.
+     * scores = [0, -8]. topk_abs picks tile 1 (|score|=8, sign=-1).
+     * The -1 sign means "anti-expert" — this tile is maximally different.
      *
-     * Step 2: topk_abs(scores=[0, 8], T=2, k=1).
-     *   Score 0 has |score|=0, score 1 has |score|=8.
-     *   But wait — popcount_dist gives DISTANCE, not affinity.
-     *   In trix-z, routing uses dot(activation_sig, tile_sig) as score,
-     *   and closer = better. For popcount distance, lower = closer.
-     *   For topk, we want the LARGEST score (most active tile).
-     *
-     *   With popcount-as-score, tile 1 has the largest |score| = 8.
-     *   decisions[0] = {tile_idx=1, sign=+1}.
-     *
-     * Step 3: tile outputs (pre-computed):
-     *   tile 1 output: [100, 200, 300, 400] (MTFP cells)
-     *
-     * Step 4: apply_signed with sign=+1: result = tile1_out.
-     */
+     * Tile 1 output: [100, 200, 300, 400] * S.
+     * apply_signed with sign=-1: result = -tile1_out. */
     enum { T = 2, D = 4 };
     const m4t_mtfp_t S = (m4t_mtfp_t)M4T_MTFP_SCALE;
     int Dp = M4T_TRIT_PACKED_BYTES(D);
@@ -301,32 +282,35 @@ static int test_route_e2e(void) {
     m4t_pack_trits_1d(tp + 0, t0_trits, D);
     m4t_pack_trits_1d(tp + 1 * Dp, t1_trits, D);
 
-    /* Step 1 */
-    int32_t dist[2];
+    /* Step 1: distances */
+    int32_t dist[T];
     m4t_route_distance_batch(dist, qp, tp, mask, T, D);
     ASSERT_EQ_I32(dist[0], 0, "e2e dist0");
     ASSERT_EQ_I32(dist[1], 8, "e2e dist1");
 
-    /* Step 2 */
+    /* Step 2: convert distance → affinity (negate), then topk */
+    int32_t scores[T];
+    for (int t = 0; t < T; t++) scores[t] = -dist[t];
+
     m4t_route_decision_t decisions[1];
-    m4t_route_topk_abs(decisions, dist, T, 1);
+    m4t_route_topk_abs(decisions, scores, T, 1);
     ASSERT_EQ_I32(decisions[0].tile_idx, 1, "e2e topk idx");
-    ASSERT_EQ_I32(decisions[0].sign, 1, "e2e topk sign");
+    ASSERT_EQ_I32(decisions[0].sign, -1, "e2e topk sign (anti-expert)");
 
     /* Step 3: tile outputs */
     m4t_mtfp_t tile_outs[8] = {
-        0, 0, 0, 0,             /* tile 0 (not selected) */
-        100*S, 200*S, 300*S, 400*S   /* tile 1 */
+        0, 0, 0, 0,
+        100*S, 200*S, 300*S, 400*S
     };
 
-    /* Step 4 */
+    /* Step 4: apply with sign=-1 → subtract */
     m4t_mtfp_t result[4] = { 0, 0, 0, 0 };
     m4t_route_apply_signed(result, tile_outs, decisions, 1, D);
 
-    ASSERT_EQ_I32(result[0], 100*S, "e2e result[0]");
-    ASSERT_EQ_I32(result[1], 200*S, "e2e result[1]");
-    ASSERT_EQ_I32(result[2], 300*S, "e2e result[2]");
-    ASSERT_EQ_I32(result[3], 400*S, "e2e result[3]");
+    ASSERT_EQ_I32(result[0], -100*S, "e2e result[0] (anti)");
+    ASSERT_EQ_I32(result[1], -200*S, "e2e result[1] (anti)");
+    ASSERT_EQ_I32(result[2], -300*S, "e2e result[2] (anti)");
+    ASSERT_EQ_I32(result[3], -400*S, "e2e result[3] (anti)");
     return 0;
 }
 

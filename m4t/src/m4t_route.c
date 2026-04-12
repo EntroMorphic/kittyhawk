@@ -57,19 +57,20 @@ void m4t_route_topk_abs(
     assert(decisions && scores);
     assert(k >= 0 && T >= 0);
 
-    /* Track which tiles have been selected. T is small (≤ 16 typically). */
-    int8_t used[64];
+    /* Track selected tiles via bitmask. Supports T ≤ 64 explicitly in the
+     * type — no stack array, no overflow possible. */
     assert(T <= 64);
-    memset(used, 0, (size_t)T);
+    uint64_t used = 0;
 
     for (int sel = 0; sel < k; sel++) {
         int best_idx = -1;
-        int32_t best_abs = -1;
+        int64_t best_abs = -1;
 
         for (int t = 0; t < T; t++) {
-            if (used[t]) continue;
-            int32_t a = scores[t];
-            int32_t abs_a = (a >= 0) ? a : -a;
+            if (used & ((uint64_t)1 << t)) continue;
+            /* Widen to int64 before negating to avoid UB on INT32_MIN. */
+            int64_t a = (int64_t)scores[t];
+            int64_t abs_a = (a >= 0) ? a : -a;
             if (abs_a > best_abs) {
                 best_abs = abs_a;
                 best_idx = t;
@@ -85,7 +86,7 @@ void m4t_route_topk_abs(
             break;
         }
 
-        used[best_idx] = 1;
+        used |= (uint64_t)1 << best_idx;
         decisions[sel].tile_idx = best_idx;
         decisions[sel].sign = (scores[best_idx] > 0) ? 1 : -1;
     }
@@ -111,11 +112,7 @@ void m4t_route_apply_signed(
         if (sign == 1) {
             m4t_mtfp_vec_add_inplace(result, tile, dim);
         } else if (sign == -1) {
-            /* Subtract: result[d] -= tile[d]. No vec_sub_inplace exists,
-             * so we negate and add. Use scalar to avoid a temp buffer. */
-            for (int d = 0; d < dim; d++) {
-                result[d] = m4t_mtfp_sub(result[d], tile[d]);
-            }
+            m4t_mtfp_vec_sub_inplace(result, tile, dim);
         }
     }
 }
@@ -141,10 +138,11 @@ void m4t_route_signature_update(
      * weight matrix. Unpack one row at a time to avoid large temp buffers. */
     memset(col_sums, 0, (size_t)T * D * sizeof(int64_t));
 
-    /* Allocate a small row buffer on the stack. D is the model dim, typically
-     * 32–256. This is bounded and small. */
+    /* Fixed row buffer on the stack. D must be ≤ M4T_ROUTE_MAX_DIM (4096).
+     * This is a compound setup-time function, not a hot-path opcode —
+     * the fixed stack allocation is acceptable here. */
     m4t_trit_t row_buf[4096];
-    assert(D <= 4096);
+    assert(D <= 4096);  /* caller must respect M4T_ROUTE_MAX_DIM */
 
     for (int t = 0; t < T; t++) {
         int64_t* cs = col_sums + (size_t)t * D;
