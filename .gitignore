@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+m4t/build/
+*.o
+*.a
+*.d
+*.dylib
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*~
+.vscode/
+.idea/
+
+# Tools output (binaries)
+/tmp/m4t_*

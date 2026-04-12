@@ -1,0 +1,3 @@
+add_executable(test_glyph_mtfp_smoke test_glyph_mtfp_smoke.c)
+target_link_libraries(test_glyph_mtfp_smoke PRIVATE glyph)
+add_test(NAME glyph_mtfp_smoke COMMAND test_glyph_mtfp_smoke)
