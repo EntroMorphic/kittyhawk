@@ -3,15 +3,24 @@
  *
  * M4T IS TERNARY / MULTI-TRIT / MULTI-TRIT FLOATING POINT ONLY.
  *
- * Two reducers that collapse a packed-trit vector into a scalar:
+ * Three functions that reduce a packed-trit vector to scalar counts:
  *
- *   signed_sum:  count(+1 trits) - count(-1 trits)
- *   sparsity:    count(nonzero trits)
+ *   counts:      separate count(+1) and count(-1)
+ *   signed_sum:  count(+1) - count(-1)
+ *   sparsity:    count(+1) + count(-1)
  *
- * Both use the masked-VCNT trick: AND a packed byte with 0x55 (even bits)
+ * All use the masked-VCNT trick: AND a packed byte with 0x55 (even bits)
  * to isolate +1 codes, or 0xAA (odd bits) to isolate -1 codes, then VCNT
- * counts the set bits. The signed sum is the difference; sparsity is the
- * sum. ~15 NEON instructions per 64 trits.
+ * counts the set bits. ~14 NEON instructions per 64 trits.
+ *
+ * Precondition: input must contain only valid trit codes (0b00, 0b01,
+ * 0b10). Reserved code 0b11 is undefined — it has both bits set, so
+ * counts would register it as both +1 and -1 simultaneously (signed_sum
+ * is accidentally correct; sparsity and counts are wrong). Pack functions
+ * never produce 0b11, so this only affects externally-constructed buffers.
+ *
+ * If you need both signed_sum and sparsity, call m4t_trit_counts once
+ * and compute both from pos and neg — avoids two traversals.
  *
  * These are the building blocks for weight-derived signature computation
  * (column-sum → mean-subtract → sign-extract) in the routing layer.

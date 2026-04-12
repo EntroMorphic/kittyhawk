@@ -137,6 +137,26 @@ static int test_256_exact(void) {
     return 0;
 }
 
+/* ── Large vector, all -1 (F4: exercises odd-bit NEON path) ────────────── */
+
+static int test_256_all_neg(void) {
+    const int N = 256;
+    m4t_trit_t t[256];
+    for (int i = 0; i < N; i++) t[i] = -1;
+
+    uint8_t packed[M4T_TRIT_PACKED_BYTES(256)];
+    m4t_pack_trits_1d(packed, t, N);
+
+    ASSERT_EQ_I64(m4t_trit_signed_sum(packed, N), -256, "n256 neg signed_sum");
+    ASSERT_EQ_I64(m4t_trit_sparsity(packed, N), 256, "n256 neg sparsity");
+
+    int64_t pos, neg;
+    m4t_trit_counts(packed, N, &pos, &neg);
+    ASSERT_EQ_I64(pos, 0, "n256 neg pos");
+    ASSERT_EQ_I64(neg, 256, "n256 neg neg");
+    return 0;
+}
+
 /* ── Edge: n_trits = 0 ─────────────────────────────────────────────────── */
 
 static int test_zero_length(void) {
@@ -176,6 +196,7 @@ int main(void) {
     if (test_mixed())        return 1;
     if (test_neon_boundary()) return 1;
     if (test_256_exact())    return 1;
+    if (test_256_all_neg())  return 1;
     if (test_zero_length())  return 1;
     if (test_single_trit())  return 1;
     printf("m4t_trit_reducers: all tests passed\n");
