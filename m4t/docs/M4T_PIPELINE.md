@@ -12,7 +12,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 - [x] **2. Masked-VCNT reducers** — `m4t_trit_signed_sum`, `m4t_trit_sparsity`, and `m4t_trit_counts` (separate pos/neg counts). Masked popcount via AND(0x55/0xAA) + VCNT + widen chain. ~14 NEON insns per 64 trits. 8 tests covering zeros, all-pos, all-neg, mixed, NEON+tail (n=65), exact-block (n=256), n=0, n=1. Added 724 bytes to .text (total 11.1 KB, 45% budget).
 
-- [ ] **3. Routing primitives (`m4t_route_ops[]`)** — 5 new opcodes: `signature_update`, `distance_batch`, `topk_abs`, `apply_signed`, `sign_extract`. New files: `src/m4t_route.{h,c}`, tests. Depends on items 1 and 2.
+- [x] **3. Routing primitives (`m4t_route_ops[]`)** — 5 primitives landed: `sign_extract` (int64→packed-trit signs), `distance_batch` (batch popcount over T tiles), `topk_abs` (k-of-T selection by |score|), `apply_signed` (signed tile accumulation), `signature_update` (compound: column-sum → mean-subtract → sign-extract, uses caller-provided scratch). 9 tests including a full end-to-end mini routing pass. Added 4.2 KB to .text (total 15.3 KB, 62% budget).
 
 ## Phase B — Cell-width expansion
 
@@ -36,7 +36,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 | Region | Budget | Current (.text) | Headroom |
 |---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 11.1 KB (MTFP19 + trit ops + reducers) | 12.9 KB |
+| L1i (opcode bodies) | 24 KB | 15.3 KB (MTFP19 + trit ops + reducers + route) | 8.7 KB |
 | L1d (LUTs + constants) | 4 KB | ~0.2 KB (decode LUT + 5 op LUTs) | 3.8 KB |
 
 Updated as new opcodes land.
