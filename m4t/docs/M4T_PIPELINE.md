@@ -28,7 +28,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ## Phase D — Consumer integration
 
-- [ ] **8. Glyph wrapper layer** — thin `glyph/src/glyph_*.h` headers that `#include <m4t_*.h>` and typedef/alias the m4t types. Glyph's `CMakeLists.txt` updated to depend on `libm4t.a`. Existing glyph tests optionally kept as a compatibility check. Independent of Phase C.
+- [x] **8. Glyph wrapper layer** — Glyph is now a header-only INTERFACE library over libm4t.a. Old glyph .c kernel files removed; replaced by thin wrapper headers (`glyph_types.h`, `glyph_mtfp.h`, `glyph_trit_pack.h`, `glyph_ternary_matmul.h`, `glyph_route.h`) that #include M4T and #define glyph_* aliases. Top-level CMakeLists.txt uses `add_subdirectory(m4t)` + `target_link_libraries(glyph INTERFACE m4t)`. Wrapper test verifies type sizes, constant values, and dispatch equivalence for all alias families.
 
 ---
 
