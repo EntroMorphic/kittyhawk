@@ -6,7 +6,7 @@
  * The narrowest MTFP cell. 16 cells per NEON register. Designed for
  * routing: signature scores, distance normalization, and the SDOT-native
  * ternary matmul where int8 MTFP4 activations × int8 trit weights feed
- * directly into vdotq_s32 — 16 multiply-accumulates per cycle.
+ * directly into vdotq_s32 — 16 multiply-accumulates per instruction.
  *
  * radix=2, scale=3^2=9. real = cell / 9.
  * range: ±(3^4-1)/2 / 9 = ±40/9 ≈ ±4.44.
@@ -17,6 +17,14 @@
  * valid SDOT operands, and MTFP4 activations in int8 are also valid.
  * The int32 accumulator holds the sum without rescale (ternary × MTFP4
  * stays in MTFP4 units; no SCALE division needed).
+ *
+ * v0 scope notes:
+ * - Conversion functions (mtfp19↔mtfp4) are scalar. NEON when needed.
+ * - No NEON vector ops (vec_add, etc.) for MTFP4 — add when routing
+ *   layer needs element-wise MTFP4 throughput at 16 lanes.
+ * - mul rounding uses SCALE/2 = 4 (truncated from 4.5). Proportionally
+ *   larger bias than MTFP19 (11% vs 0.002%). Acceptable for routing
+ *   scores where relative ordering matters more than absolute precision.
  */
 
 #ifndef M4T_MTFP4_H
@@ -73,8 +81,14 @@ static inline m4t_mtfp4_t m4t_mtfp4_mul_trit(m4t_mtfp4_t a, m4t_trit_t t) {
  * by SCALE is needed because trit weights are dimensionless {-1,0,+1}.
  * The result is clamped to ±M4T_MTFP4_MAX_VAL on store.
  *
+ * Precondition: W elements MUST be in {-1, 0, +1}. The int32 accumulator
+ * is safe for any K with valid trit weights (max per lane = K/4 × 40,
+ * trivially below INT32_MAX). Non-trit weights violate this bound.
+ *
  * W layout: [N, K] row-major int8, each element in {-1, 0, +1}.
  * NOT packed trits — raw int8 values, because SDOT needs int8 operands.
+ * This uses 4× the memory of the packed representation; the tradeoff is
+ * that SDOT runs at full throughput with zero decode overhead.
  */
 void m4t_mtfp4_sdot_matmul_bt(
     m4t_mtfp4_t* Y,
