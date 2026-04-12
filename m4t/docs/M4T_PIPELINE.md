@@ -18,7 +18,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 - [x] **4. MTFP39 wide path (`m4t_mtfp_w_*`)** — int64 variants: saturating add/sub/mul (via __int128), mul_trit, vec_add/sub_inplace (NEON int64x2 with compare+select clamp), dense matmul_bt (__int128 accumulator), ternary matmul_bt. 5 tests (scalar, saturation, vec ops, dense matmul, ternary matmul). Added 1.7 KB to .text (total 16.2 KB, 66% budget).
 
-- [ ] **5. MTFP4 SDOT path (`m4t_mtfp4_*`)** — int8 routing cell. `vdotq_s32` as native ternary matmul. New files: `src/m4t_mtfp4.{h,c}`, tests. Independent of Phase A; routing primitives (item 3) should consume this once both land.
+- [x] **5. MTFP4 SDOT path (`m4t_mtfp4_*`)** — int8 routing cell (4 trits, scale=9, 16 NEON lanes). Scalar arithmetic (add/sub/mul/neg/mul_trit, all saturating). SDOT matmul: `vdotq_s32` processes 16 int8 multiply-accumulates per instruction — the fastest ternary operation M4 can do. MTFP19↔MTFP4 conversion with symmetric rounding. 7 tests (scalar, saturation, SDOT at K=4/32/17, SDOT saturation at K=64, conversion round-trip + clamp). Added 1.4 KB to .text (total 17.7 KB, 71% budget).
 
 ## Phase C — Opcode tables and tooling
 
@@ -36,7 +36,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 | Region | Budget | Current (.text) | Headroom |
 |---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 16.2 KB (MTFP19 + trit ops + reducers + route + MTFP39) | 7.8 KB |
+| L1i (opcode bodies) | 24 KB | 17.7 KB (MTFP19 + trit ops + reducers + route + MTFP39 + MTFP4) | 6.3 KB |
 | L1d (LUTs + constants) | 4 KB | ~0.3 KB (decode LUT + 5 op LUTs) | 3.7 KB |
 
 Updated as new opcodes land.
