@@ -8,7 +8,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ## Phase A — Opcode primitives
 
-- [ ] **1. TBL-based trit ops (`m4t_trit_ops[]`)** — 6 new opcodes: `mul`, `sat_add`, `max`, `min`, `eq`, `neg`. Each is a 16-byte LUT + a ~5-instruction NEON stub. Uniform shape. New files: `src/m4t_trit_ops.{h,c}`, tests in `tests/test_m4t_trit_ops.c`. Exhaustive 3×3 = 9-entry verification per LUT.
+- [x] **1. TBL-based trit ops (`m4t_trit_ops[]`)** — 6 opcodes landed: `mul`, `sat_add`, `max`, `min`, `eq`, `neg`. Five use a shared TBL kernel (~28 NEON insns/64 trits); neg uses a bit-swap (~5 insns/64 trits). 13 tests: 6 exhaustive 3×3, 6 NEON+tail (n=65), 1 in-place alias. Added 1.9 KB to .text (total 10.3 KB, 42% budget).
 
 - [ ] **2. Masked-VCNT reducers** — `m4t_trit_signed_sum` and `m4t_trit_sparsity`. Masked popcount → signed trit reduction. New files: `src/m4t_trit_reducers.{h,c}`, tests. Dependency: used by item 3 (signature update).
 
@@ -36,7 +36,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 | Region | Budget | Current (.text) | Headroom |
 |---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 8.4 KB (MTFP19 core only) | 15.6 KB |
-| L1d (LUTs + constants) | 4 KB | ~0.1 KB (decode LUT only) | 3.9 KB |
+| L1i (opcode bodies) | 24 KB | 10.3 KB (MTFP19 + trit ops) | 13.7 KB |
+| L1d (LUTs + constants) | 4 KB | ~0.2 KB (decode LUT + 5 op LUTs) | 3.8 KB |
 
 Updated as new opcodes land.

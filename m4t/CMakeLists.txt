@@ -38,6 +38,7 @@ set(M4T_CORE_SRCS
     src/m4t_mtfp.c
     src/m4t_trit_pack.c
     src/m4t_ternary_matmul.c
+    src/m4t_trit_ops.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -54,6 +55,10 @@ if(M4T_BUILD_TESTS)
     add_executable(test_m4t_smoke tests/test_m4t_smoke.c)
     target_link_libraries(test_m4t_smoke PRIVATE m4t)
     add_test(NAME m4t_smoke COMMAND test_m4t_smoke)
+
+    add_executable(test_m4t_trit_ops tests/test_m4t_trit_ops.c)
+    target_link_libraries(test_m4t_trit_ops PRIVATE m4t)
+    add_test(NAME m4t_trit_ops COMMAND test_m4t_trit_ops)
 endif()
 
 option(M4T_BUILD_TOOLS "Build M4T tools (bench, size check)" ON)
