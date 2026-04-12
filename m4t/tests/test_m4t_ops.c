@@ -25,7 +25,7 @@ static int test_trit_ops_table(void) {
         ASSERT(m4t_trit_ops[i] != NULL, "trit op NULL");
     }
 
-    /* Dispatch mul through table, compare to direct call. */
+    /* Dispatch every trit op through the table and compare to direct call. */
     m4t_trit_t a_trits[4] = { 1, -1, 0, 1 };
     m4t_trit_t b_trits[4] = { 1,  1, 1, -1 };
     uint8_t pa[1], pb[1], direct[1], table_out[1];
@@ -33,10 +33,17 @@ static int test_trit_ops_table(void) {
     m4t_pack_trits_1d(pa, a_trits, 4);
     m4t_pack_trits_1d(pb, b_trits, 4);
 
-    m4t_trit_mul(direct, pa, pb, 4);
-    m4t_trit_ops[M4T_TOP_MUL](table_out, pa, pb, 4);
+    typedef void (*trit_fn)(uint8_t*, const uint8_t*, const uint8_t*, int);
+    trit_fn direct_fns[M4T_TOP_COUNT] = {
+        m4t_trit_mul, m4t_trit_sat_add, m4t_trit_max,
+        m4t_trit_min, m4t_trit_eq, m4t_trit_neg
+    };
 
-    ASSERT(memcmp(direct, table_out, 1) == 0, "trit table mul mismatch");
+    for (int i = 0; i < M4T_TOP_COUNT; i++) {
+        direct_fns[i](direct, pa, pb, 4);
+        m4t_trit_ops[i](table_out, pa, pb, 4);
+        ASSERT(memcmp(direct, table_out, 1) == 0, "trit table dispatch mismatch");
+    }
     return 0;
 }
 
@@ -61,11 +68,23 @@ static int test_mtfp_ops_table(void) {
 
     ASSERT(memcmp(direct, table_out, sizeof(direct)) == 0, "mtfp table vec_add mismatch");
 
-    /* Verify shape tag. */
-    ASSERT(m4t_mtfp_ops[M4T_MOP_VEC_ADD].shape == M4T_MOP_SHAPE_VEC_BINARY, "vec_add shape");
-    ASSERT(m4t_mtfp_ops[M4T_MOP_MATMUL_BT].shape == M4T_MOP_SHAPE_MATMUL, "matmul_bt shape");
-    ASSERT(m4t_mtfp_ops[M4T_MOP_LAYERNORM].shape == M4T_MOP_SHAPE_LAYERNORM, "layernorm shape");
-    ASSERT(m4t_mtfp_ops[M4T_MOP_TERNARY_MATMUL_BT].shape == M4T_MOP_SHAPE_TERNARY_MATMUL, "ternary shape");
+    /* Verify every shape tag. */
+    const enum m4t_mtfp_op_shape expected_shapes[M4T_MOP_COUNT] = {
+        [M4T_MOP_VEC_ADD]           = M4T_MOP_SHAPE_VEC_BINARY,
+        [M4T_MOP_VEC_ADD_INPLACE]   = M4T_MOP_SHAPE_VEC_INPLACE,
+        [M4T_MOP_VEC_SUB_INPLACE]   = M4T_MOP_SHAPE_VEC_INPLACE,
+        [M4T_MOP_VEC_ZERO]          = M4T_MOP_SHAPE_OTHER,
+        [M4T_MOP_VEC_SCALE]         = M4T_MOP_SHAPE_OTHER,
+        [M4T_MOP_BIAS_ADD]          = M4T_MOP_SHAPE_OTHER,
+        [M4T_MOP_FAN_IN_NORMALIZE]  = M4T_MOP_SHAPE_OTHER,
+        [M4T_MOP_LAYERNORM]         = M4T_MOP_SHAPE_LAYERNORM,
+        [M4T_MOP_MATMUL]            = M4T_MOP_SHAPE_MATMUL,
+        [M4T_MOP_MATMUL_BT]         = M4T_MOP_SHAPE_MATMUL,
+        [M4T_MOP_TERNARY_MATMUL_BT] = M4T_MOP_SHAPE_TERNARY_MATMUL,
+    };
+    for (int i = 0; i < M4T_MOP_COUNT; i++) {
+        ASSERT(m4t_mtfp_ops[i].shape == expected_shapes[i], "mtfp shape mismatch");
+    }
     return 0;
 }
 

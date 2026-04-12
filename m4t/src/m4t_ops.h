@@ -48,8 +48,20 @@ extern const m4t_trit_op_fn m4t_trit_ops[M4T_TOP_COUNT];
 
 /* ── MTFP19 ops table ──────────────────────────────────────────────────── */
 
-/* MTFP ops have varying signatures. The table stores void* pointers;
- * callers cast to the correct type using the shape tag. */
+/* MTFP ops have varying signatures. The table stores generic function
+ * pointers cast to void(*)(void); callers cast back to the correct
+ * signature using the shape tag. Calling through a cast function pointer
+ * whose type differs from the original is technically UB per C99
+ * §6.3.2.3¶8, but is universally supported on aarch64 (all arguments
+ * pass through registers per the calling convention) and is the standard
+ * pattern for C dispatch tables (GLib, SQLite, etc.).
+ *
+ * MTFP39 and MTFP4 ops are intentionally absent from this table for v0.
+ * Those paths are direct-call-only. Tables for the wide and narrow cell
+ * types land when a consumer needs indexed dispatch to them.
+ *
+ * Trit reducers (signed_sum, sparsity, counts) have a different return
+ * type (int64_t, not void) and are also direct-call-only. */
 
 enum m4t_mtfp_op_shape {
     M4T_MOP_SHAPE_VEC_BINARY,    /* void(mtfp*, const mtfp*, const mtfp*, int) */
