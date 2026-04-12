@@ -74,6 +74,14 @@ void m4t_mtfp_w_vec_sub_inplace(m4t_mtfp_w_t* dst, const m4t_mtfp_w_t* a, int n)
     for (; i < n; i++) dst[i] = m4t_mtfp_w_sub(dst[i], a[i]);
 }
 
+void m4t_mtfp_w_vec_scale(
+    m4t_mtfp_w_t* dst, const m4t_mtfp_w_t* src, m4t_mtfp_w_t scale, int n)
+{
+    for (int i = 0; i < n; i++) {
+        dst[i] = m4t_mtfp_w_mul(src[i], scale);
+    }
+}
+
 /* ── Dense MTFP39 × MTFP39 matmul ─────────────────────────────────────── */
 
 void m4t_mtfp_w_matmul_bt(

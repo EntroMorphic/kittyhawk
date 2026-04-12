@@ -85,19 +85,22 @@ void m4t_mtfp_vec_scale(
 
 /* ── Dense MTFP × MTFP matmul ──────────────────────────────────────────── */
 
+/* Accumulator uses __int128 to avoid overflow at large K.
+ * With int64 accumulators, K > 27 with MAX_VAL cells would overflow.
+ * With __int128, K_max ≈ 5e20 — effectively unlimited. */
+
 static void matmul_row(
     m4t_mtfp_t* Y_row, const m4t_mtfp_t* X_row, const m4t_mtfp_t* W,
     int K, int N)
 {
     for (int j = 0; j < N; j++) {
-        int64_t acc = 0;
+        __int128 acc = 0;
         for (int k = 0; k < K; k++) {
-            acc += (int64_t)X_row[k] * (int64_t)W[(size_t)k * N + j];
+            acc += (__int128)X_row[k] * (__int128)W[(size_t)k * N + j];
         }
-        /* Round to nearest (ties away from zero), then rescale. */
         if (acc >= 0) acc += M4T_MTFP_SCALE / 2;
         else          acc -= M4T_MTFP_SCALE / 2;
-        Y_row[j] = m4t_mtfp_clamp64(acc / M4T_MTFP_SCALE);
+        Y_row[j] = m4t_mtfp_clamp64((int64_t)(acc / M4T_MTFP_SCALE));
     }
 }
 
@@ -107,13 +110,13 @@ static void matmul_bt_row(
 {
     for (int j = 0; j < N; j++) {
         const m4t_mtfp_t* wj = W + (size_t)j * K;
-        int64_t acc = 0;
+        __int128 acc = 0;
         for (int k = 0; k < K; k++) {
-            acc += (int64_t)X_row[k] * (int64_t)wj[k];
+            acc += (__int128)X_row[k] * (__int128)wj[k];
         }
         if (acc >= 0) acc += M4T_MTFP_SCALE / 2;
         else          acc -= M4T_MTFP_SCALE / 2;
-        Y_row[j] = m4t_mtfp_clamp64(acc / M4T_MTFP_SCALE);
+        Y_row[j] = m4t_mtfp_clamp64((int64_t)(acc / M4T_MTFP_SCALE));
     }
 }
 

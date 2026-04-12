@@ -82,6 +82,40 @@ static int test_w_vec_ops(void) {
     return 0;
 }
 
+/* ── Vec scale ─────────────────────────────────────────────────────────── */
+
+static int test_w_vec_scale(void) {
+    const m4t_mtfp_w_t S = (m4t_mtfp_w_t)M4T_MTFPW_SCALE;
+    m4t_mtfp_w_t src[3] = { S, -2*S, 0 };
+    m4t_mtfp_w_t dst[3];
+    m4t_mtfp_w_vec_scale(dst, src, 3*S, 3);
+    ASSERT_EQ_I64(dst[0],  3*S, "w scale 1*3");
+    ASSERT_EQ_I64(dst[1], -6*S, "w scale -2*3");
+    ASSERT_EQ_I64(dst[2],    0, "w scale 0*3");
+    return 0;
+}
+
+/* ── Odd-n vector test (W5) ────────────────────────────────────────────── */
+
+static int test_w_vec_odd_n(void) {
+    /* n=3: NEON processes 2 elements, scalar tail handles 1. */
+    m4t_mtfp_w_t a[3] = { 100, 200, 300 };
+    m4t_mtfp_w_t b[3] = { 10, 20, 30 };
+    m4t_mtfp_w_t c[3];
+    m4t_mtfp_w_vec_add(c, a, b, 3);
+    ASSERT_EQ_I64(c[0], 110, "w odd_n[0]");
+    ASSERT_EQ_I64(c[1], 220, "w odd_n[1]");
+    ASSERT_EQ_I64(c[2], 330, "w odd_n[2]");
+
+    /* n=1: pure scalar. */
+    m4t_mtfp_w_t x[1] = { W_MAX };
+    m4t_mtfp_w_t y[1] = { 1 };
+    m4t_mtfp_w_t z[1];
+    m4t_mtfp_w_vec_add(z, x, y, 1);
+    ASSERT_EQ_I64(z[0], W_MAX, "w n1 sat");
+    return 0;
+}
+
 /* ── Dense matmul ──────────────────────────────────────────────────────── */
 
 static int test_w_matmul_bt(void) {
@@ -133,6 +167,8 @@ int main(void) {
     if (test_w_scalar())             return 1;
     if (test_w_saturation())         return 1;
     if (test_w_vec_ops())            return 1;
+    if (test_w_vec_scale())          return 1;
+    if (test_w_vec_odd_n())          return 1;
     if (test_w_matmul_bt())          return 1;
     if (test_w_ternary_matmul_bt())  return 1;
     printf("m4t_mtfp_w: all tests passed\n");
