@@ -4,8 +4,8 @@
  * M4T IS TERNARY / MULTI-TRIT / MULTI-TRIT FLOATING POINT ONLY.
  *
  * Six opcodes that operate element-wise on packed-trit buffers. Five use
- * a 16-byte NEON TBL lookup (one cycle per 64 trits); neg uses a bit-swap
- * (five instructions per 64 trits).
+ * a 16-byte NEON TBL lookup (~28 instructions per 64 trits); neg uses a
+ * bit-swap (~5 instructions per 64 trits).
  *
  * Calling convention: all ops take two packed-trit inputs and a length in
  * trits. For unary ops (neg), the second input is ignored but present for

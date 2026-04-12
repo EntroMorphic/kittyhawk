@@ -1,22 +1,61 @@
 # GLYPH
 
-A NEON-optimized C library for Apple M4.
+Glass-box ternary routing architecture for interpretable AI on Apple Silicon.
 
-## Numerical System — Non-Negotiable
+## Architecture
 
-**Glyph uses only three numeric types, all rooted in base-3:**
+Glyph is built on **M4T** (M4 Ternary Extensions), a generic ternary compute substrate that lives in `m4t/`. M4T provides the numerical core — MTFP arithmetic, trit packing, TBL-based trit operations, NEON-optimized matmul, LayerNorm. Glyph is the consumer that wires these primitives into a transformer with ternary routing.
 
-1. **Ternary** — single trits `{-1, 0, +1}`, packed 4 per byte (2-bit codes).
-2. **Multi-Trit** — fixed-width trit words (e.g. 10-trit MTFP cells), used for weights, activations, and routing state.
-3. **Multi-Trit Floating Point (MTFP)** — balanced ternary fixed-point with scale `3^10 = 59049` (real value = cell / 59049). Stored in an `int32` container, but treated as an opaque MTFP cell — never as a binary integer.
+```
+m4t/          ← generic ternary substrate (libm4t.a)
+  src/          types, MTFP arithmetic, trit ops, matmul, layernorm
+  tests/        35 tests, hand-derived integer golden values
+  tools/        bench, size check, LUT gen, golden-value enumerator
+  docs/         contract, pipeline, red-team
 
-**Banned everywhere in glyph source:**
+src/            ← glyph application layer (pre-extraction, retained for now)
+reference-code/ ← trix-z source (quarantined, not on include path)
+journal/        ← LMM design journal for the ternary opcode architecture
+docs/           ← glyph-era remediation plans and red-team trackers
+```
 
-- `float`, `double`, `float16`, `bfloat16`, or any IEEE-754 type.
-- `int8_t`, `int16_t`, `uint8_t`/`uint16_t` **as numeric quantization types** (byte/word buffers for packed trits are fine — they are containers, not numbers).
-- STE shadow weights, float gradient accumulators, float optimizer state.
-- Softmax over floats, GELU via `erff`, any transcendental called on a float.
+## Numerical System
 
-If a computation needs a "real number," it goes through MTFP. Period. This is the core liberation of the project: once you give up binary FP, every operation becomes a trit-level add/subtract/skip, and the hardware maps directly to `XOR`+`VCNT`+`SDOT` on NEON.
+**Ternary / Multi-Trit / Multi-Trit Floating Point only.**
 
-See `reference-code/` for the trix-z source this project forks from. That code is retained verbatim for reference; it contains float paths that **do not** belong in glyph.
+Four MTFP cell widths at clean power-of-3 boundaries:
+
+| Cell | Storage | Trits | Primary use |
+|---|---|---|---|
+| MTFP4 | int8 | 4 | Routing (unlocks SDOT as native ternary matmul) |
+| MTFP9 | int16 | 9 | Narrow activations, intermediate scores |
+| MTFP19 | int32 | 19 | General-purpose FFN, layernorm, matmul (default) |
+| MTFP39 | int64 | 39 | Wide accumulation, high-precision paths |
+
+**Banned:** `float`, `double`, IEEE-754 types. `int8`/`int16` as binary quantization types (allowed as MTFP cell containers at trit boundaries).
+
+## Build
+
+```bash
+# Build the M4T substrate
+cd m4t && cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+
+# Build the glyph application layer (pre-extraction)
+cd .. && cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+```
+
+Requires aarch64 + NEON (Apple Silicon or compatible ARM).
+
+## Status
+
+- **M4T substrate:** MTFP19 core, 6 TBL trit ops, ternary matmul, layernorm. 35 tests passing. 10.3 KB `.text` (42% of 24 KB budget).
+- **Glyph application layer:** not yet wired to M4T. Routing primitives and transformer block are next.
+- **See:** `m4t/docs/M4T_PIPELINE.md` for the implementation roadmap, `m4t/docs/M4T_CONTRACT.md` for the opcode contract.
+
+## Origin
+
+Forked from trix-z (ternary-routed transformer research). The trix-z C kernels are retained in `reference-code/` for reference; they contain float paths that do not belong in glyph or M4T.
+
+## License
+
+MIT.
