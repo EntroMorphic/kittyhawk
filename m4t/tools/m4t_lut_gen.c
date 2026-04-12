@@ -17,8 +17,13 @@
 #include <math.h>
 #include <stdint.h>
 
-#define MTFP_SCALE    59049       /* 3^10 */
-#define MTFP_INV_SCALE (1.0f / 59049.0f)
+/* Mirror the canonical constants from m4t_types.h so they stay in sync.
+ * The generator is a standalone host tool and does not #include m4t_types.h
+ * (which may require aarch64 headers). Instead we derive from the same
+ * formula: SCALE = 3^10, MAX_VAL = (3^19 - 1) / 2. */
+#define MTFP_SCALE       59049          /* 3^10 */
+#define MTFP_INV_SCALE   (1.0f / 59049.0f)
+#define MTFP_MAX_VAL     581130733      /* (3^19 - 1) / 2 — must match M4T_MTFP_MAX_VAL */
 
 /* Table range: [-6.0, +6.0] in real units.
  * In MTFP cell units: [-6 * SCALE, +6 * SCALE] = [-354294, +354294].
@@ -29,8 +34,8 @@
 static int32_t mtfp_from_float(float x) {
     float scaled = x * (float)MTFP_SCALE;
     int32_t rounded = (int32_t)lrintf(scaled);
-    if (rounded > 581130733) rounded = 581130733;    /* M4T_MTFP_MAX_VAL */
-    if (rounded < -581130733) rounded = -581130733;
+    if (rounded > MTFP_MAX_VAL) rounded = MTFP_MAX_VAL;
+    if (rounded < -MTFP_MAX_VAL) rounded = -MTFP_MAX_VAL;
     return rounded;
 }
 

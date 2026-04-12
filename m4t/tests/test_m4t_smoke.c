@@ -168,6 +168,45 @@ static int test_vector_ops(void) {
     return 0;
 }
 
+/* ── vec_scale and bias_add (N5) ──────────────────────────────────────── */
+
+static int test_vec_scale(void) {
+    const m4t_mtfp_t S = (m4t_mtfp_t)M4T_MTFP_SCALE;
+    m4t_mtfp_t src[5] = { S, 2*S, -S, 0, 3*S };
+    m4t_mtfp_t dst[5];
+
+    /* Scale by 2.0 (cell = 2*S). Result = input * 2. */
+    m4t_mtfp_vec_scale(dst, src, 2*S, 5);
+    ASSERT_EQ_I32(dst[0], 2*S,  "scale 1*2");
+    ASSERT_EQ_I32(dst[1], 4*S,  "scale 2*2");
+    ASSERT_EQ_I32(dst[2], -2*S, "scale -1*2");
+    ASSERT_EQ_I32(dst[3], 0,    "scale 0*2");
+    ASSERT_EQ_I32(dst[4], 6*S,  "scale 3*2");
+
+    /* Scale by 0 → all zero. */
+    m4t_mtfp_vec_scale(dst, src, 0, 5);
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ_I32(dst[i], 0, "scale *0");
+    }
+    return 0;
+}
+
+static int test_bias_add(void) {
+    const m4t_mtfp_t S = (m4t_mtfp_t)M4T_MTFP_SCALE;
+    /* 2 batch rows, dim=3.  x = [[1,2,3],[4,5,6]], bias = [10,20,30] */
+    m4t_mtfp_t x[6] = { 1*S, 2*S, 3*S, 4*S, 5*S, 6*S };
+    m4t_mtfp_t b[3] = { 10*S, 20*S, 30*S };
+
+    m4t_mtfp_bias_add(x, b, 2, 3);
+    ASSERT_EQ_I32(x[0], 11*S, "bias row0 col0");
+    ASSERT_EQ_I32(x[1], 22*S, "bias row0 col1");
+    ASSERT_EQ_I32(x[2], 33*S, "bias row0 col2");
+    ASSERT_EQ_I32(x[3], 14*S, "bias row1 col0");
+    ASSERT_EQ_I32(x[4], 25*S, "bias row1 col1");
+    ASSERT_EQ_I32(x[5], 36*S, "bias row1 col2");
+    return 0;
+}
+
 /* ── Integer square root ───────────────────────────────────────────────── */
 
 static int test_isqrt(void) {
@@ -368,7 +407,7 @@ static int test_ternary_matmul_bt_k17_tail(void) {
 }
 
 static int test_ternary_matmul_bt_m3(void) {
-    /* M=3 exercises dispatch_apply outer loop.
+    /* M=3 exercises the multi-row outer loop.
      * K=8, N=2.
      *   X[0] = [1]*8
      *   X[1] = [2]*8
@@ -563,6 +602,8 @@ int main(void) {
     if (test_add_sub_saturation())       return 1;
     if (test_vec_add_saturation())       return 1;
     if (test_vector_ops())               return 1;
+    if (test_vec_scale())                return 1;
+    if (test_bias_add())                 return 1;
     if (test_isqrt())                    return 1;
     if (test_pack_roundtrip())           return 1;
     if (test_popcount_dist())            return 1;

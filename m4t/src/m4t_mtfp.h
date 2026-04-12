@@ -105,8 +105,9 @@ void m4t_mtfp_fan_in_normalize(m4t_mtfp_t* x, int n, int fan_in);
 
 /* LayerNorm, forward only (inference-only v0).
  *
- * `eps` is an MTFP cell in real units (e.g. m4t_mtfp_from_real_hostside(1e-5)
- * if you generated weights offline). The function squares it internally for
+ * `eps` is an MTFP cell representing epsilon in real units (e.g. for
+ * eps=1e-5, the cell value is round(1e-5 * 59049) = 1, computed offline
+ * by the weight converter). The function squares it internally for
  * comparison against variance. */
 void m4t_mtfp_layernorm(
     m4t_mtfp_t* dst,

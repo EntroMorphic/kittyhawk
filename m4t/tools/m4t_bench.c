@@ -35,11 +35,15 @@ static inline uint64_t now_ticks(void) {
     return mach_absolute_time();
 }
 
+/* Assumed clock rate in GHz. M4 P-core boost is ~4.4 GHz; E-cores run
+ * at ~2.7 GHz. If this bench runs on an E-core, cycle estimates will be
+ * inflated by ~60%. Pin to a P-core via `taskpolicy -b deny` or check
+ * results against known instruction counts. */
+#define M4T_BENCH_CLOCK_GHZ 4.4
+
 static double ticks_to_cycles(uint64_t ticks) {
-    /* M4 P-core runs at ~4.4 GHz. Convert ticks→ns→cycles.
-     * This is approximate; exact clock varies with thermal state. */
     double ns = (double)ticks * ticks_to_ns;
-    return ns * 4.4;  /* 4.4 GHz = 4.4 cycles/ns */
+    return ns * M4T_BENCH_CLOCK_GHZ;
 }
 
 /* ── Bench infrastructure ──────────────────────────────────────────────── */
