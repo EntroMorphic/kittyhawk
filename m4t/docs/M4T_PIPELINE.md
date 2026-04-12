@@ -36,7 +36,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 | Region | Budget | Current (.text) | Headroom |
 |---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 15.3 KB (MTFP19 + trit ops + reducers + route) | 8.7 KB |
-| L1d (LUTs + constants) | 4 KB | ~0.2 KB (decode LUT + 5 op LUTs) | 3.8 KB |
+| L1i (opcode bodies) | 24 KB | 14.5 KB (MTFP19 + trit ops + reducers + route) | 9.5 KB |
+| L1d (LUTs + constants) | 4 KB | ~0.3 KB (decode LUT + 5 op LUTs) | 3.7 KB |
 
 Updated as new opcodes land.

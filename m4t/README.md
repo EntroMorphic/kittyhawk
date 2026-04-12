@@ -30,6 +30,12 @@ Pack/unpack between `m4t_trit_t` buffers and 2-bit packed `uint8_t` containers. 
 ### Trit operations (`m4t_trit_ops.h`)
 Six element-wise ops on packed-trit buffers via TBL lookup: `mul`, `sat_add`, `max`, `min`, `eq`, `neg`. ~28 NEON instructions per 64 trits (binary ops) or ~5 instructions (neg, via bit-swap).
 
+### Trit reducers (`m4t_trit_reducers.h`)
+Collapse a packed-trit vector to scalar counts via masked VCNT: `signed_sum` (count(+1) − count(−1)), `sparsity` (count nonzero), `counts` (separate pos/neg). ~14 NEON instructions per 64 trits. Building blocks for weight-derived signature computation.
+
+### Routing primitives (`m4t_route.h`)
+Five primitives decomposing k-of-T ternary routing: `sign_extract` (int64 → packed-trit signs), `distance_batch` (batch popcount over T tile signatures), `topk_abs` (top-k by |score| via bitmask selection), `apply_signed` (signed accumulation of tile outputs, NEON for both +1 and −1), `signature_update` (compound: column-sum → mean-subtract → sign-extract, caller-provided scratch).
+
 ### Ternary matmul (`m4t_ternary_matmul.h`)
 MTFP19 activations × 2-bit packed ternary weights → MTFP19 output. Trit-decode via `vqtbl1q_s8`, sign-select via `vmulq_s32`, int64 accumulator.
 
@@ -46,7 +52,7 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets erro
 
 ## Test count
 
-35 tests across 2 binaries (`test_m4t_smoke`, `test_m4t_trit_ops`), all with hand-derived integer golden values. Zero float in the test suite.
+54 test functions across 4 binaries (`test_m4t_smoke`, `test_m4t_trit_ops`, `test_m4t_trit_reducers`, `test_m4t_route`), all with hand-derived integer golden values. Zero float in the test suite. Includes an end-to-end mini routing pass that composes distance_batch → topk_abs → apply_signed.
 
 ## Tools
 
@@ -61,12 +67,12 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets erro
 
 | Region | Budget | Current | Used |
 |---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 10.3 KB | 42% |
-| L1d (LUTs + constants) | 4 KB | ~0.2 KB | 5% |
+| L1i (opcode bodies) | 24 KB | 14.5 KB | 58% |
+| L1d (LUTs + constants) | 4 KB | ~0.3 KB | 8% |
 
 ## Pipeline
 
-See `docs/M4T_PIPELINE.md` for the remaining items: masked-VCNT reducers, routing primitives, MTFP39 wide path, MTFP4 SDOT path, opcode tables, and measurement tools.
+Items 1–3 and 7 are done: TBL trit ops, masked-VCNT reducers, routing primitives, and measurement tools. See `docs/M4T_PIPELINE.md` for remaining items: MTFP39 wide path, MTFP4 SDOT path, function-pointer opcode tables, and glyph wrapper layer.
 
 ## License
 
