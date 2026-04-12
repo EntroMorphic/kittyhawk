@@ -22,7 +22,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ## Phase C — Opcode tables and tooling
 
-- [ ] **6. Function-pointer opcode tables** — `m4t_trit_ops[]`, `m4t_mtfp_ops[]`, `m4t_route_ops[]` as extern const arrays of function pointers. Enum indices. New files: `src/m4t_ops.{h,c}`. Depends on items 1–5 for population.
+- [x] **6. Function-pointer opcode tables** — Three `extern const` tables: `m4t_trit_ops[]` (6 entries, uniform signature), `m4t_mtfp_ops[]` (11 entries, shape-tagged), `m4t_route_ops[]` (5 entries, named). Enum indices for all. Round-trip test verifies dispatch through every table produces same results as direct calls. Contract clause 6 (indexable) is now honored.
 
 - [x] **7. Size-check and cycle-count tools** — `tools/m4t_size_check.sh` (M1: link-time `.text` budget enforcement, wired into CMake post-build), `tools/m4t_bench.c` (M2: per-opcode cycle counting via `mach_absolute_time`), `tools/m4t_lut_gen.c` (host-side GELU+exp table generator), `tools/m4t_trit_golden.c` (exhaustive truth tables for TBL opcodes). All four built and verified.
 
