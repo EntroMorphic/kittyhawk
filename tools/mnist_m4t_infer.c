@@ -177,9 +177,7 @@ int main(int argc, char** argv) {
     m4t_mtfp_t* hz = malloc((size_t)D * 2 * sizeof(m4t_mtfp_t));
     m4t_mtfp_t* hh = malloc((size_t)D * 2 * sizeof(m4t_mtfp_t));
     m4t_mtfp_t* lo = malloc((size_t)n_classes * sizeof(m4t_mtfp_t));
-    uint8_t* query_sig = malloc((size_t)Dp1);
-    uint8_t mask[Dp1];
-    memset(mask, 0xFF, (size_t)Dp1);
+    (void)Dp1;  /* no longer needed for Hamming routing */
 
     /* Inference loop */
     int correct = 0;
@@ -198,18 +196,14 @@ int main(int argc, char** argv) {
         /* LayerNorm */
         m4t_mtfp_layernorm(ln_out, po, ln_w, ln_b, eps, 1, D);
 
-        /* Routing: compute scores, pick top-K */
-        /* Convert ln_out to a simple sign signature for routing distance */
-        int64_t ln_vals[D];
-        for (int d = 0; d < D; d++) ln_vals[d] = (int64_t)ln_out[d];
-        m4t_route_sign_extract(query_sig, ln_vals, D);
+        /* Routing: score[t] = dot(ln_out, sig_t) via ternary matmul.
+         * This is the correct approach — trix-z uses MTFP dot products
+         * for routing, not Hamming distance on sign-extracted signatures. */
+        m4t_mtfp_t scores_mtfp[T];
+        m4t_mtfp_ternary_matmul_bt(scores_mtfp, ln_out, tile_sigs, 1, D, T);
 
-        int32_t distances[T];
-        m4t_route_distance_batch(distances, query_sig, tile_sigs, mask, T, D);
-
-        /* Negate distances → affinity scores */
         int32_t scores[T];
-        for (int t = 0; t < T; t++) scores[t] = -distances[t];
+        for (int t = 0; t < T; t++) scores[t] = (int32_t)scores_mtfp[t];
 
         m4t_route_decision_t decisions[K];
         m4t_route_topk_abs(decisions, scores, T, K);
@@ -221,8 +215,9 @@ int main(int argc, char** argv) {
             m4t_trit_t sign = decisions[sel].sign;
             if (tidx < 0) continue;
 
-            /* tile FFN: W1 @ ln_out → GELU → W2 → + bias */
+            /* tile FFN: W1 @ ln_out → fan_in_normalize → bias → GELU → W2 → bias */
             m4t_mtfp_ternary_matmul_bt(tile_h, ln_out, tile_W1_packed[tidx], 1, D, D);
+            m4t_mtfp_fan_in_normalize(tile_h, D, D);  /* prevent GELU saturation */
             m4t_mtfp_bias_add(tile_h, tile_b1[tidx], 1, D);
             m4t_mtfp_gelu(tile_h, tile_h, D);
             m4t_mtfp_ternary_matmul_bt(tile_out, tile_h, tile_W2_packed[tidx], 1, D, D);
@@ -278,7 +273,6 @@ int main(int argc, char** argv) {
     free(z1); free(h1); free(po); free(ln_out);
     free(tile_out); free(tile_h); free(fo);
     free(hz); free(hh); free(lo);
-    free(query_sig);
 
     return (accuracy >= 0.90f) ? 0 : 1;
 }
