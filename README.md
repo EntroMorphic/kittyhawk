@@ -1,6 +1,6 @@
 # GLYPH
 
-Glass-box ternary routing architecture for interpretable AI on Apple Silicon.
+Glass-box ternary routing architecture for interpretable AI on Apple Silicon. Built on Trit Lattice LSH — classification as geometric partitioning on the MTFP lattice.
 
 ## Architecture
 
@@ -45,6 +45,16 @@ cd .. && cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 ```
 
 Requires aarch64 + NEON (Apple Silicon or compatible ARM).
+
+## Results
+
+| Path | MNIST Accuracy | Float in pipeline |
+|---|---|---|
+| Trit Lattice LSH (256 random ternary projections) | 79.74% | **zero** |
+| Float-trained, M4T all-ternary inference | 97.46% | training only |
+| trix-z reference (float + STE) | 97.41% | everywhere |
+
+The Trit Lattice LSH path uses zero float anywhere — not in data loading, not in "training" (integer statistics on the lattice), not in inference. See `m4t/docs/TRIT_LATTICE_LSH.md`.
 
 ## Status
 

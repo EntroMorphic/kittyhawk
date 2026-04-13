@@ -6,7 +6,7 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ---
 
-- [ ] **LUT tables committed.** Generator exists (`tools/m4t_lut_gen.c`, 708K GELU + 708K exp entries, 5.41 MB). Output `src/m4t_mtfp_tables.c` has not been generated and committed. Blocks softmax and GELU.
+- [x] **LUT tables committed.** `src/m4t_mtfp_tables.c` generated and committed. GELU, softmax, and argmax runtime functions in `m4t_mtfp_nonlinear.c`.
 
 - [ ] **Softmax and GELU runtime.** LUT-backed lookup functions in `m4t_mtfp.{h,c}`. Table lookup is pure integer — the LUTs are the only float-derived artifact, computed offline by the generator. Blocks any transformer forward pass.
 
