@@ -120,11 +120,20 @@ int main(int argc, char** argv) {
            input_dim, D, T, K, H_proj, n_classes);
 
     int cnt;
-    /* Projection */
-    m4t_mtfp_t* pW1 = load_floats_as_mtfp(fw, &cnt); /* [H_proj, input_dim] */
+    /* Projection — ALL weights are ternary now */
+    m4t_trit_t* pW1_trit = load_ternary(fw, &cnt); /* [H_proj, input_dim] */
     m4t_mtfp_t* pb1 = load_floats_as_mtfp(fw, &cnt); /* [H_proj] */
-    m4t_mtfp_t* pW2 = load_floats_as_mtfp(fw, &cnt); /* [D, H_proj] */
+    m4t_trit_t* pW2_trit = load_ternary(fw, &cnt); /* [D, H_proj] */
     m4t_mtfp_t* pb2 = load_floats_as_mtfp(fw, &cnt); /* [D] */
+
+    /* Pack projection weights */
+    int pW1_Kp = M4T_TRIT_PACKED_BYTES(input_dim);
+    uint8_t* pW1_packed = malloc((size_t)H_proj * pW1_Kp);
+    m4t_pack_trits_rowmajor(pW1_packed, pW1_trit, H_proj, input_dim);
+
+    int pW2_Kp = M4T_TRIT_PACKED_BYTES(H_proj);
+    uint8_t* pW2_packed = malloc((size_t)D * pW2_Kp);
+    m4t_pack_trits_rowmajor(pW2_packed, pW2_trit, D, H_proj);
 
     /* FFN LayerNorm */
     m4t_mtfp_t* ln_w = load_floats_as_mtfp(fw, &cnt); /* [D] */
@@ -157,11 +166,19 @@ int main(int argc, char** argv) {
     m4t_mtfp_t output_scale = os_f[0];
     free(os_f);
 
-    /* Head */
-    m4t_mtfp_t* hW1 = load_floats_as_mtfp(fw, &cnt); /* [D*2, D] */
+    /* Head — ternary too */
+    m4t_trit_t* hW1_trit = load_ternary(fw, &cnt); /* [D*2, D] */
     m4t_mtfp_t* hb1 = load_floats_as_mtfp(fw, &cnt); /* [D*2] */
-    m4t_mtfp_t* hW2 = load_floats_as_mtfp(fw, &cnt); /* [n_classes, D*2] */
+    m4t_trit_t* hW2_trit = load_ternary(fw, &cnt); /* [n_classes, D*2] */
     m4t_mtfp_t* hb2 = load_floats_as_mtfp(fw, &cnt); /* [n_classes] */
+
+    int hW1_Kp = M4T_TRIT_PACKED_BYTES(D);
+    uint8_t* hW1_packed = malloc((size_t)(D*2) * hW1_Kp);
+    m4t_pack_trits_rowmajor(hW1_packed, hW1_trit, D*2, D);
+
+    int hW2_Kp = M4T_TRIT_PACKED_BYTES(D*2);
+    uint8_t* hW2_packed = malloc((size_t)n_classes * hW2_Kp);
+    m4t_pack_trits_rowmajor(hW2_packed, hW2_trit, n_classes, D*2);
 
     fclose(fw);
     printf("Weights loaded and converted to MTFP19\n");
@@ -199,11 +216,13 @@ int main(int argc, char** argv) {
     for (int s = 0; s < nv; s++) {
         m4t_mtfp_t* x = xv + (size_t)s * input_dim;
 
-        /* Projection: z1 = x @ pW1^T + pb1 */
-        m4t_mtfp_matmul_bt(z1, x, pW1, 1, input_dim, H_proj);
+        /* Projection: ALL ternary matmul — no dense MTFP×MTFP */
+        m4t_mtfp_ternary_matmul_bt(z1, x, pW1_packed, 1, input_dim, H_proj);
+        m4t_mtfp_fan_in_normalize(z1, H_proj, input_dim);
         m4t_mtfp_bias_add(z1, pb1, 1, H_proj);
         m4t_mtfp_gelu(h1, z1, H_proj);
-        m4t_mtfp_matmul_bt(po, h1, pW2, 1, H_proj, D);
+        m4t_mtfp_ternary_matmul_bt(po, h1, pW2_packed, 1, H_proj, D);
+        m4t_mtfp_fan_in_normalize(po, D, H_proj);
         m4t_mtfp_bias_add(po, pb2, 1, D);
 
         /* LayerNorm */
@@ -247,11 +266,13 @@ int main(int argc, char** argv) {
         m4t_mtfp_vec_scale(fo, fo, output_scale, D);
         m4t_mtfp_vec_add_inplace(fo, po, D);  /* residual */
 
-        /* Head: fo → hz → GELU → lo */
-        m4t_mtfp_matmul_bt(hz, fo, hW1, 1, D, D * 2);
+        /* Head: ALL ternary matmul */
+        m4t_mtfp_ternary_matmul_bt(hz, fo, hW1_packed, 1, D, D * 2);
+        m4t_mtfp_fan_in_normalize(hz, D * 2, D);
         m4t_mtfp_bias_add(hz, hb1, 1, D * 2);
         m4t_mtfp_gelu(hh, hz, D * 2);
-        m4t_mtfp_matmul_bt(lo, hh, hW2, 1, D * 2, n_classes);
+        m4t_mtfp_ternary_matmul_bt(lo, hh, hW2_packed, 1, D * 2, n_classes);
+        m4t_mtfp_fan_in_normalize(lo, n_classes, D * 2);
         m4t_mtfp_bias_add(lo, hb2, 1, n_classes);
 
         /* Argmax */
@@ -272,7 +293,8 @@ int main(int argc, char** argv) {
 
     /* Cleanup */
     free(xv); free(yv);
-    free(pW1); free(pb1); free(pW2); free(pb2);
+    free(pW1_trit); free(pW1_packed); free(pb1);
+    free(pW2_trit); free(pW2_packed); free(pb2);
     free(ln_w); free(ln_b);
     for (int t = 0; t < T; t++) {
         free(tile_W1[t]); free(tile_b1[t]);
@@ -282,7 +304,8 @@ int main(int argc, char** argv) {
     free(tile_W1); free(tile_b1); free(tile_W2); free(tile_b2);
     free(tile_W1_packed); free(tile_W2_packed);
     free(tile_sigs);
-    free(hW1); free(hb1); free(hW2); free(hb2);
+    free(hW1_trit); free(hW1_packed); free(hb1);
+    free(hW2_trit); free(hW2_packed); free(hb2);
     free(z1); free(h1); free(po); free(ln_out);
     free(tile_out); free(tile_h); free(fo);
     free(hz); free(hh); free(lo);
