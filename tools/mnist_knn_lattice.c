@@ -245,33 +245,60 @@ int main(int argc, char** argv) {
 
     /* ── Step 4: Combined pixel + projection ───────────────────────────── */
 
-    printf("=== Step 4: Combined pixel+projection (%d dims) + k-NN ===\n",
-           INPUT_DIM + N_PROJ);
+    /* ── Step 4: Sweep k values on deskewed pixel-space ───────────────── */
 
-    int combined_dim = INPUT_DIM + N_PROJ;
-    m4t_mtfp_t* train_combined = malloc((size_t)n_train * combined_dim * sizeof(m4t_mtfp_t));
-    m4t_mtfp_t* test_combined = malloc((size_t)n_test * combined_dim * sizeof(m4t_mtfp_t));
-
-    for (int i = 0; i < n_train; i++) {
-        memcpy(train_combined + (size_t)i * combined_dim,
-               x_train + (size_t)i * INPUT_DIM, INPUT_DIM * sizeof(m4t_mtfp_t));
-        memcpy(train_combined + (size_t)i * combined_dim + INPUT_DIM,
-               train_proj + (size_t)i * N_PROJ, N_PROJ * sizeof(m4t_mtfp_t));
-    }
-    for (int i = 0; i < n_test; i++) {
-        memcpy(test_combined + (size_t)i * combined_dim,
-               x_test + (size_t)i * INPUT_DIM, INPUT_DIM * sizeof(m4t_mtfp_t));
-        memcpy(test_combined + (size_t)i * combined_dim + INPUT_DIM,
-               test_proj + (size_t)i * N_PROJ, N_PROJ * sizeof(m4t_mtfp_t));
+    printf("=== Step 4: Deskewed pixel-space k sweep ===\n");
+    int k_vals[] = {1, 3, 4, 5, 7};
+    for (int ki = 0; ki < 5; ki++) {
+        char label[64];
+        snprintf(label, 64, "pixel deskewed k=%d L2", k_vals[ki]);
+        run_experiment(label, x_test, n_test, y_test,
+                       x_train, n_train, y_train, INPUT_DIM, k_vals[ki]);
     }
 
-    run_experiment("combined deskewed", test_combined, n_test, y_test,
-                   train_combined, n_train, y_train, combined_dim, K);
+    /* ── Step 5: Deskewed pixel-space with L1 distance ─────────────── */
+
+    printf("=== Step 5: Deskewed pixel-space k=3 L1 ===\n");
+    {
+        int correct = 0;
+        for (int s = 0; s < n_test; s++) {
+            const m4t_mtfp_t* query = x_test + (size_t)s * INPUT_DIM;
+            int64_t knn_dist[3] = {INT64_MAX, INT64_MAX, INT64_MAX};
+            int knn_label[3] = {-1, -1, -1};
+
+            for (int i = 0; i < n_train; i++) {
+                const m4t_mtfp_t* ref = x_train + (size_t)i * INPUT_DIM;
+                int64_t dist = 0;
+                for (int p = 0; p < INPUT_DIM; p++) {
+                    int64_t d = (int64_t)query[p] - (int64_t)ref[p];
+                    dist += (d >= 0) ? d : -d;
+                }
+                if (dist < knn_dist[2]) {
+                    knn_dist[2] = dist; knn_label[2] = y_train[i];
+                    for (int j = 1; j >= 0; j--) {
+                        if (knn_dist[j+1] < knn_dist[j]) {
+                            int64_t td=knn_dist[j]; knn_dist[j]=knn_dist[j+1]; knn_dist[j+1]=td;
+                            int tl=knn_label[j]; knn_label[j]=knn_label[j+1]; knn_label[j+1]=tl;
+                        } else break;
+                    }
+                }
+            }
+            int votes[N_CLASSES]; memset(votes,0,sizeof(votes));
+            for (int j=0;j<3;j++) if(knn_label[j]>=0) votes[knn_label[j]]++;
+            int pred=0;
+            for (int c=1;c<N_CLASSES;c++) if(votes[c]>votes[pred]) pred=c;
+            if (pred == y_test[s]) correct++;
+            if (s>0 && s%2000==0)
+                printf("    %d/%d — %d.%02d%%\n", s, n_test,
+                       correct*100/s, (correct*10000/s)%100);
+        }
+        printf("  pixel deskewed k=3 L1: %d/%d = %d.%02d%%\n\n",
+               correct, n_test, correct*100/n_test, (correct*10000/n_test)%100);
+    }
 
     printf("Zero float. Zero gradients. Pure lattice geometry.\n");
 
     free(x_train); free(y_train); free(x_test); free(y_test);
     free(proj_w); free(proj_packed); free(train_proj); free(test_proj);
-    free(train_combined); free(test_combined);
     return 0;
 }
