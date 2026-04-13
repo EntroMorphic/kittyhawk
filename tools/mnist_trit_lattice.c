@@ -1,18 +1,15 @@
 /*
  * mnist_trit_lattice.c — MNIST via Trit Lattice LSH. Zero float.
  *
- * Three approaches tested:
- *   1. Centroid signatures (sign of centroid - global) → ternary matmul
- *   2. Random ternary projections → L1 nearest centroid
- *   3. Multi-trit routes: random projection → MTFP4 route weights →
- *      weighted accumulation of class-specific tile contributions
+ * Two-stage architecture:
+ *   Stage 1: Random ternary projection → L1 nearest centroid → top-K candidates
+ *   Stage 2: Pairwise ternary refinement among candidates → final prediction
  *
  * Usage: ./mnist_trit_lattice <mnist_dir>
  */
 
 #include "m4t_types.h"
 #include "m4t_mtfp.h"
-#include "m4t_mtfp4.h"
 #include "m4t_trit_pack.h"
 #include "m4t_ternary_matmul.h"
 
@@ -23,14 +20,12 @@
 
 #define INPUT_DIM 784
 #define N_CLASSES 10
-
-/* ── Data loading — zero float ─────────────────────────────────────────── */
+#define N_PAIRS   45  /* C(10, 2) */
 
 static uint32_t read_u32_be(FILE* f) {
     uint8_t b[4]; fread(b,1,4,f);
     return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|((uint32_t)b[2]<<8)|(uint32_t)b[3];
 }
-
 static m4t_mtfp_t* load_images_mtfp(const char* path, int* n) {
     FILE* f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "Cannot open %s\n", path); exit(1); }
@@ -43,7 +38,6 @@ static m4t_mtfp_t* load_images_mtfp(const char* path, int* n) {
         data[i] = (m4t_mtfp_t)(((int32_t)raw[i] * M4T_MTFP_SCALE + 127) / 255);
     free(raw); return data;
 }
-
 static int* load_labels(const char* path, int* n) {
     FILE* f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "Cannot open %s\n", path); exit(1); }
@@ -54,10 +48,7 @@ static int* load_labels(const char* path, int* n) {
     free(raw); return labels;
 }
 
-/* ── PRNG ──────────────────────────────────────────────────────────────── */
-
 static uint32_t rng_s[4] = { 42, 123, 456, 789 };
-
 static uint32_t rng_next(void) {
     uint32_t result = rng_s[0] + rng_s[3];
     uint32_t t = rng_s[1] << 9;
@@ -67,13 +58,8 @@ static uint32_t rng_next(void) {
     return result;
 }
 
-/* ── Main ──────────────────────────────────────────────────────────────── */
-
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <mnist_dir>\n", argv[0]);
-        return 1;
-    }
+    if (argc < 2) { fprintf(stderr, "Usage: %s <mnist_dir>\n", argv[0]); return 1; }
 
     char path[512]; int n_train, n_test;
     snprintf(path, 512, "%s/train-images-idx3-ubyte", argv[1]);
@@ -85,183 +71,175 @@ int main(int argc, char** argv) {
     snprintf(path, 512, "%s/t10k-labels-idx1-ubyte", argv[1]);
     int* y_test = load_labels(path, &n_test);
 
-    printf("Trit Lattice LSH — MNIST (zero float)\n");
+    printf("Trit Lattice LSH — Two-Stage MNIST (zero float)\n");
     printf("Loaded %d train, %d test\n\n", n_train, n_test);
-
-    /* ── Compute class counts ──────────────────────────────────────────── */
 
     int class_counts[N_CLASSES];
     memset(class_counts, 0, sizeof(class_counts));
     for (int i = 0; i < n_train; i++) class_counts[y_train[i]]++;
 
-    /* ── Experiment: Multi-trit routed projection ──────────────────────── */
-    /*
-     * Architecture:
-     *   1. Random ternary projection: [N_PROJ, 784] → project images to N_PROJ dims
-     *   2. Per-class, compute multi-trit "route" weights in projection space:
-     *      route_c[p] = quantize(class_centroid_proj[p] - global_centroid_proj[p])
-     *      to MTFP4 (4-trit, range ±40)
-     *   3. Classify: score_c = sum_p(route_c[p] * projected_image[p])
-     *      This is a WEIGHTED sum — each projection dimension contributes
-     *      proportionally to how discriminative it is for class c.
-     *
-     * The route weights are multi-trit: they carry magnitude, not just sign.
-     * The multiplication route × projection is int8 × int32 → int32.
-     * No __int128. No SCALE division. The route is a small integer.
-     */
+    /* ── Random ternary projection ─────────────────────────────────────── */
 
-    #define N_PROJ 256
+    int n_proj_vals[] = { 256, 512, 1024 };
+    int n_proj_count = 3;
 
-    printf("=== Multi-trit routed projection (N_PROJ=%d) ===\n\n", N_PROJ);
+    for (int pi = 0; pi < n_proj_count; pi++) {
+        int N_PROJ = n_proj_vals[pi];
 
-    /* Step 1: Generate random ternary projection matrix */
-    printf("Generating %d random ternary projections...\n", N_PROJ);
-    m4t_trit_t* proj_weights = malloc((size_t)N_PROJ * INPUT_DIM);
-    for (int i = 0; i < N_PROJ * INPUT_DIM; i++) {
-        uint32_t r = rng_next() % 3;
-        proj_weights[i] = (r == 0) ? -1 : (r == 1) ? 0 : 1;
-    }
-    int proj_Dp = M4T_TRIT_PACKED_BYTES(INPUT_DIM);
-    uint8_t* proj_packed = malloc((size_t)N_PROJ * proj_Dp);
-    m4t_pack_trits_rowmajor(proj_packed, proj_weights, N_PROJ, INPUT_DIM);
+        /* Reset PRNG for reproducibility across projection counts */
+        rng_s[0] = 42; rng_s[1] = 123; rng_s[2] = 456; rng_s[3] = 789;
 
-    /* Step 2: Project all training images */
-    printf("Projecting %d training images...\n", n_train);
-    m4t_mtfp_t* train_proj = malloc((size_t)n_train * N_PROJ * sizeof(m4t_mtfp_t));
-    for (int i = 0; i < n_train; i++) {
-        m4t_mtfp_ternary_matmul_bt(train_proj + (size_t)i * N_PROJ,
-            x_train + (size_t)i * INPUT_DIM, proj_packed, 1, INPUT_DIM, N_PROJ);
-    }
+        printf("=== N_PROJ = %d ===\n", N_PROJ);
 
-    /* Step 3: Class centroids in projection space */
-    printf("Computing class centroids in projection space...\n");
-    int64_t proj_class_sums[N_CLASSES][N_PROJ];
-    memset(proj_class_sums, 0, sizeof(proj_class_sums));
-    for (int i = 0; i < n_train; i++) {
-        int c = y_train[i];
-        for (int p = 0; p < N_PROJ; p++)
-            proj_class_sums[c][p] += (int64_t)train_proj[(size_t)i * N_PROJ + p];
-    }
-    int32_t proj_centroids[N_CLASSES][N_PROJ];
-    for (int c = 0; c < N_CLASSES; c++)
-        for (int p = 0; p < N_PROJ; p++)
-            proj_centroids[c][p] = (int32_t)(proj_class_sums[c][p] / class_counts[c]);
-
-    /* Global centroid in projection space */
-    int32_t global_proj[N_PROJ];
-    for (int p = 0; p < N_PROJ; p++) {
-        int64_t sum = 0;
-        for (int c = 0; c < N_CLASSES; c++) sum += (int64_t)proj_centroids[c][p];
-        global_proj[p] = (int32_t)(sum / N_CLASSES);
-    }
-
-    /* Step 4: Multi-trit route weights = MTFP4(class_centroid - global) */
-    printf("Computing multi-trit route weights (MTFP4)...\n");
-
-    /* Scale: map the centroid diffs to MTFP4 range (±40).
-     * Find max absolute diff to set the scale. */
-    int64_t max_abs_diff = 0;
-    for (int c = 0; c < N_CLASSES; c++)
-        for (int p = 0; p < N_PROJ; p++) {
-            int64_t d = (int64_t)proj_centroids[c][p] - (int64_t)global_proj[p];
-            if (d < 0) d = -d;
-            if (d > max_abs_diff) max_abs_diff = d;
+        m4t_trit_t* proj_w = malloc((size_t)N_PROJ * INPUT_DIM);
+        for (int i = 0; i < N_PROJ * INPUT_DIM; i++) {
+            uint32_t r = rng_next() % 3;
+            proj_w[i] = (r == 0) ? -1 : (r == 1) ? 0 : 1;
         }
-    /* Scale so max diff maps to ±M4T_MTFP4_MAX_VAL (40) */
-    int64_t route_scale = (max_abs_diff > 0) ? max_abs_diff / M4T_MTFP4_MAX_VAL : 1;
-    if (route_scale < 1) route_scale = 1;
+        int proj_Dp = M4T_TRIT_PACKED_BYTES(INPUT_DIM);
+        uint8_t* proj_packed = malloc((size_t)N_PROJ * proj_Dp);
+        m4t_pack_trits_rowmajor(proj_packed, proj_w, N_PROJ, INPUT_DIM);
 
-    m4t_mtfp4_t route_weights[N_CLASSES][N_PROJ];
-    for (int c = 0; c < N_CLASSES; c++) {
-        for (int p = 0; p < N_PROJ; p++) {
-            int64_t diff = (int64_t)proj_centroids[c][p] - (int64_t)global_proj[p];
-            int32_t q = (int32_t)(diff / route_scale);
-            if (q > M4T_MTFP4_MAX_VAL) q = M4T_MTFP4_MAX_VAL;
-            if (q < -M4T_MTFP4_MAX_VAL) q = -M4T_MTFP4_MAX_VAL;
-            route_weights[c][p] = (m4t_mtfp4_t)q;
+        /* Project training images */
+        m4t_mtfp_t* train_proj = malloc((size_t)n_train * N_PROJ * sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n_train; i++)
+            m4t_mtfp_ternary_matmul_bt(train_proj + (size_t)i * N_PROJ,
+                x_train + (size_t)i * INPUT_DIM, proj_packed, 1, INPUT_DIM, N_PROJ);
+
+        /* Class centroids in projection space */
+        int64_t pcs[N_CLASSES][1024]; /* max N_PROJ */
+        memset(pcs, 0, sizeof(int64_t) * N_CLASSES * N_PROJ);
+        for (int i = 0; i < n_train; i++) {
+            int c = y_train[i];
+            for (int p = 0; p < N_PROJ; p++)
+                pcs[c][p] += (int64_t)train_proj[(size_t)i * N_PROJ + p];
         }
-    }
+        int32_t centroids[N_CLASSES][1024];
+        for (int c = 0; c < N_CLASSES; c++)
+            for (int p = 0; p < N_PROJ; p++)
+                centroids[c][p] = (int32_t)(pcs[c][p] / class_counts[c]);
 
-    printf("  route_scale = %lld (max_abs_diff = %lld)\n",
-           (long long)route_scale, (long long)max_abs_diff);
-
-    /* Step 5: Inference — multi-trit weighted scoring */
-    printf("Running inference (multi-trit routes)...\n");
-
-    /* Method A: Single-trit (sign only) — baseline for comparison */
-    int correct_1trit = 0;
-    /* Method B: Multi-trit (MTFP4 weighted) */
-    int correct_mtrit = 0;
-    /* Method C: L1 centroid (from previous experiment) */
-    int correct_l1 = 0;
-
-    m4t_mtfp_t test_proj[N_PROJ];
-
-    for (int s = 0; s < n_test; s++) {
-        m4t_mtfp_t* img = x_test + (size_t)s * INPUT_DIM;
-        m4t_mtfp_ternary_matmul_bt(test_proj, img, proj_packed, 1, INPUT_DIM, N_PROJ);
-
-        /* Method A: single-trit scoring (sign of centroid diff × projected image) */
-        {
-            int64_t scores[N_CLASSES];
-            memset(scores, 0, sizeof(scores));
-            for (int c = 0; c < N_CLASSES; c++) {
+        /* Pairwise ternary signatures in projection space */
+        m4t_trit_t pair_sigs[N_PAIRS][1024];
+        int pair_i[N_PAIRS], pair_j[N_PAIRS];
+        int np = 0;
+        for (int i = 0; i < N_CLASSES; i++)
+            for (int j = i + 1; j < N_CLASSES; j++) {
+                pair_i[np] = i; pair_j[np] = j;
                 for (int p = 0; p < N_PROJ; p++) {
-                    int32_t diff = proj_centroids[c][p] - global_proj[p];
-                    int8_t sign = (diff > 0) ? 1 : (diff < 0) ? -1 : 0;
-                    scores[c] += (int64_t)sign * (int64_t)test_proj[p];
+                    int32_t d = centroids[i][p] - centroids[j][p];
+                    pair_sigs[np][p] = (d > 0) ? 1 : (d < 0) ? -1 : 0;
                 }
+                np++;
             }
-            int pred = 0;
-            for (int c = 1; c < N_CLASSES; c++)
-                if (scores[c] > scores[pred]) pred = c;
-            if (pred == y_test[s]) correct_1trit++;
+
+        /* Pack pairwise signatures */
+        int pair_Dp = M4T_TRIT_PACKED_BYTES(N_PROJ);
+        uint8_t* pair_packed = malloc((size_t)N_PAIRS * pair_Dp);
+        m4t_pack_trits_rowmajor(pair_packed, (const m4t_trit_t*)pair_sigs,
+                                 N_PAIRS, N_PROJ);
+
+        /* ── Inference ─────────────────────────────────────────────────── */
+
+        int correct_l1 = 0;       /* L1 only */
+        int correct_2stage_3 = 0; /* L1 top-3 → pairwise refine */
+        int correct_2stage_5 = 0; /* L1 top-5 → pairwise refine */
+        m4t_mtfp_t test_proj[1024];
+        m4t_mtfp_t pair_scores[N_PAIRS];
+
+        for (int s = 0; s < n_test; s++) {
+            m4t_mtfp_ternary_matmul_bt(test_proj,
+                x_test + (size_t)s * INPUT_DIM, proj_packed, 1, INPUT_DIM, N_PROJ);
+
+            /* Stage 1: L1 distance to all centroids */
+            int64_t dists[N_CLASSES];
+            for (int c = 0; c < N_CLASSES; c++) {
+                int64_t d = 0;
+                for (int p = 0; p < N_PROJ; p++) {
+                    int64_t x = (int64_t)test_proj[p] - (int64_t)centroids[c][p];
+                    d += (x >= 0) ? x : -x;
+                }
+                dists[c] = d;
+            }
+
+            /* Rank by distance (insertion sort, N=10 is tiny) */
+            int ranked[N_CLASSES];
+            for (int c = 0; c < N_CLASSES; c++) ranked[c] = c;
+            for (int i = 1; i < N_CLASSES; i++) {
+                int key = ranked[i]; int64_t kd = dists[key];
+                int j = i - 1;
+                while (j >= 0 && dists[ranked[j]] > kd) { ranked[j+1] = ranked[j]; j--; }
+                ranked[j+1] = key;
+            }
+
+            /* L1-only prediction */
+            if (ranked[0] == y_test[s]) correct_l1++;
+
+            /* Stage 2: pairwise refinement among top-K candidates.
+             * Compute all 45 pairwise dot products in one ternary matmul. */
+            m4t_mtfp_ternary_matmul_bt(pair_scores, test_proj, pair_packed,
+                                        1, N_PROJ, N_PAIRS);
+
+            /* Top-3 refinement */
+            {
+                int K = 3;
+                int64_t votes[N_CLASSES];
+                memset(votes, 0, sizeof(votes));
+                for (int pi2 = 0; pi2 < N_PAIRS; pi2++) {
+                    int ci = pair_i[pi2], cj = pair_j[pi2];
+                    /* Only consider pairs where BOTH classes are in top-K */
+                    int ci_in = 0, cj_in = 0;
+                    for (int k = 0; k < K; k++) {
+                        if (ranked[k] == ci) ci_in = 1;
+                        if (ranked[k] == cj) cj_in = 1;
+                    }
+                    if (!ci_in || !cj_in) continue;
+                    /* Positive score → class i wins, negative → class j wins */
+                    if (pair_scores[pi2] > 0) votes[ci] += (int64_t)pair_scores[pi2];
+                    else votes[cj] -= (int64_t)pair_scores[pi2];
+                }
+                int pred = ranked[0];
+                int64_t best = votes[ranked[0]];
+                for (int k = 1; k < K; k++)
+                    if (votes[ranked[k]] > best) { best = votes[ranked[k]]; pred = ranked[k]; }
+                if (pred == y_test[s]) correct_2stage_3++;
+            }
+
+            /* Top-5 refinement */
+            {
+                int K = 5;
+                int64_t votes[N_CLASSES];
+                memset(votes, 0, sizeof(votes));
+                for (int pi2 = 0; pi2 < N_PAIRS; pi2++) {
+                    int ci = pair_i[pi2], cj = pair_j[pi2];
+                    int ci_in = 0, cj_in = 0;
+                    for (int k = 0; k < K; k++) {
+                        if (ranked[k] == ci) ci_in = 1;
+                        if (ranked[k] == cj) cj_in = 1;
+                    }
+                    if (!ci_in || !cj_in) continue;
+                    if (pair_scores[pi2] > 0) votes[ci] += (int64_t)pair_scores[pi2];
+                    else votes[cj] -= (int64_t)pair_scores[pi2];
+                }
+                int pred = ranked[0];
+                int64_t best = votes[ranked[0]];
+                for (int k = 1; k < K; k++)
+                    if (votes[ranked[k]] > best) { best = votes[ranked[k]]; pred = ranked[k]; }
+                if (pred == y_test[s]) correct_2stage_5++;
+            }
         }
 
-        /* Method B: multi-trit scoring (MTFP4 route × projected image) */
-        {
-            int64_t scores[N_CLASSES];
-            memset(scores, 0, sizeof(scores));
-            for (int c = 0; c < N_CLASSES; c++) {
-                for (int p = 0; p < N_PROJ; p++) {
-                    scores[c] += (int64_t)route_weights[c][p] * (int64_t)test_proj[p];
-                }
-            }
-            int pred = 0;
-            for (int c = 1; c < N_CLASSES; c++)
-                if (scores[c] > scores[pred]) pred = c;
-            if (pred == y_test[s]) correct_mtrit++;
-        }
+        printf("  L1 centroid only:              %d/%d = %d.%02d%%\n",
+               correct_l1, n_test, correct_l1*100/n_test, (correct_l1*10000/n_test)%100);
+        printf("  L1 top-3 → pairwise refine:    %d/%d = %d.%02d%%\n",
+               correct_2stage_3, n_test, correct_2stage_3*100/n_test, (correct_2stage_3*10000/n_test)%100);
+        printf("  L1 top-5 → pairwise refine:    %d/%d = %d.%02d%%\n\n",
+               correct_2stage_5, n_test, correct_2stage_5*100/n_test, (correct_2stage_5*10000/n_test)%100);
 
-        /* Method C: L1 nearest centroid in projection space */
-        {
-            int pred = 0;
-            int64_t best_dist = INT64_MAX;
-            for (int c = 0; c < N_CLASSES; c++) {
-                int64_t dist = 0;
-                for (int p = 0; p < N_PROJ; p++) {
-                    int64_t d = (int64_t)test_proj[p] - (int64_t)proj_centroids[c][p];
-                    dist += (d >= 0) ? d : -d;
-                }
-                if (dist < best_dist) { best_dist = dist; pred = c; }
-            }
-            if (pred == y_test[s]) correct_l1++;
-        }
+        free(proj_w); free(proj_packed); free(train_proj); free(pair_packed);
     }
 
-    printf("\nResults (N_PROJ=%d):\n", N_PROJ);
-    printf("  Single-trit routes (sign only):   %d/%d = %d.%02d%%\n",
-           correct_1trit, n_test,
-           correct_1trit * 100 / n_test, (correct_1trit * 10000 / n_test) % 100);
-    printf("  Multi-trit routes (MTFP4):        %d/%d = %d.%02d%%\n",
-           correct_mtrit, n_test,
-           correct_mtrit * 100 / n_test, (correct_mtrit * 10000 / n_test) % 100);
-    printf("  L1 nearest centroid:              %d/%d = %d.%02d%%\n",
-           correct_l1, n_test,
-           correct_l1 * 100 / n_test, (correct_l1 * 10000 / n_test) % 100);
-    printf("\nZero float. Zero gradients. Pure lattice geometry.\n");
-
+    printf("Zero float. Zero gradients. Pure lattice geometry.\n");
     free(x_train); free(y_train); free(x_test); free(y_test);
-    free(proj_weights); free(proj_packed); free(train_proj);
     return 0;
 }
