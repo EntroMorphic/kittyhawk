@@ -50,7 +50,7 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM).
 
 | Path | MNIST Accuracy | Float in pipeline |
 |---|---|---|
-| Trit Lattice LSH (256 random ternary projections) | 79.74% | **zero** |
+| Trit Lattice LSH (2048 random ternary projections) | 81.40% | **zero** |
 | Float-trained, M4T all-ternary inference | 97.46% | training only |
 | trix-z reference (float + STE) | 97.41% | everywhere |
 

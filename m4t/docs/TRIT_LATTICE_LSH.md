@@ -24,17 +24,39 @@ The M4T routing layer IS Trit Lattice LSH:
 
 All zero-float, zero-gradient, zero-training-iterations:
 
-| Method | Templates | Accuracy | Note |
-|---|---|---|---|
-| Class centroid signatures | 10 | 59.50% | sign(centroid − global_mean) |
-| Pairwise class signatures | 90 | 60.01% | sign(centroid_i − centroid_j) |
-| Random ternary projections + L1 centroid | 256 | **79.74%** | LSH with nearest centroid |
+| Method | Accuracy | Note |
+|---|---|---|
+| Class centroid signatures (10 templates) | 59.50% | sign(centroid − global_mean), direction-based |
+| Pairwise signatures (90 templates) | 60.01% | More templates of same quality don't help |
+| Single-trit routes in projection space | 59.44% | Direction-based, one template per class |
+| Multi-trit routes (MTFP4) in projection space | 58.87% | Magnitude on one direction doesn't help |
+| Pixel-space L1 nearest centroid | 66.85% | Raw pixels, no projection |
+| Random ternary proj (256) + L1 centroid | 80.12% | **Distance beats direction** |
+| Random ternary proj (1024) + L1 centroid | 81.14% | Scaling helps slightly |
+| **Random ternary proj (2048) + L1 centroid** | **81.40%** | **Best zero-float result** |
 
-Comparison:
-- Random chance: 10%
-- Float-trained trix-z (peak): 97.41%
-- Float-trained M4T inference: 97.46%
-- All-ternary STE from random init: 11.35% (dead)
+Two-stage experiments (all degraded accuracy):
+| Method | Accuracy | Note |
+|---|---|---|
+| L1 proj → pairwise ternary refine (top-3) | 65.63% | Direction overrides distance — hurts |
+| L1 proj → pixel-space L1 refine (top-3) | 73.71% | Weaker space overrides stronger — hurts |
+
+Comparison (float in pipeline):
+| Method | Accuracy | Float |
+|---|---|---|
+| trix-z reference (float + STE, peak) | 97.41% | everywhere |
+| M4T inference on float-trained weights | 97.46% | training only |
+| All-ternary STE from random init | 11.35% | training (dead) |
+
+## Key findings
+
+1. **The projection is the intelligence.** Random ternary projection to 256+ dims creates a better representation than raw pixels. L1 in projection space (80-81%) beats L1 in pixel space (67%) by 14 points.
+
+2. **Distance beats direction everywhere.** Every dot-product classifier (centroid signatures, pairwise templates, single/multi-trit routes) scored 58-60%. Every L1 distance classifier scored 67-81%.
+
+3. **Refinement hurts when the refining classifier is weaker.** Both pairwise ternary refinement and pixel-space L1 refinement degraded accuracy when overriding projection-space L1.
+
+4. **Scaling projections saturates around 81%.** The ceiling is the classifier (10 centroids), not the representation.
 
 ## Why it works
 
