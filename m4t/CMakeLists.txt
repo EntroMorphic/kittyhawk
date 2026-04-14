@@ -1,9 +1,11 @@
 # M4T — M4 Ternary Extensions
-# A generic, cache-resident ternary opcode substrate for aarch64 + NEON.
+# Routing-first ternary/MTFP compute substrate for aarch64 + NEON.
 # M4T IS TERNARY / MULTI-TRIT / MULTI-TRIT FLOATING POINT ONLY.
 #
 # Single-threaded at the opcode level. No libdispatch, no pthreads.
 # Threading is a consumer concern.
+#
+# See m4t/docs/M4T_SUBSTRATE.md for the canonical spec.
 
 cmake_minimum_required(VERSION 3.16)
 project(m4t LANGUAGES C)
@@ -36,16 +38,12 @@ endif()
 
 set(M4T_CORE_SRCS
     src/m4t_mtfp.c
+    src/m4t_mtfp4.c
     src/m4t_trit_pack.c
-    src/m4t_ternary_matmul.c
     src/m4t_trit_ops.c
     src/m4t_trit_reducers.c
+    src/m4t_ternary_matmul.c
     src/m4t_route.c
-    src/m4t_mtfp_w.c
-    src/m4t_mtfp4.c
-    src/m4t_ops.c
-    src/m4t_mtfp_nonlinear.c
-    src/m4t_mtfp_tables.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -59,9 +57,6 @@ set_target_properties(m4t PROPERTIES
 option(M4T_BUILD_TESTS "Build M4T tests" ON)
 if(M4T_BUILD_TESTS)
     enable_testing()
-    add_executable(test_m4t_smoke tests/test_m4t_smoke.c)
-    target_link_libraries(test_m4t_smoke PRIVATE m4t)
-    add_test(NAME m4t_smoke COMMAND test_m4t_smoke)
 
     add_executable(test_m4t_trit_ops tests/test_m4t_trit_ops.c)
     target_link_libraries(test_m4t_trit_ops PRIVATE m4t)
@@ -75,28 +70,7 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_route PRIVATE m4t)
     add_test(NAME m4t_route COMMAND test_m4t_route)
 
-    add_executable(test_m4t_mtfp_w tests/test_m4t_mtfp_w.c)
-    target_link_libraries(test_m4t_mtfp_w PRIVATE m4t)
-    add_test(NAME m4t_mtfp_w COMMAND test_m4t_mtfp_w)
-
     add_executable(test_m4t_mtfp4 tests/test_m4t_mtfp4.c)
     target_link_libraries(test_m4t_mtfp4 PRIVATE m4t)
     add_test(NAME m4t_mtfp4 COMMAND test_m4t_mtfp4)
-
-    add_executable(test_m4t_ops tests/test_m4t_ops.c)
-    target_link_libraries(test_m4t_ops PRIVATE m4t)
-    add_test(NAME m4t_ops COMMAND test_m4t_ops)
-endif()
-
-option(M4T_BUILD_TOOLS "Build M4T tools (bench, size check)" ON)
-if(M4T_BUILD_TOOLS)
-    add_executable(m4t_bench tools/m4t_bench.c)
-    target_link_libraries(m4t_bench PRIVATE m4t)
-
-    # M1: link-time size budget enforcement (24 KB = 24576 bytes)
-    add_custom_command(TARGET m4t POST_BUILD
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/m4t_size_check.sh
-                $<TARGET_FILE:m4t> 24576
-        COMMENT "M4T: checking opcode body size budget (24 KB)"
-    )
 endif()

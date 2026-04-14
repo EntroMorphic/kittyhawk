@@ -1,3 +1,3 @@
-add_executable(test_glyph_wrapper test_glyph_wrapper.c)
-target_link_libraries(test_glyph_wrapper PRIVATE glyph)
-add_test(NAME glyph_wrapper COMMAND test_glyph_wrapper)
+# Glyph wrapper tests. Pending rebuild — the prior test_glyph_wrapper.c
+# was archived with the dense-path aliases it verified. New wrapper tests
+# land when the glyph consumer surface takes shape.
