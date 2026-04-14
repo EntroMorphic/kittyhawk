@@ -186,6 +186,8 @@ sdot v_out.4s, v_a.16b, v_b.16b
 
 This is the hottest path in the routing substrate. It is exact, hardware-native, and metadata-light.
 
+**Contract.** SDOT over MTFP4 inputs is declared exact by the substrate. The bound `|output| ≤ 25 600 ≪ 2³¹ − 1` is a theorem, not a configuration. Callers that compose wider inputs into SDOT shape (e.g. via `vmull_s32` on MTFP19 pairs) are responsible for their own overflow checks; the substrate provides no wrapper that re-proves SDOT exactness for wider cases because no such proof is available by construction.
+
 ### 8.5 Widen, don't round (invariant)
 
 Any operation whose exact result cannot be represented in the target cell type must **widen** rather than round, unless the caller has explicitly asked for cross-block alignment (§8.2).
@@ -308,28 +310,19 @@ archive/                     — everything that was dense or followed the fixed
 
 ## 14. Open decisions
 
-Each of these is a point where hardware does not dictate the answer. Calling them out so we choose explicitly rather than drift.
+Substrate-level questions where hardware does not dictate the answer. The original list of seven was reduced to four by triage under the substrate/consumer throughline; the full cycle is in `journal/seven_open_decisions_{raw,nodes,reflect,synthesize}.md`. Former 14.5 was promoted to a contract in §8.4 (proven theorem). Former 14.6 and 14.7 were moved to `docs/THESIS.md` (consumer/thesis concerns, not substrate).
 
-### 14.1 Block size beyond 16 bytes
-Hardware says 16 B for the mantissa-block. But a *logical block* — the unit at which we group for tensor layout, prefetch tuning, and scheduling — could be 1, 2, 4, or 8 hardware blocks. Larger logical blocks reduce exponent overhead; smaller preserve dynamic-range variance. **Lean:** start with logical block = hardware block (1:1); revisit if exponent storage or dynamic range becomes a bottleneck.
+### 14.1 Logical block size (OPEN — empirical)
+Hardware says 16 B for the mantissa-block. Whether a *logical block* — the unit at which we group for prefetch tuning and scheduling — should be 1, 2, 4, or 8 hardware blocks is a cache/workload question with no theoretical derivation. **Decision:** logical block = hardware block (1:1) as the rebuild default. Revisit only when a running consumer shows prefetch or cache stress. This is the one genuinely open item in §14.
 
-### 14.2 Cross-block add policy
-Default to align-and-round, or refuse and require the caller to widen? The "widen, don't round" invariant from §8.5 argues for refusing. The ergonomics of using the substrate argues for aligning. **Lean:** refuse by default in the core; provide a `m4t_mtfp_vec_add_aligning` opt-in variant that rounds and sets the flag.
+### 14.2 Cross-block add policy (DEFERRED)
+No routing primitive we kept (`apply_signed`, `signature_update`, `distance_batch`) exercises cross-block add across different block exponents; accumulation happens within exponent-uniform blocks established at write time. **Decision:** do not implement until a consumer drives it. If one emerges, provide a named opt-in variant `m4t_mtfp_vec_add_aligning` with an explicit rounding flag, never as a default path. The "widen, don't round" invariant (§8.5) stands; cross-block alignment is the only legitimate lossy path and must be requested by name.
 
-### 14.3 Tail-block padding
-Tensors whose dimensions aren't multiples of the block's cell count have a partial last block. Options: (a) zero-pad the unused mantissas and mark the tail; (b) carry a cell-count field per tensor; (c) forbid non-aligned dims and require the consumer to pad. **Lean:** (a), zero-pad — it's the cheapest at the op level and zero-mantissa cells are identity under add/mul.
+### 14.3 Tail-block padding (DECIDED: zero-pad)
+Tensors whose dimensions aren't multiples of a block's cell count have a partial last block. **Decision:** zero-pad the unused mantissas. A zero mantissa is the additive and multiplicative identity for any block exponent (`0 × 3^e = 0`), so zero-padding inserts identity elements rather than altering values — the §8.5 invariant is preserved. Tensors carry a cell-count field so length-aware reducers can ignore the tail.
 
-### 14.4 Exponent sentinel values
-Reserve exponent values (e.g. INT8_MIN) for "widen-pending" / "overflow" / "NaN"? Or carry a parallel status byte per block? **Lean:** no sentinels, use a parallel 1-bit-per-block status array only if needed; keep the exponent numeric.
-
-### 14.5 Saturation vs widen on SDOT output
-SDOT output is already int32 and bounded exactly by 16 × 40 × 40 = 25 600 — well inside MTFP19. No saturation needed on the SDOT primary path. But compositions (SDOT-of-widened-inputs) can overflow. **Lean:** SDOT over MTFP4 inputs is declared exact by the substrate; any path that composes wider inputs into SDOT shape is responsible for its own widen check.
-
-### 14.6 When does a routing consumer need LUT-backed nonlinearities?
-GELU/softmax LUTs are archived. Pulling them back requires a routing-native consumer. Until then: remain archived. **Lean:** keep archived; bring back only when a specific routing architecture needs them.
-
-### 14.7 Benchmark bed beyond MNIST
-MNIST cannot separate the routing thesis from its null. A harder bed (CIFAR-10, long-tailed classification, sparse-signal tasks) is needed to validate whether routing-native beats dense on problems where lattice geometry must earn its keep. **Lean:** defer until the numeric core is rebuilt; then pick intentionally.
+### 14.4 Exponent status tracking (DECIDED: parallel array if needed)
+**Decision:** no sentinels in the exponent. Keep the exponent numerically pure. When flag semantics are needed (widen-pending, overflow, rounding-occurred), allocate a parallel 1-byte status array per block, scoped to the caller that requested flag tracking. The default path carries no status array at all.
 
 ---
 
@@ -362,3 +355,5 @@ Each numbered section maps to a conversation decision:
 | 7 | Per-block exponent | derived from hardware-alignment principle |
 | 8.5 | Widen, don't round | user, "100% accuracy throughout" |
 | 11/12 | Routing-first surface | user, archive criterion |
+| 8.4 | SDOT exactness contract (proven theorem, promoted from former 14.5) | LMM cycle on §14 |
+| 14 | Reduced from seven opens to four substrate-real items; 14.6 and 14.7 moved to `docs/THESIS.md` | `journal/seven_open_decisions_*.md` (LMM cycle, 2026-04-14) |
