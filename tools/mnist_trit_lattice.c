@@ -152,7 +152,6 @@ int main(int argc, char** argv) {
 
         for(int s=0;s<n_test;s++){
             const m4t_mtfp_t* img=x_test+(size_t)s*INPUT_DIM;
-            m4t_mtfp_t* tproj=train_proj; /* reuse buffer */
             m4t_mtfp_t test_proj_buf[4096];
             m4t_mtfp_ternary_matmul_bt(test_proj_buf,img,proj_packed,1,INPUT_DIM,N_PROJ);
 

@@ -58,6 +58,10 @@ option(M4T_BUILD_TESTS "Build M4T tests" ON)
 if(M4T_BUILD_TESTS)
     enable_testing()
 
+    add_executable(test_m4t_mtfp tests/test_m4t_mtfp.c)
+    target_link_libraries(test_m4t_mtfp PRIVATE m4t)
+    add_test(NAME m4t_mtfp COMMAND test_m4t_mtfp)
+
     add_executable(test_m4t_trit_ops tests/test_m4t_trit_ops.c)
     target_link_libraries(test_m4t_trit_ops PRIVATE m4t)
     add_test(NAME m4t_trit_ops COMMAND test_m4t_trit_ops)

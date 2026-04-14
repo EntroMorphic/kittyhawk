@@ -28,15 +28,18 @@ The current empirical state: on MNIST, routing-native (Trit Lattice LSH, 81.40%)
 
 ## 3. Which consumer is M4T being built for?
 
-**OPEN (former §14.6 → here).** Until a specific consumer architecture is chosen, M4T stays at the primitive level. Decisions that depend on consumer shape — in particular, whether LUT-backed nonlinearities (GELU, softmax) come back from archive — are deferred until the consumer is named.
+**Provisional primary consumer (as of 2026-04-14):** `tools/mnist_trit_lattice.c` — the Trit Lattice LSH tool. Pure routing: ternary projections, L1 distance, coarse-to-fine refinement over MNIST. Does not need nonlinearities. Uses `m4t_mtfp_ternary_matmul_bt` for the random ternary projection (Law #7 — ternary projections applied to MTFP data, NOT ternarized observations).
 
-Candidate consumer shapes:
+**Why this consumer provisionally.** It's the one routing-native workload kept out of archive. It exercises `m4t_ternary_matmul`, the routing-first surface of `m4t_route`, and the mantissa-layer vec primitives in `m4t_mtfp`. That's enough of the substrate surface to validate that first-light primitives compose correctly. It is NOT the end-game consumer — MNIST is a base-2-framed problem (see §4) and Trit Lattice LSH on MNIST is a diagnostic, not a thesis test.
 
-- **Trit Lattice LSH** (already exists, 81.40% on MNIST). Pure routing: ternary projections, L1 distance, coarse-to-fine refinement. Does not need nonlinearities.
-- **Routing transformer.** Multi-head routing instead of dense attention; k-of-T tile dispatch instead of dense FFN. Would need GELU/softmax LUTs pulled back.
-- **Something we haven't drawn yet.** A routing-native architecture purpose-built for the lattice thesis rather than adapted from a dense design.
+**Primitive-surface rule while this is the provisional consumer.** New substrate primitives justify themselves by concrete demand from this consumer. "We'll probably need it" is not a justification. If the LSH tool doesn't call it, it doesn't land in M4T.
 
-**When a consumer is selected, this section gets rewritten as a scope statement and the LUT question in M4T's archive becomes actionable.**
+**Future/candidate consumers.** Listed here to keep the future scope explicit, NOT to justify building for them pre-emptively.
+
+- **Routing transformer.** Multi-head routing instead of dense attention; k-of-T tile dispatch instead of dense FFN. Would need GELU/softmax LUTs pulled back from archive.
+- **A base-3-native architecture not yet drawn.** A routing architecture purpose-built for the lattice thesis rather than adapted from a dense design. The end-game shape. Unknowable now (NORTH_STAR §5).
+
+**When the consumer changes, this section is rewritten**, the primitive-surface rule is re-anchored, and the archive question (LUTs, wide MTFP39 paths, etc.) becomes actionable based on the new consumer's demand.
 
 ## 4. Benchmark bed
 

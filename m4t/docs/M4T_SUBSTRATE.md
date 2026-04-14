@@ -188,16 +188,30 @@ This is the hottest path in the routing substrate. It is exact, hardware-native,
 
 **Contract.** SDOT over MTFP4 inputs is declared exact by the substrate. The bound `|output| ≤ 25 600 ≪ 2³¹ − 1` is a theorem, not a configuration. Callers that compose wider inputs into SDOT shape (e.g. via `vmull_s32` on MTFP19 pairs) are responsible for their own overflow checks; the substrate provides no wrapper that re-proves SDOT exactness for wider cases because no such proof is available by construction.
 
-### 8.5 Widen, don't round (invariant)
+### 8.5 Widen, saturate, round — the three resolutions (invariant)
 
-Any operation whose exact result cannot be represented in the target cell type must **widen** rather than round, unless the caller has explicitly asked for cross-block alignment (§8.2).
+When an operation's exact result does not fit the target cell type, exactly one of three resolutions applies. The substrate names which case each operation falls into; silent rounding is never one of them.
 
-- MTFP4 overflow → MTFP9 (2× cells in same 16B block).
+**Case W — widen.** Output type admits a wider cell: promote to it. The exact result is preserved at the wider tier.
+- Scalar mul: `MTFP_n × MTFP_m → MTFP_{n+m}` (widened accumulator).
+- SDOT: MTFP4 × MTFP4 → MTFP19 mantissa (exact by §8.4 contract).
+- Any op whose output type is a substrate-internal choice, not a caller-prescribed buffer.
+
+**Case S — saturate.** Output type is *caller-prescribed* and cannot widen (in-place vec ops, accumulators that must land in a fixed-width tensor). Saturate at ±cell-max; this is lossy at the boundary but informative, not silent. Consumers that opt into flag tracking (§14.4) see a `SAT` bit set on the affected block.
+- In-place `m4t_mtfp_block_add` / `_sub`: dst cell is MTFP19; can't widen without changing the caller's buffer type. Saturate.
+- Routing's `apply_signed` accumulator: caller provides the output buffer; accumulator saturates per cell.
+
+**Case R — round (named opt-in only).** Cross-block add with different block exponents (§8.2). The only legitimate rounding path in the substrate, and it must be requested by name (`m4t_mtfp_vec_add_aligning`). Never the default. Also produces a `ROUND` status on affected blocks.
+
+**Block-exponent increment as a widening alternative.** When every mantissa in a block has a trailing 0 trit (i.e., is divisible by 3), the block's exponent can increment by 1 and each mantissa is divided by 3 exactly. This is a zero-loss alternative to cell-widening. When not applicable, cell-widening is required.
+
+**Overflow ladder (Case W):**
+- MTFP4 overflow → MTFP9 (2× cells in same 16 B block).
 - MTFP9 overflow → MTFP19.
 - MTFP19 overflow → MTFP39.
-- MTFP39 overflow → (no cell wider): saturate OR increment block exponent if trailing mantissa-trits are zero. If neither is applicable, the substrate flags overflow; callers must partition.
+- MTFP39 overflow → block-exponent increment (if divisible by 3) OR substrate flags `OVER`; caller must partition. No silent saturation at this tier — this is the end of the ladder.
 
-An alternative to widening the cell is **incrementing the block exponent** (dividing every mantissa in the block by 3). This is exact only if every mantissa in the block has a trailing 0 trit (i.e., is divisible by 3). When applicable, it's the cheapest path; when not, cell-widening is required.
+**Which case an op falls into is part of the op's contract.** Cell-type-changing ops (mul, SDOT) are Case W. Fixed-output-type ops (in-place vec, caller-buffer accumulators) are Case S. The named alignment variant is Case R. No op is silently any of the three.
 
 ---
 
