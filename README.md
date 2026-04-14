@@ -71,6 +71,7 @@ cmake --build build-tools -j
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Current provisional consumer. Open benchmark bed. |
 | [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md) | The substrate specification. 16 numbered sections, traceable to conversation. |
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Red-team findings and remediation status. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Notable changes since the ground-zero rebuild. |
 | [`m4t/README.md`](m4t/README.md) | Substrate-layer build and surface. |
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
