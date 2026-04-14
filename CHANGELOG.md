@@ -75,7 +75,13 @@ Triggered by a full audit that identified a collapse of Multi-Trit Floating Poin
 - `cmake --build` green under `-Wall -Wextra -Wpedantic -Werror`.
 - `ctest`: 5/5 test binaries pass (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`).
 - `M4T_BUILD_TOOLS=ON` builds `m4t_trit_golden` and `m4t_lut_gen` cleanly.
-- `tools/mnist_trit_lattice.c` compiles standalone against `libm4t.a` with zero warnings.
+- `tools/mnist_trit_lattice.c` builds via the root CMake (`GLYPH_BUILD_TOOLS=ON`, default ON).
+
+### Measured (first light on rebuilt substrate)
+
+- **LSH on MNIST, N_PROJ=2048: 81.40%.** Bit-for-bit reproduction of the pre-rebuild baseline. See `journal/rebuilt_substrate_first_light.md`.
+- Full sweep (4 projection sizes × L1 / refine-3 / refine-5) wall clock: 41.6 s, single core.
+- The `m4t_ternary_matmul` bit-select rewrite preserved consumer numerics exactly. No silent regression from the base-2-shortcut → base-3-native shape transition.
 
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 

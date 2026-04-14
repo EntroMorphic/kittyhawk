@@ -28,3 +28,11 @@ if(GLYPH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Consumers built on the substrate. Currently one: the Trit Lattice LSH
+# tool, the provisional primary consumer per docs/THESIS.md.
+option(GLYPH_BUILD_TOOLS "Build glyph consumer tools" ON)
+if(GLYPH_BUILD_TOOLS)
+    add_executable(mnist_trit_lattice tools/mnist_trit_lattice.c)
+    target_link_libraries(mnist_trit_lattice PRIVATE m4t)
+endif()
