@@ -164,6 +164,25 @@ Everything we tried on MNIST, in chronological order, with what worked, what did
 | 4.4 | k-NN pixel deskewed (k=3 L2) | **97.61%** | **zero** | **Fix geometry first** |
 | 4.5 | k-NN subpixel deskew | 95.66% | **zero** | Simpler preprocessing wins |
 | 4.6 | Ensemble raw + deskewed | 97.61% | **zero** | Needs proper voting |
+| 4.7 | Multi-channel naive (pixel+grad+topo, equal L2) | 96.86% | **zero** | Incommensurate channels poison L2 |
+| 4.8 | Per-channel weighted L2 (6 weight combos) | 97.55% best | **zero** | Topo doubles 4↔9 confusion; grad adds nothing |
+
+---
+
+## Phase 5: Multi-channel features (SSTT-inspired)
+
+### Experiment 5.1: Gradient channels + flood-fill topology (naive L2)
+- **What:** Features = [pixel(784), h_grad(784), v_grad(784), topo(1)] = 2353 dims, unit-weighted L2
+- **Result:** 96.86% (k=3), 96.69% (k=5) — **both worse than 97.61% baseline**
+- **What went wrong:** Grad has 2x the dimensions of pixel, so unweighted L2 is dominated by gradient matching rather than intensity. Topo adds a cliff in feature space.
+- **Lesson:** Concatenating channels into a single L2 is only sound when channels have commensurate magnitudes AND comparable discriminability per dim. Neither held.
+
+### Experiment 5.2: Per-channel weighted L2 sweep
+- **What:** Weighted squared-L2 per channel: `total = w_pix*d_pix + w_grad*d_grad + w_topo*d_topo`. Swept 6 configs including pixel-only (baseline), pixel+topo, pixel+grad/4, pixel+grad/8, and combined.
+- **Result:** Best = 97.55% (w_pix=8, w_grad=1, grad at 1/8 weight). All configs worse than 97.61% pixel-only baseline.
+- **Key diagnostic:** Topo feature doubles 4↔9 confusion (baseline 16 → topo configs 31). Flood-fill enclosed-region count flips between 0 and 1 on thin-stroke 4s and 9s, creating a cliff in feature space that L2 reads as "definitely different digit."
+- **What worked:** Grad at w=1/8 is nearly neutral (−0.06). Doesn't help, doesn't hurt much.
+- **Lesson:** Gradients are already implicit in pixel L2 on deskewed images. Topology via flood-fill is too brittle on noisy handwriting. The 97.61% ceiling is not broken by naive channel addition even with careful weighting.
 
 ---
 
@@ -201,10 +220,16 @@ Established across 20 experiments:
 5. **Subpixel deskewing + centering:** 95.66% — 2 points worse than simple shear. Centering hurts; subpixel changes distributions.
 6. **Ensemble (naive):** No gain. A hierarchy isn't an ensemble.
 
+## What didn't work (additions from Phase 5)
+
+7. **Raw gradient channels concatenated into L2:** −0.75 points at equal weight, −0.06 at 1/8 weight. Gradients are already implicit in pixel L2 after deskewing.
+8. **Flood-fill enclosed-region topology:** 4↔9 confusion doubles (16 → 31). Hole count flips on thin-stroke digits, creating cliffs in feature space.
+
 ## What we still don't know
 
-1. Whether **tangent distance** (invariant to rotation/scale/thickness) can close the 0.60% gap to 98.21%.
-2. Whether **integer PCA** projections would help k-NN (they help centroids by ~4% in the literature).
-3. Whether **multi-layer ternary hashing** (project → sign → re-project) adds useful capacity.
-4. Whether 98.21% is achievable at all with k-NN on raw pixels + simple preprocessing, or if it requires a fundamentally different approach.
-5. Whether the 97.61% zero-float result is the ceiling for this class of methods.
+1. Whether **tangent distance** (invariant to rotation/scale/thickness) can close the 0.60% gap to 98.21%. Classical route to 98.5%+ on k-NN MNIST.
+2. Whether **per-pair binary classifiers** — small ternary projections trained to separate only the confused pairs (4↔9, 2↔7, 8↔5) and applied only when baseline k-NN returns that pair — can shave the remaining 239 errors.
+3. Whether **integer PCA** projections would help k-NN (they help centroids by ~4% in the literature).
+4. Whether **multi-layer ternary hashing** (project → sign → re-project) adds useful capacity.
+5. Whether 98.21% is achievable at all with k-NN on raw pixels + simple preprocessing, or if it requires a fundamentally different approach.
+6. Whether the 97.61% zero-float result is the ceiling for this class of methods. Phase 5 strongly suggests it's a ceiling for *naive* channel addition — but not necessarily for invariant distances.
