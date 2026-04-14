@@ -13,16 +13,24 @@
 #include <string.h>
 #include <assert.h>
 
-/* ── Sign extraction ───────────────────────────────────────────────────── */
+/* ── Threshold extraction ─────────────────────────────────────────────── */
 
-void m4t_route_sign_extract(
-    uint8_t* dst_packed, const int64_t* values, int n)
+void m4t_route_threshold_extract(
+    uint8_t* dst_packed, const int64_t* values, int64_t tau, int n)
 {
+    assert(tau >= 0);
+    assert(n >= 0);
+
     int n_bytes = M4T_TRIT_PACKED_BYTES(n);
     memset(dst_packed, 0, (size_t)n_bytes);
 
     for (int i = 0; i < n; i++) {
-        m4t_trit_t t = (values[i] > 0) ? 1 : (values[i] < 0) ? -1 : 0;
+        int64_t v = values[i];
+        /* Strict comparison on the outer bounds so that tau == 0 degenerates
+         * to sign-extraction exactly: v == 0 falls through to the zero case. */
+        m4t_trit_t t = (v >  tau) ?  1 :
+                       (v < -tau) ? -1 :
+                                     0;
         uint8_t code = (t == 1) ? 0x01u : (t == -1) ? 0x02u : 0x00u;
         dst_packed[i >> 2] |= (uint8_t)(code << ((i & 3) * 2));
     }
@@ -171,13 +179,19 @@ void m4t_route_signature_update(
     }
 
     /* Phase 3: sign(col_sum - mean) → packed-trit signature per tile.
-     * Reuse the col_sums buffer for the difference values. */
+     * Reuse the col_sums buffer for the difference values.
+     *
+     * threshold_extract with tau=0 is the correct shape here: the inputs
+     * are integer col_sum − mean differences, where exact zero occurs with
+     * non-trivial probability (any tile whose column-sum lands on the
+     * cross-tile mean produces a zero trit in that dim). This deployment
+     * passes emission coverage — see M4T_SUBSTRATE §18. */
     for (int t = 0; t < T; t++) {
         int64_t* cs = col_sums + (size_t)t * D;
         for (int d = 0; d < D; d++) {
             cs[d] -= means[d];
         }
-        m4t_route_sign_extract(
-            signatures + (size_t)t * Dp, cs, D);
+        m4t_route_threshold_extract(
+            signatures + (size_t)t * Dp, cs, 0, D);
     }
 }

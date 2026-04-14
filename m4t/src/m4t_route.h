@@ -36,16 +36,37 @@ typedef struct {
     m4t_trit_t sign;  /* +1 or -1 */
 } m4t_route_decision_t;
 
-/* ── Sign extraction ───────────────────────────────────────────────────── */
-
-/* For each value[i], output sign(value[i]) as a packed trit:
- *   value > 0 → +1 (code 0b01)
- *   value < 0 → -1 (code 0b10)
- *   value == 0 → 0 (code 0b00)
- * dst must have at least M4T_TRIT_PACKED_BYTES(n) bytes. */
-void m4t_route_sign_extract(
+/* ── Threshold extraction ─────────────────────────────────────────────────
+ *
+ * For each value[i], produce a packed trit based on a three-state
+ * magnitude classification:
+ *
+ *   value >  tau    → +1 (code 0b01)  strong positive
+ *   value < -tau    → -1 (code 0b10)  strong negative
+ *   |value| <= tau  →  0 (code 0b00)  within neutral band
+ *
+ * Preconditions:
+ *   tau >= 0
+ *   n >= 0
+ *   dst_packed has at least M4T_TRIT_PACKED_BYTES(n) bytes
+ *
+ * Sanctioned input-class contract (see M4T_SUBSTRATE §18):
+ *   - tau > 0 and input values with magnitudes spanning across tau:
+ *     emission coverage holds — all three output states are produced
+ *     non-trivially. This is the primary sanctioned deployment.
+ *   - tau = 0 and input values that can be exactly zero with
+ *     non-trivial probability (integer arithmetic with potential
+ *     exact equality; e.g. col_sum − mean in signature_update):
+ *     emission coverage holds.
+ *   - tau = 0 and continuous-valued inputs (MTFP projection outputs
+ *     from ternary_matmul, etc.): emission coverage FAILS — the zero
+ *     state is measure-zero. The primitive produces a sign-only
+ *     classification in practice. Consumers in this class should pass
+ *     tau > 0 sized to the expected noise floor. */
+void m4t_route_threshold_extract(
     uint8_t* dst_packed,
     const int64_t* values,
+    int64_t tau,
     int n
 );
 

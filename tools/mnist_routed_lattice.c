@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
 
     printf("Trit Lattice ROUTED — MNIST (zero float, full routing surface)\n");
     printf("Loaded %d train, %d test\n", n_train, n_test);
-    printf("Routing primitives exercised: sign_extract, distance_batch, topk_abs.\n\n");
+    printf("Routing primitives exercised: threshold_extract, distance_batch, topk_abs.\n\n");
 
     int class_counts[N_CLASSES]; memset(class_counts,0,sizeof(class_counts));
     for(int i=0;i<n_train;i++) class_counts[y_train[i]]++;
@@ -144,7 +144,12 @@ int main(int argc, char** argv) {
             for(int c=0;c<N_CLASSES;c++){
                 for(int p=0;p<N_PROJ;p++)
                     diff[p]=(int64_t)centroids[(size_t)c*N_PROJ+p]-dim_mean[p];
-                m4t_route_sign_extract(class_sigs+(size_t)c*Sp,diff,N_PROJ);
+                /* tau=0 here is the sign-only degenerate of threshold_extract.
+                 * The centroid - mean inputs are integer differences that can
+                 * hit exact zero, so emission coverage is borderline-sanctioned
+                 * on this deployment. Switching to tau>0 is a candidate for
+                 * follow-up experimentation. */
+                m4t_route_threshold_extract(class_sigs+(size_t)c*Sp,diff,0,N_PROJ);
             }
             free(diff); free(dim_mean);
         }
@@ -180,12 +185,19 @@ int main(int argc, char** argv) {
             }
             if(pred_l1==y_test[s]) correct_l1++;
 
-            /* Routed classification: sign-extract query → popcount distance →
-             * topk_abs picks the class with the largest affinity (= smallest
-             * distance, mapped via score = MAX - dist). Exercises the full
-             * m4t_route surface. */
+            /* Routed classification: threshold_extract(tau=0) query → popcount
+             * distance → topk_abs picks the class with the largest affinity
+             * (= smallest distance, mapped via score = MAX - dist).
+             *
+             * Emission-coverage note: tau=0 on MTFP19 projection outputs
+             * produces a sign-only classification in practice (zero state is
+             * measure-zero for continuous-valued projections). This deployment
+             * does NOT pass emission coverage per M4T_SUBSTRATE §18; the 58%
+             * accuracy measured in journal/fully_routed_mnist.md is the
+             * resulting binary-shape limit. A tau>0 variant is the candidate
+             * follow-up experiment. */
             for(int p=0;p<N_PROJ;p++) query_i64[p]=(int64_t)test_proj_buf[p];
-            m4t_route_sign_extract(query_sig,query_i64,N_PROJ);
+            m4t_route_threshold_extract(query_sig,query_i64,0,N_PROJ);
             m4t_route_distance_batch(dists,query_sig,class_sigs,mask,N_CLASSES,N_PROJ);
 
             /* Map distance → affinity score so topk_abs picks the minimum. */
@@ -202,9 +214,9 @@ int main(int argc, char** argv) {
         clock_t t1=clock();
         double total_ms=1000.0*(double)(t1-t0)/CLOCKS_PER_SEC;
 
-        printf("  L1-over-mantissa (dense decision):  %d/%d = %d.%02d%%\n",
+        printf("  L1-over-mantissa (dense decision):       %d/%d = %d.%02d%%\n",
                correct_l1,n_test,correct_l1*100/n_test,(correct_l1*10000/n_test)%100);
-        printf("  Routed (sign_extract + VCNT-dist):  %d/%d = %d.%02d%%\n",
+        printf("  Routed (threshold_extract tau=0 + VCNT): %d/%d = %d.%02d%%\n",
                correct_routed,n_test,correct_routed*100/n_test,(correct_routed*10000/n_test)%100);
         printf("  Inference (both paths, %d images):  %.0f ms\n\n",
                n_test, total_ms);

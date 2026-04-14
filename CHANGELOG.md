@@ -83,6 +83,15 @@ Triggered by a full audit that identified a collapse of Multi-Trit Floating Poin
 - Full sweep (4 projection sizes × L1 / refine-3 / refine-5) wall clock: 41.6 s, single core.
 - The `m4t_ternary_matmul` bit-select rewrite preserved consumer numerics exactly. No silent regression from the base-2-shortcut → base-3-native shape transition.
 
+### Architectural correction (sign_extract → threshold_extract)
+
+- **Removed `m4t_route_sign_extract`.** Advertised three output codes in its type system but produced only two on continuous-valued inputs (zero state was measure-zero for MTFP projections). Type-system theater. The fully-routed MNIST experiment's 23-point accuracy loss vs. the L1 baseline was the visible symptom.
+- **Added `m4t_route_threshold_extract(dst, values, tau, n)`** as the sole extractor. Rule: `v > tau → +1`, `v < -tau → -1`, `|v| <= tau → 0`. tau=0 degenerates to sign-extraction exactly — preserves prior behavior at every call site.
+- **Updated `m4t_route_signature_update`**: internal call now `threshold_extract(..., 0)`. Structurally the same operation; the call site now makes the "this is sign-only because inputs realize zero naturally" contract visible.
+- **Updated `tools/mnist_routed_lattice.c`**: internal calls are `threshold_extract(..., 0)` with docstring noting emission-coverage failure on MTFP projection inputs. Behavior preserved bit-for-bit (58.37% at N_PROJ=2048). A tau>0 variant is the candidate follow-up experiment.
+- **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
+- **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
+
 ### Measured (fully-routed MNIST classifier)
 
 - **New consumer: `tools/mnist_routed_lattice.c`.** First tool that exercises the full routing surface (`m4t_route_sign_extract` + `m4t_route_distance_batch` + `m4t_route_topk_abs`) end-to-end.

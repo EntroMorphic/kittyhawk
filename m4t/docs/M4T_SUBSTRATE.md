@@ -257,7 +257,7 @@ Primitives that compose into routing and into the scalar/vector arithmetic routi
 - Width conversion: MTFP4↔MTFP9↔MTFP19↔MTFP39.
 
 **Routing primitives**
-- `m4t_route_sign_extract` — int64 → packed-trit signs.
+- `m4t_route_threshold_extract` — int64 values + tau → packed-trit three-state signatures.
 - `m4t_route_distance_batch` — query sig × T tile sigs → T distances.
 - `m4t_route_topk_abs` — T scores → k (tile, sign) decisions.
 - `m4t_route_apply_signed` — k decisions × tile outputs → accumulated MTFP.
@@ -400,3 +400,43 @@ For readers tracing a spec section back to the code that realizes it.
 | 14.2 | Cross-block add policy (DEFERRED) | No code; caller uses same-block ops or requests opt-in by name |
 | 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |
 | 14.4 | Exponent status tracking (DECIDED) | No status array allocated until consumer requests |
+| 18 | Base-3 native criterion (emission coverage + review gate) | `journal/base3_native_criterion_*.md` + `journal/updated_model_scrutiny_*.md` (LMM cycles, 2026-04-14) |
+
+---
+
+## 18. Base-3 native: emission coverage and the review gate
+
+A primitive is "base-3 native" not as an absolute property but as a property of a **(primitive, input-distribution) pair**. The substrate publishes primitives; consumers deploy them with specific input distributions; correctness of "base-3 native" claims lives in the pair, not in the primitive alone.
+
+### 18.1 Criterion — emission coverage
+
+A (primitive, input-class) pair passes **emission coverage** iff every output state the primitive's API can emit is emitted non-trivially under that input class.
+
+"Non-trivially" means: the state occurs with positive measure under the input distribution — not as a measure-zero coincidence of exact arithmetic equality.
+
+Examples:
+- `m4t_route_threshold_extract(tau > 0)` + input values whose magnitudes span across tau: all three trit codes occur with positive measure. **Pass.**
+- `m4t_route_threshold_extract(tau = 0)` + input values that can be exactly zero with non-trivial probability (integer arithmetic, col_sum − mean, etc.): all three codes occur. **Pass.**
+- `m4t_route_threshold_extract(tau = 0)` + continuous-valued inputs (MTFP projection outputs): the zero code is measure-zero. **Fail — the primitive produces a sign-only classification in practice.** Consumers in this class should use tau > 0.
+
+### 18.2 Review gate
+
+Every primitive added to the substrate MUST ship with:
+
+(a) **Enumerated output space.** What codes, ranges, or values the API can emit.
+(b) **Sanctioned input-class contract.** The input distribution class(es) for which emission coverage holds, stated in the primitive's docstring.
+(c) **Coverage test.** A test in `m4t/tests/` that verifies emission coverage on the sanctioned input class.
+
+Primitives that fail to ship all three do not land.
+
+### 18.3 Why this matters
+
+A prior primitive (`m4t_route_sign_extract`, now removed) advertised three output codes in its type system but produced only two on realistic continuous-valued inputs. The type-level three-ness was theater; the behavioral two-ness was what downstream routing actually saw. The resulting consumer experiment lost 23 accuracy points vs. a dense baseline — a failure that was invisible until the primitive was exercised end-to-end.
+
+The emission-coverage criterion is the specific defense against this class of failure. It asks the question the type system cannot: *under the inputs this primitive will actually see, does its three-way semantic actually get exercised?*
+
+### 18.4 History
+
+This section exists because two LMM cycles in sequence converged on it. The first cycle produced a two-part criterion (C-sub: substrate-side three-way capacity; C-con: consumer-side realization). The scrutiny meta-cycle found the two parts collapsed structurally — C-sub applied literally to `sign_extract` fails because collapsing its zero state yields a well-defined binary sign-test. The single-part "emission coverage" criterion subsumes both correctly.
+
+Journal record: `base3_native_criterion_{raw,nodes,reflect,synthesize}.md` (first cycle); `updated_model_scrutiny_{raw,nodes,reflect,synthesize}.md` (scrutiny cycle).

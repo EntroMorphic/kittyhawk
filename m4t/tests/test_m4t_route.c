@@ -28,19 +28,57 @@
     } \
 } while (0)
 
-/* ── sign_extract ──────────────────────────────────────────────────────── */
+/* ── threshold_extract ───────────────────────────────────────────────── */
 
-static int test_sign_extract(void) {
+/* tau=0 degenerate: exact sign-extraction semantics.
+ * v > 0 → +1, v < 0 → -1, v == 0 → 0. */
+static int test_threshold_extract_tau0(void) {
     int64_t values[7] = { 5, -3, 0, 100, -1, 0, 42 };
     uint8_t packed[M4T_TRIT_PACKED_BYTES(7)];
-    m4t_route_sign_extract(packed, values, 7);
+    m4t_route_threshold_extract(packed, values, 0, 7);
 
     m4t_trit_t result[7];
     m4t_unpack_trits_1d(result, packed, 7);
 
     const m4t_trit_t expected[7] = { 1, -1, 0, 1, -1, 0, 1 };
     for (int i = 0; i < 7; i++) {
-        ASSERT_EQ_I32(result[i], expected[i], "sign_extract");
+        ASSERT_EQ_I32(result[i], expected[i], "threshold_extract tau=0");
+    }
+    return 0;
+}
+
+/* tau>0: values strictly above +tau → +1, strictly below -tau → -1,
+ * |v| <= tau → 0. Tests boundary cases at ±tau (inclusive band). */
+static int test_threshold_extract_tau5(void) {
+    int64_t values[9] = { 6, 5, 4, 0, -4, -5, -6, 100, -100 };
+    uint8_t packed[M4T_TRIT_PACKED_BYTES(9)];
+    m4t_route_threshold_extract(packed, values, 5, 9);
+
+    m4t_trit_t result[9];
+    m4t_unpack_trits_1d(result, packed, 9);
+
+    /*           6   5   4   0  -4  -5  -6  100 -100 */
+    /* expect: +1   0   0   0   0   0  -1   +1  -1   */
+    const m4t_trit_t expected[9] = { 1, 0, 0, 0, 0, 0, -1, 1, -1 };
+    for (int i = 0; i < 9; i++) {
+        ASSERT_EQ_I32(result[i], expected[i], "threshold_extract tau=5");
+    }
+    return 0;
+}
+
+/* All inputs within the band → all zeros out. Emission coverage fails for
+ * the +1 and -1 states here, as expected (this is exactly the input class
+ * the primitive's contract documents as borderline). */
+static int test_threshold_extract_all_within_band(void) {
+    int64_t values[5] = { 3, -2, 0, 5, -5 };
+    uint8_t packed[M4T_TRIT_PACKED_BYTES(5)];
+    m4t_route_threshold_extract(packed, values, 5, 5);
+
+    m4t_trit_t result[5];
+    m4t_unpack_trits_1d(result, packed, 5);
+
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ_I32(result[i], 0, "threshold_extract all within band");
     }
     return 0;
 }
@@ -317,7 +355,9 @@ static int test_route_e2e(void) {
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
-    if (test_sign_extract())          return 1;
+    if (test_threshold_extract_tau0())             return 1;
+    if (test_threshold_extract_tau5())             return 1;
+    if (test_threshold_extract_all_within_band())  return 1;
     if (test_distance_batch())        return 1;
     if (test_topk_abs_basic())        return 1;
     if (test_topk_abs_with_zeros())   return 1;
