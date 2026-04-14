@@ -1,85 +1,94 @@
 # M4T — M4 Ternary Extensions
 
-A generic, cache-resident ternary compute substrate for aarch64 + NEON.
+A routing-first ternary/MTFP compute substrate for aarch64 + NEON. Single-threaded at the opcode level; threading is a consumer concern.
 
-## What M4T is
-
-M4T is a library of ternary and multi-trit fixed-point (MTFP) primitives that behave like silicon extensions. From the caller's perspective, each operation is always available, always fast, always cheap, with predictable latency. The implementation is software; the abstraction is hardware.
+Canonical spec: [`docs/M4T_SUBSTRATE.md`](docs/M4T_SUBSTRATE.md).
 
 ## Numerical system
 
-M4T operates on four cell widths, all rooted in balanced-ternary fixed point (real value = cell / scale):
+MTFP — Multi-Trit Floating Point, base 3. A value is `mantissa × 3^exponent`, with the mantissa in an n-trit signed integer cell and the exponent as sidecar metadata on the block. Four cell widths; all blocks are 16 bytes (one NEON vector):
 
-| Type | Storage | Trits | Scale | Range | Resolution | NEON lanes |
-|---|---|---|---|---|---|---|
-| `m4t_mtfp4_t` | int8 | 4 | 3² = 9 | ±4.4 | 0.111 | 16 |
-| `m4t_mtfp9_t` | int16 | 9 | 3⁵ = 243 | ±40.5 | 0.0041 | 8 |
-| `m4t_mtfp_t` | int32 | 19 | 3¹⁰ = 59049 | ±9842 | 1.69e-5 | 4 |
-| `m4t_mtfp_w_t` | int64 | 39 | 3¹⁰ = 59049 | ±3.43e13 | 1.69e-5 | 2 |
+| Type | Container | Mantissa trits | Mantissa range | Cells per block |
+|---|---|---|---|---|
+| `m4t_mtfp4_t` | int8 | 4 | ±40 | 16 |
+| `m4t_mtfp9_t` | int16 | 9 | ±9 841 | 8 |
+| `m4t_mtfp_t` | int32 | 19 | ±581 130 733 | 4 |
+| `m4t_mtfp_w_t` | int64 | 39 | ±1.72·10¹⁸ | 2 |
 
-No binary floating point. No binary quantization. Integer containers hold ternary fixed-point cells at clean power-of-3 boundaries.
+Mantissa bound: `(3^trits − 1) / 2`. No binary floating point at runtime.
 
-## What's implemented (v0)
+## Live surface
 
-### MTFP19 arithmetic (`m4t_mtfp.h`)
-Saturating add/sub/mul, mul-by-trit, vector add (NEON with min/max clamp), vector scale, dense MTFP×MTFP matmul, MTFP×packed-trit matmul, bias add, fan-in normalization, LayerNorm (integer isqrt, forward only).
+All sources under `src/` are routing-first or foundational. Dense matmul, dense nonlinearities, and the MTFP39 wide path were moved to `archive/` in the rebuild; they return when a consumer drives them.
+
+### Numeric core (`m4t_mtfp.h`)
+Block-native mantissa primitives for MTFP19: `block_add`, `block_sub` (exactly one NEON vector each), composed into `vec_add_inplace` / `vec_sub_inplace` / `vec_zero` with scalar tails. Saturating clamp `clamp64` for accumulator stores. Case S (§8.5) saturation; same-block contract.
 
 ### Trit packing (`m4t_trit_pack.h`)
-Pack/unpack between `m4t_trit_t` buffers and 2-bit packed `uint8_t` containers. Popcount routing distance (XOR+VCNT). Decode LUT for `vqtbl1q_s8`.
+Pack/unpack between `m4t_trit_t` buffers and 2-bit packed `uint8_t` containers. Popcount routing distance (XOR+VCNT, masked). Decode LUT shared with the ternary matmul.
 
 ### Trit operations (`m4t_trit_ops.h`)
-Six element-wise ops on packed-trit buffers via TBL lookup: `mul`, `sat_add`, `max`, `min`, `eq`, `neg`. ~28 NEON instructions per 64 trits (binary ops) or ~5 instructions (neg, via bit-swap).
+Six element-wise ops on packed-trit buffers via 16-byte TBL lookup: `mul`, `sat_add`, `max`, `min`, `eq`, `neg`. ~28 NEON instructions per 64 trits (binary ops); `neg` is bit-swap (~5 instructions).
 
 ### Trit reducers (`m4t_trit_reducers.h`)
-Collapse a packed-trit vector to scalar counts via masked VCNT: `signed_sum` (count(+1) − count(−1)), `sparsity` (count nonzero), `counts` (separate pos/neg). ~14 NEON instructions per 64 trits. Building blocks for weight-derived signature computation.
+Masked-VCNT reductions: `signed_sum`, `sparsity`, `counts`. ~14 NEON instructions per 64 trits. Feeds the routing-distance and signature-update paths.
 
 ### Routing primitives (`m4t_route.h`)
-Five primitives decomposing k-of-T ternary routing: `sign_extract` (int64 → packed-trit signs), `distance_batch` (batch popcount over T tile signatures), `topk_abs` (top-k by |score| via bitmask selection), `apply_signed` (signed accumulation of tile outputs, NEON for both +1 and −1), `signature_update` (compound: column-sum → mean-subtract → sign-extract, caller-provided scratch).
+Five primitives composing into a k-of-T ternary routing pass:
+- `sign_extract` — int64 values → packed-trit signs
+- `distance_batch` — query signature × T tile signatures → T distances
+- `topk_abs` — scores → k (tile, sign) decisions (bitmask uniqueness, T ≤ `M4T_ROUTE_MAX_T` = 64)
+- `apply_signed` — decisions × tile outputs → accumulated MTFP19 result (Case S saturation via vec_add/sub)
+- `signature_update` — weight-derived signatures (setup-time compound op, heap-allocated row buffer)
 
-### MTFP39 wide path (`m4t_mtfp_w.h`)
-Int64 parallel of MTFP19 arithmetic. 39 trits, 2 NEON lanes. Saturating add/sub/mul via `__int128`, vec ops with compare+select clamp (no `vminq_s64` on aarch64), dense matmul (`__int128` accumulator, K ≤ 41 documented), ternary matmul. Targets wide accumulation and high-precision paths.
+### Ternary matmul — MTFP19 (`m4t_ternary_matmul.h`)
+MTFP19 activations × 2-bit packed ternary weights → MTFP19. Inner loop uses `vbslq_s32` + `vnegq_s32` over decoded signs in {-1, 0, +1}; no `vmulq_s32`, no dense shape. Int64 accumulator, clamp on store (Case S).
 
-### MTFP4 SDOT routing cell (`m4t_mtfp4.h`)
-Int8 cell, 4 trits, 16 NEON lanes. `vdotq_s32` is the hardware-native ternary matmul: 16 int8 multiply-accumulates per instruction. Scalar arithmetic, MTFP19↔MTFP4 conversion with symmetric rounding. W uses raw int8 trits (not packed) for zero SDOT decode overhead.
-
-### Ternary matmul (`m4t_ternary_matmul.h`)
-MTFP19 activations × 2-bit packed ternary weights → MTFP19 output. Trit-decode via `vqtbl1q_s8`, sign-select via `vmulq_s32`, int64 accumulator.
+### Ternary matmul — MTFP4 (`m4t_mtfp4.h`)
+SDOT-native: `vdotq_s32` computes 16 int8 × int8 → int32 MACs per instruction. This is Case W — the output widens to MTFP19 mantissa exactly by construction (max magnitude 16 × 40 × 40 = 25 600 ≪ int32 max). The one exact hardware-native ternary matmul primitive.
 
 ## Build
 
 ```bash
-cd m4t
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build
 ```
 
-Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets error at compile time.
+Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets fail at CMake configure. `-Werror` is enabled.
 
-## Test count
+Dev tools (off by default):
 
-68 test functions across 6 binaries (`test_m4t_smoke`, `test_m4t_trit_ops`, `test_m4t_trit_reducers`, `test_m4t_route`, `test_m4t_mtfp_w`, `test_m4t_mtfp4`), all with hand-derived integer golden values. Zero float in the test suite. Includes an end-to-end mini routing pass and SDOT matmul coverage at multiple K values.
+```bash
+cmake -S . -B build -DM4T_BUILD_TOOLS=ON
+```
 
-## Tools
+This builds:
+- `m4t_trit_golden` — truth-table enumerator for TBL opcode verification.
+- `m4t_lut_gen` — offline GELU/exp LUT generator. The *only* sanctioned binary-float code in the entire ecosystem; runs at build time, emits an integer `.c` file, never linked into `libm4t.a` at runtime.
 
-| Tool | Purpose |
+## Tests
+
+Five test binaries, all with hand-derived integer golden values. Zero float in the test suite.
+
+| Binary | Coverage |
 |---|---|
-| `tools/m4t_size_check.sh` | Link-time `.text` budget enforcement (24 KB cap) |
-| `tools/m4t_bench.c` | Per-opcode cycle counting via `mach_absolute_time` |
-| `tools/m4t_lut_gen.c` | Host-side GELU + exp LUT generator (output committed as `.c`) |
-| `tools/m4t_trit_golden.c` | Truth-table enumerator for TBL opcode verification |
+| `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
+| `test_m4t_trit_ops` | all 9 input pairs × all 6 ops; 65-trit NEON+tail case |
+| `test_m4t_trit_reducers` | signed_sum, sparsity, counts across zero/pos/neg/mixed inputs |
+| `test_m4t_route` | sign_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass |
+| `test_m4t_mtfp4` | clamp, SDOT matmul (multiple K values including tail), MTFP19↔MTFP4 conversion |
 
-## Cache budget
+## What's not here
 
-| Region | Budget | Current | Used |
-|---|---|---|---|
-| L1i (opcode bodies) | 24 KB | 17.7 KB | 71% |
-| L1d (LUTs + constants) | 4 KB | ~0.3 KB | 8% |
+Deliberately archived (see top-level `archive/README.md`):
+- Dense MTFP×MTFP matmul, LayerNorm, bias_add, fan-in normalize.
+- LUT-backed GELU/softmax/argmax.
+- MTFP39 wide-cell arithmetic.
+- Function-pointer opcode dispatch tables.
 
-## Pipeline
-
-Items 1–5 and 7 are done: TBL trit ops, masked-VCNT reducers, routing primitives, MTFP39 wide path, MTFP4 SDOT path, and measurement tools. See `docs/M4T_PIPELINE.md` for remaining items: function-pointer opcode tables and glyph wrapper layer. See `docs/M4T_BEYOND.md` for post-pipeline future work.
+Each returns only when a named routing consumer drives it.
 
 ## License
 
-MIT.
+[MIT](../LICENSE).

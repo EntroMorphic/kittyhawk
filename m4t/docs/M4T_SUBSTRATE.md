@@ -371,3 +371,32 @@ Each numbered section maps to a conversation decision:
 | 11/12 | Routing-first surface | user, archive criterion |
 | 8.4 | SDOT exactness contract (proven theorem, promoted from former 14.5) | LMM cycle on §14 |
 | 14 | Reduced from seven opens to four substrate-real items; 14.6 and 14.7 moved to `docs/THESIS.md` | `journal/seven_open_decisions_*.md` (LMM cycle, 2026-04-14) |
+
+---
+
+## 17. Spec-to-code cross-reference
+
+For readers tracing a spec section back to the code that realizes it.
+
+| § | Topic | Primary file(s) |
+|---|---|---|
+| 2 | MTFP vocabulary, mantissa/exponent semantics | `m4t/src/m4t_types.h` (cell typedefs, SCALE/RADIX framed as default-convention) |
+| 3 | Hardware anchor (SDOT, TBL, VCNT, vmull_s32) | `m4t/src/m4t_mtfp4.c` (SDOT), `m4t/src/m4t_trit_ops.c` (TBL), `m4t/src/m4t_trit_reducers.c` (VCNT) |
+| 4 | Block geometry (16 B = one NEON vector) | `m4t/src/m4t_types.h` (`M4T_BLOCK_BYTES`, cells-per-block constants); `m4t/src/m4t_mtfp.h` (`_Static_assert` enforcing the invariant) |
+| 5 | Cell types + mantissa ranges | `m4t/src/m4t_types.h` |
+| 6 | SoA storage layout | Implicit in all vec-op APIs (mantissa arrays; exponent arrays deferred until a consumer drives them) |
+| 7 | Per-block exponent encoding | Default-block-exponent convention documented in `m4t_types.h`; per-block sidecar deferred (M2 in `docs/REMEDIATION_PLAN.md`) |
+| 8.1 | Same-block add | `m4t/src/m4t_mtfp.c` (`m4t_mtfp_block_add` + vec composition) |
+| 8.2 | Cross-block add | Deferred (§14.2) |
+| 8.3 | Multiply (Case W widen) | Currently only scalar `m4t_mtfp_clamp64` in `m4t_mtfp.h`; full widening mul lands with a consumer |
+| 8.4 | SDOT ternary matmul (exact by contract) | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_sdot_matmul_bt`); MTFP19 variant in `m4t/src/m4t_ternary_matmul.c` |
+| 8.5 | Widen / saturate / round resolutions | Case S saturation: `m4t_mtfp_block_add`/`_sub`, `m4t_mtfp_clamp64`, `m4t_mtfp4_clamp`, ternary_matmul store. Case W widen: SDOT path (§8.4). Case R: not implemented (§14.2). |
+| 9 | Cache and prefetch (128 B line = 8 blocks) | Design constraint; no explicit enforcement needed in code |
+| 10 | Width conversions | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_to_mtfp19`, `m4t_mtfp19_to_mtfp4`) |
+| 11 | Routing-first surface | `m4t/src/m4t_route.{c,h}` (the five primitives), `m4t/src/m4t_ternary_matmul.{c,h}` (LSH-projection primitive) |
+| 12 | What is NOT in M4T | `archive/` (see `archive/README.md`) |
+| 13 | File organization | `m4t/src/`, `m4t/tests/`, `m4t/tools/` — see `m4t/README.md` |
+| 14.1 | Logical block size (OPEN) | Deferred; logical block = hardware block (1:1) |
+| 14.2 | Cross-block add policy (DEFERRED) | No code; caller uses same-block ops or requests opt-in by name |
+| 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |
+| 14.4 | Exponent status tracking (DECIDED) | No status array allocated until consumer requests |
