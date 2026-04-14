@@ -83,6 +83,13 @@ Triggered by a full audit that identified a collapse of Multi-Trit Floating Poin
 - Full sweep (4 projection sizes × L1 / refine-3 / refine-5) wall clock: 41.6 s, single core.
 - The `m4t_ternary_matmul` bit-select rewrite preserved consumer numerics exactly. No silent regression from the base-2-shortcut → base-3-native shape transition.
 
+### Measured (fully-routed MNIST classifier)
+
+- **New consumer: `tools/mnist_routed_lattice.c`.** First tool that exercises the full routing surface (`m4t_route_sign_extract` + `m4t_route_distance_batch` + `m4t_route_topk_abs`) end-to-end.
+- **Routed accuracy at N_PROJ=2048: 58.37%** (vs. 81.40% L1-over-mantissa on the same projections and training). The routed path loses ~23 points across every N_PROJ; accuracy barely responds to more projections (sign-extract is the binding constraint).
+- Reading: the routing primitives produce arithmetically-correct results; the accuracy gap is an adapter-efficiency artifact of sign-extracting 19-trit mantissas into 1-trit signatures on a task (MNIST nearest-centroid) whose signal lives in magnitudes. Consistent with NORTH_STAR §4: "Running routing-native on [MNIST] is a test of adapter efficiency, not the thesis."
+- Full writeup: `journal/fully_routed_mnist.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.

@@ -35,4 +35,7 @@ option(GLYPH_BUILD_TOOLS "Build glyph consumer tools" ON)
 if(GLYPH_BUILD_TOOLS)
     add_executable(mnist_trit_lattice tools/mnist_trit_lattice.c)
     target_link_libraries(mnist_trit_lattice PRIVATE m4t)
+
+    add_executable(mnist_routed_lattice tools/mnist_routed_lattice.c)
+    target_link_libraries(mnist_routed_lattice PRIVATE m4t)
 endif()
