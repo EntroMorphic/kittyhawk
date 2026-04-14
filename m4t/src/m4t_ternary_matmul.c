@@ -42,9 +42,15 @@ static int64_t ternary_dot(
 
 #if M4T_HAS_NEON
     /* Process 16 trits (= 4 packed bytes) per iteration. For each block,
-     * decode the 16 trit codes into sign bytes, widen signedly to int32,
-     * multiply against 16 loaded MTFP cells, then widen-accumulate into
-     * int64 lanes.
+     * decode the 16 trit codes into sign bytes, then apply them to 16
+     * loaded MTFP activations WITHOUT a multiply. Hardware-native shape:
+     *   trit ==  0 → contribute 0    (bit-select zero)
+     *   trit == +1 → contribute +a   (pass activation)
+     *   trit == -1 → contribute -a   (vnegq_s32 activation)
+     *
+     * Multiplying by a sign in {-1, 0, +1} is a base-2 shortcut through a
+     * general-purpose opcode. The base-3-native expression is a mask and a
+     * conditional negate — which is what TBL + bit-select compute directly.
      *
      * Sign extension note: we use vmovl_s8 / vmovl_s16 so that decoded -1
      * stays as -1 when widened. Unsigned widening would turn -1 into 255.
@@ -73,22 +79,47 @@ static int64_t ternary_dot(
         uint8x16_t dup = vqtbl1q_u8(packed, dup_idx);
 
         /* Per-lane right shift to extract each 2-bit trit code from its byte.
-         * vshlq_u8 interprets its second operand as a SIGNED shift count per
-         * lane: positive = left, negative = right. We negate {0,2,4,6,...} to
-         * get {0,-2,-4,-6,...}, producing right shifts of 0/2/4/6 bits. */
+         * vshlq_u8 with a negated shift count performs per-lane right shift. */
         uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
         uint8x16_t codes = vandq_u8(shifted, mask_03);
 
         /* Decode 16 codes → 16 signed trit bytes {-1, 0, +1}. */
         int8x16_t signs = vqtbl1q_s8(lut_sign, codes);
 
-        /* Widen signs: int8 → int16 → int32 in 4 lanes of 4. */
-        int16x8_t s16_lo = vmovl_s8(vget_low_s8(signs));
-        int16x8_t s16_hi = vmovl_s8(vget_high_s8(signs));
-        int32x4_t s0 = vmovl_s16(vget_low_s16(s16_lo));
-        int32x4_t s1 = vmovl_s16(vget_high_s16(s16_lo));
-        int32x4_t s2 = vmovl_s16(vget_low_s16(s16_hi));
-        int32x4_t s3 = vmovl_s16(vget_high_s16(s16_hi));
+        /* Build two masks from the sign bytes, widened to int32 lanes:
+         *   nonzero_mask[i] = (signs[i] != 0) ? 0xFFFFFFFF : 0
+         *   neg_mask[i]     = (signs[i] < 0)  ? 0xFFFFFFFF : 0
+         * Widening preserves the mask semantics because sign-extending a
+         * byte-wide all-ones is still all-ones in the wider lane. */
+        int8x16_t zero8   = vdupq_n_s8(0);
+        uint8x16_t nz8    = vmvnq_u8(vceqq_s8(signs, zero8));   /* 0xFF where sign != 0 */
+        uint8x16_t neg8   = vcltq_s8(signs, zero8);             /* 0xFF where sign <  0 */
+
+        /* Widen both masks from 16×u8 to 4×4×u32 via two pairwise widens. */
+        uint16x8_t nz16_lo = vmovl_u8(vget_low_u8(nz8));
+        uint16x8_t nz16_hi = vmovl_u8(vget_high_u8(nz8));
+        uint32x4_t nz0 = vmovl_u16(vget_low_u16(nz16_lo));
+        uint32x4_t nz1 = vmovl_u16(vget_high_u16(nz16_lo));
+        uint32x4_t nz2 = vmovl_u16(vget_low_u16(nz16_hi));
+        uint32x4_t nz3 = vmovl_u16(vget_high_u16(nz16_hi));
+        /* vmovl_u8 zero-extends — make the masks all-ones where set by
+         * turning 0x01 → 0xFFFFFFFF via compare-not-equal-to-zero. */
+        uint32x4_t zero32 = vdupq_n_u32(0);
+        nz0 = vmvnq_u32(vceqq_u32(nz0, zero32));
+        nz1 = vmvnq_u32(vceqq_u32(nz1, zero32));
+        nz2 = vmvnq_u32(vceqq_u32(nz2, zero32));
+        nz3 = vmvnq_u32(vceqq_u32(nz3, zero32));
+
+        uint16x8_t ng16_lo = vmovl_u8(vget_low_u8(neg8));
+        uint16x8_t ng16_hi = vmovl_u8(vget_high_u8(neg8));
+        uint32x4_t ng0 = vmovl_u16(vget_low_u16(ng16_lo));
+        uint32x4_t ng1 = vmovl_u16(vget_high_u16(ng16_lo));
+        uint32x4_t ng2 = vmovl_u16(vget_low_u16(ng16_hi));
+        uint32x4_t ng3 = vmovl_u16(vget_high_u16(ng16_hi));
+        ng0 = vmvnq_u32(vceqq_u32(ng0, zero32));
+        ng1 = vmvnq_u32(vceqq_u32(ng1, zero32));
+        ng2 = vmvnq_u32(vceqq_u32(ng2, zero32));
+        ng3 = vmvnq_u32(vceqq_u32(ng3, zero32));
 
         /* Load 16 MTFP activations. */
         int32x4_t a0 = vld1q_s32(xi + k);
@@ -96,11 +127,22 @@ static int64_t ternary_dot(
         int32x4_t a2 = vld1q_s32(xi + k + 8);
         int32x4_t a3 = vld1q_s32(xi + k + 12);
 
-        /* Signed multiply: lanes with sign=0 become 0, ±1 select ±a. */
-        int32x4_t p0 = vmulq_s32(a0, s0);
-        int32x4_t p1 = vmulq_s32(a1, s1);
-        int32x4_t p2 = vmulq_s32(a2, s2);
-        int32x4_t p3 = vmulq_s32(a3, s3);
+        /* Conditional negate where neg_mask is set. */
+        int32x4_t aneg0 = vnegq_s32(a0);
+        int32x4_t aneg1 = vnegq_s32(a1);
+        int32x4_t aneg2 = vnegq_s32(a2);
+        int32x4_t aneg3 = vnegq_s32(a3);
+        int32x4_t s0 = vbslq_s32(ng0, aneg0, a0);
+        int32x4_t s1 = vbslq_s32(ng1, aneg1, a1);
+        int32x4_t s2 = vbslq_s32(ng2, aneg2, a2);
+        int32x4_t s3 = vbslq_s32(ng3, aneg3, a3);
+
+        /* Zero out lanes where the trit is 0 (bit-select against all-zeros). */
+        int32x4_t zero_v = vdupq_n_s32(0);
+        int32x4_t p0 = vbslq_s32(nz0, s0, zero_v);
+        int32x4_t p1 = vbslq_s32(nz1, s1, zero_v);
+        int32x4_t p2 = vbslq_s32(nz2, s2, zero_v);
+        int32x4_t p3 = vbslq_s32(nz3, s3, zero_v);
 
         /* Widen and accumulate into int64 lanes. */
         acc0 = vaddw_s32(acc0, vget_low_s32(p0));

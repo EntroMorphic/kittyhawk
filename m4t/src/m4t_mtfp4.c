@@ -50,16 +50,34 @@ void m4t_mtfp4_sdot_matmul_bt(
     }
 }
 
-/* ── Conversion ────────────────────────────────────────────────────────── */
+/* ── Cell-width conversion (default-block-exponent convention) ──────────
+ *
+ * Under the default-block-exponent convention (see m4t_types.h), MTFP4
+ * blocks use `block_exp = -M4T_MTFP4_RADIX = -2` and MTFP19 blocks use
+ * `block_exp = -M4T_MTFP_RADIX = -10`. Mapping a value across cell
+ * widths without changing its real magnitude requires adjusting the
+ * mantissa by the exponent offset (−2 − (−10) = +8 trits when widening,
+ * −8 trits when narrowing). In default-convention integer terms that's
+ * multiply/divide by 3^8 = 6561.
+ *
+ * mtfp4_to_mtfp19: Case W widen. Exact by construction — the widened
+ * mantissa is at most 40 × 6561 = 262 440, well inside MTFP19.
+ *
+ * mtfp19_to_mtfp4: narrowing conversion. Inherently lossy; this function
+ * rounds half-away-from-zero and then saturates. Callers that need
+ * exactness must stay in MTFP19 or pre-scale so the mantissa fits.
+ * (A spec-compliant Case R opt-in can land when a consumer drives it.)
+ */
 
-/* Scale ratio: MTFP19_SCALE / MTFP4_SCALE = 59049 / 9 = 6561. */
-#define SCALE_RATIO 6561
+#define SCALE_RATIO 6561   /* 3^(MTFP_RADIX - MTFP4_RADIX) = 3^8 */
+
+_Static_assert((int64_t)M4T_MTFP4_MAX_VAL * SCALE_RATIO <= (int64_t)M4T_MTFP_MAX_VAL,
+               "MTFP4→MTFP19 widen must not overflow MTFP19 mantissa");
 
 void m4t_mtfp19_to_mtfp4(
     m4t_mtfp4_t* dst, const m4t_mtfp_t* src, int n)
 {
     for (int i = 0; i < n; i++) {
-        /* Rescale: divide by 6561, round half-away-from-zero. */
         int32_t v = src[i];
         int32_t q;
         if (v >= 0) q = (v + SCALE_RATIO / 2) / SCALE_RATIO;
@@ -72,8 +90,6 @@ void m4t_mtfp4_to_mtfp19(
     m4t_mtfp_t* dst, const m4t_mtfp4_t* src, int n)
 {
     for (int i = 0; i < n; i++) {
-        /* Rescale: multiply by 6561. Max output: 40 * 6561 = 262440,
-         * well within MTFP19 MAX_VAL (581130733). No clamp needed. */
         dst[i] = (m4t_mtfp_t)src[i] * SCALE_RATIO;
     }
 }

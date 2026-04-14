@@ -9,6 +9,7 @@
 #include "m4t_mtfp.h"
 #include "m4t_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 
@@ -57,9 +58,9 @@ void m4t_route_topk_abs(
     assert(decisions && scores);
     assert(k >= 0 && T >= 0);
 
-    /* Track selected tiles via bitmask. Supports T ≤ 64 explicitly in the
-     * type — no stack array, no overflow possible. */
-    assert(T <= 64);
+    /* Track selected tiles via bitmask. Supports T ≤ M4T_ROUTE_MAX_T
+     * explicitly in the type — no stack array, no overflow possible. */
+    assert(T <= M4T_ROUTE_MAX_T);
     uint64_t used = 0;
 
     for (int sel = 0; sel < k; sel++) {
@@ -135,14 +136,15 @@ void m4t_route_signature_update(
     int64_t* means    = scratch + T * D;   /* [D]    */
 
     /* Phase 1: column sums. For each tile, sum each column of the [H, D]
-     * weight matrix. Unpack one row at a time to avoid large temp buffers. */
+     * weight matrix. Unpack one row at a time to avoid large temp buffers.
+     *
+     * This is a compound setup-time function, not a hot-path opcode — the
+     * row unpack buffer is heap-allocated so that D is unbounded from the
+     * substrate's side. The caller owns whatever upper bound it imposes. */
     memset(col_sums, 0, (size_t)T * D * sizeof(int64_t));
 
-    /* Fixed row buffer on the stack. D must be ≤ M4T_ROUTE_MAX_DIM (4096).
-     * This is a compound setup-time function, not a hot-path opcode —
-     * the fixed stack allocation is acceptable here. */
-    m4t_trit_t row_buf[4096];
-    assert(D <= 4096);  /* caller must respect M4T_ROUTE_MAX_DIM */
+    m4t_trit_t* row_buf = (m4t_trit_t*)malloc((size_t)D * sizeof(m4t_trit_t));
+    if (!row_buf) { assert(row_buf && "m4t_route_signature_update: row_buf malloc failed"); return; }
 
     for (int t = 0; t < T; t++) {
         int64_t* cs = col_sums + (size_t)t * D;
@@ -154,6 +156,7 @@ void m4t_route_signature_update(
             }
         }
     }
+    free(row_buf);
 
     /* Phase 2: mean across tiles per dimension. */
     memset(means, 0, (size_t)D * sizeof(int64_t));

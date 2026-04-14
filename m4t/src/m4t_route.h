@@ -73,7 +73,9 @@ void m4t_route_distance_batch(
  * If fewer than k tiles have nonzero scores, the remaining decisions
  * have tile_idx = -1 and sign = 0.
  *
- * T is typically small (4–16). Uses simple selection, not a heap. */
+ * T is capped at M4T_ROUTE_MAX_T (uniqueness tracked via a uint64_t
+ * bitmask). Uses simple selection, not a heap. */
+#define M4T_ROUTE_MAX_T 64
 void m4t_route_topk_abs(
     m4t_route_decision_t* decisions,
     const int32_t* scores,
@@ -105,6 +107,13 @@ void m4t_route_apply_signed(
  *   For each dim d:          mean[d]  = sum_t(raw[t,d]) / T
  *   For each tile t, dim d:  sig[t,d] = sign(raw[t,d] - mean[d])
  *
+ * Rounding note. `mean[d]` uses C integer division (truncation toward
+ * zero), not mathematical rounding. On inputs where the mathematical
+ * mean lies strictly between two integers, the truncated mean differs
+ * by up to 1, which can flip the sign for tiles whose `raw[t,d]` lands
+ * exactly on the mathematical mean but not the truncated one. The
+ * behavior is deterministic; document it at call sites if it matters.
+ *
  * weights layout: T tiles concatenated, each tile is H rows of Dp packed
  *   bytes. Total: T * H * Dp bytes. Row [t * H + h] holds the h-th row
  *   of tile t's weight matrix.
@@ -114,9 +123,8 @@ void m4t_route_apply_signed(
  * scratch: caller-provided buffer of at least (T + 1) * D int64_t values.
  *   Used for column sums ([T * D]) and means ([D]).
  *
- * Constraint: D ≤ 4096 (M4T_ROUTE_MAX_DIM). Uses a fixed stack buffer
- * for row unpacking. This is a setup-time function, not a hot-path opcode. */
-#define M4T_ROUTE_MAX_DIM 4096
+ * D is not capped by the substrate. The row unpack buffer is heap-allocated.
+ * This is a setup-time function, not a hot-path opcode. */
 void m4t_route_signature_update(
     uint8_t* signatures,
     const uint8_t* weights,

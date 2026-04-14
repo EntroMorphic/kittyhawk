@@ -31,6 +31,9 @@ static m4t_mtfp_t* load_images_mtfp(const char* path, int* n) {
     int dim=rows*cols; size_t total=(size_t)(*n)*dim;
     uint8_t* raw=malloc(total); fread(raw,1,total,f); fclose(f);
     m4t_mtfp_t* data=malloc(total*sizeof(m4t_mtfp_t));
+    /* Map uint8 pixel [0, 255] → MTFP19 mantissa at the default block
+     * exponent (block_exp = -M4T_MTFP_RADIX). Pixel byte 255 lands near
+     * the nominal real value 1.0 under the default convention. */
     for(size_t i=0;i<total;i++)
         data[i]=(m4t_mtfp_t)(((int32_t)raw[i]*M4T_MTFP_SCALE+127)/255);
     free(raw); return data;
@@ -150,9 +153,9 @@ int main(int argc, char** argv) {
         /* Inference */
         int correct_l1=0, correct_refine3=0, correct_refine5=0;
 
+        m4t_mtfp_t* test_proj_buf = malloc((size_t)N_PROJ * sizeof(m4t_mtfp_t));
         for(int s=0;s<n_test;s++){
             const m4t_mtfp_t* img=x_test+(size_t)s*INPUT_DIM;
-            m4t_mtfp_t test_proj_buf[4096];
             m4t_mtfp_ternary_matmul_bt(test_proj_buf,img,proj_packed,1,INPUT_DIM,N_PROJ);
 
             /* Stage 1: L1 in projection space */
@@ -215,7 +218,7 @@ int main(int argc, char** argv) {
         printf("  L1 proj top-5 → pixel refine: %d/%d = %d.%02d%%\n\n",
                correct_refine5,n_test,correct_refine5*100/n_test,(correct_refine5*10000/n_test)%100);
 
-        free(proj_w);free(proj_packed);free(train_proj);free(proj_sums);free(proj_cents);
+        free(proj_w);free(proj_packed);free(train_proj);free(proj_sums);free(proj_cents);free(test_proj_buf);
     }
 
     printf("Zero float. Zero gradients. Pure lattice geometry.\n");

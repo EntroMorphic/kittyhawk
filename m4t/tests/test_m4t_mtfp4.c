@@ -22,34 +22,16 @@
 #define F4_MAX  M4T_MTFP4_MAX_VAL   /* 40 */
 #define F4_S    M4T_MTFP4_SCALE     /* 9 */
 
-/* ── Scalar arithmetic ─────────────────────────────────────────────────── */
+/* ── Saturating clamp ──────────────────────────────────────────────────── */
 
-static int test_f4_scalar(void) {
-    /* add: 9 + 9 = 18 (real 1.0 + 1.0 = 2.0) */
-    ASSERT_EQ_I32(m4t_mtfp4_add(F4_S, F4_S), 2 * F4_S, "f4 add 1+1");
-    ASSERT_EQ_I32(m4t_mtfp4_sub(F4_S, F4_S), 0, "f4 sub 1-1");
-    ASSERT_EQ_I32(m4t_mtfp4_neg(F4_S), -F4_S, "f4 neg");
-
-    /* mul: 9 * 18 = 162 → (162 + 4) / 9 = 18 = 2S (1.0 * 2.0 = 2.0) */
-    ASSERT_EQ_I32(m4t_mtfp4_mul(F4_S, 2 * F4_S), 2 * F4_S, "f4 mul 1*2");
-
-    /* mul: 4 * 4 = 16 → (16 + 4) / 9 = 2 (real ≈ 0.44 * 0.44 ≈ 0.198 → cell 2 ≈ 0.222) */
-    ASSERT_EQ_I32(m4t_mtfp4_mul(4, 4), 2, "f4 mul 4*4");
-
-    /* trit: 9 * +1 = 9, 9 * -1 = -9, 9 * 0 = 0 */
-    ASSERT_EQ_I32(m4t_mtfp4_mul_trit(F4_S,  1),  F4_S, "f4 trit*+1");
-    ASSERT_EQ_I32(m4t_mtfp4_mul_trit(F4_S, -1), -F4_S, "f4 trit*-1");
-    ASSERT_EQ_I32(m4t_mtfp4_mul_trit(F4_S,  0),  0, "f4 trit*0");
-    return 0;
-}
-
-/* ── Saturation ────────────────────────────────────────────────────────── */
-
-static int test_f4_saturation(void) {
-    ASSERT_EQ_I32(m4t_mtfp4_add(F4_MAX, 1), F4_MAX, "f4 add sat");
-    ASSERT_EQ_I32(m4t_mtfp4_add(-F4_MAX, -1), -F4_MAX, "f4 add sat neg");
-    ASSERT_EQ_I32(m4t_mtfp4_sub(F4_MAX, -F4_MAX), F4_MAX, "f4 sub sat");
-    ASSERT_EQ_I32(m4t_mtfp4_mul(F4_MAX, 2 * F4_S), F4_MAX, "f4 mul sat");
+static int test_f4_clamp(void) {
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(0),             0,       "f4 clamp 0");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(F4_MAX),        F4_MAX,  "f4 clamp max");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(-F4_MAX),      -F4_MAX,  "f4 clamp -max");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(F4_MAX + 1),    F4_MAX,  "f4 clamp sat+");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(-(F4_MAX + 1)), -F4_MAX, "f4 clamp sat-");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(INT32_MAX),     F4_MAX,  "f4 clamp huge+");
+    ASSERT_EQ_I32(m4t_mtfp4_clamp(-INT32_MAX),   -F4_MAX,  "f4 clamp huge-");
     return 0;
 }
 
@@ -163,8 +145,7 @@ static int test_f4_conversion(void) {
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
-    if (test_f4_scalar())         return 1;
-    if (test_f4_saturation())     return 1;
+    if (test_f4_clamp())          return 1;
     if (test_f4_sdot_small())     return 1;
     if (test_f4_sdot_k32())       return 1;
     if (test_f4_sdot_k17_tail())  return 1;

@@ -8,6 +8,7 @@
 
 #include "m4t_trit_pack.h"
 #include "m4t_internal.h"
+#include <assert.h>
 #include <string.h>
 
 /* Decode LUT: maps 2-bit trit codes to signed trit values.
@@ -24,7 +25,11 @@ const int8_t M4T_TRIT_DECODE_LUT[16] __attribute__((aligned(16))) = {
 
 static inline uint8_t trit_to_code(m4t_trit_t t) {
     /* {-1, 0, +1} → {0b10, 0b00, 0b01}.
-     * Out-of-range inputs are undefined; we defensively return 0. */
+     * In debug builds we fail loudly on out-of-range inputs — silently
+     * mapping noise to "zero trit" hides bugs in trit generators. In
+     * release builds (NDEBUG) the non-{-1,0,+1} fallback still collapses
+     * to zero for defense in depth. */
+    assert(t >= -1 && t <= 1);
     return (t == 1) ? 0x01u : (t == -1) ? 0x02u : 0x00u;
 }
 

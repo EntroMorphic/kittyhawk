@@ -1,30 +1,40 @@
 /*
- * m4t_mtfp4.h — MTFP4 routing cell (int8, 4 trits)
+ * m4t_mtfp4.h — MTFP4 routing cell (int8 mantissa, 4 trits)
  *
  * M4T IS TERNARY / MULTI-TRIT / MULTI-TRIT FLOATING POINT ONLY.
  *
- * The narrowest MTFP cell. 16 cells per NEON register. Designed for
- * routing: signature scores, distance normalization, and the SDOT-native
- * ternary matmul where int8 MTFP4 activations × int8 trit weights feed
- * directly into vdotq_s32 — 16 multiply-accumulates per instruction.
+ * The narrowest MTFP cell. 16 mantissas per NEON register = one block
+ * (16 bytes). Designed for routing: signature scores, distance
+ * normalization, and the SDOT-native ternary matmul.
  *
- * radix=2, scale=3^2=9. real = cell / 9.
- * range: ±(3^4-1)/2 / 9 = ±40/9 ≈ ±4.44.
- * resolution: 1/9 ≈ 0.111.
+ * Mantissa range: |m| ≤ M4T_MTFP4_MAX_VAL = 40 = (3^4 - 1) / 2.
+ * Cells-per-block: M4T_MTFP4_CELLS_PER_BLOCK = 16.
+ * Block exponent: sidecar metadata, per the substrate spec (§7). Under
+ * the legacy default-block-exponent convention, M4T_MTFP4_SCALE = 3^2
+ * specifies `block_exp = -2`; new consumers should track the exponent
+ * explicitly rather than reading SCALE as a type property.
  *
- * The SDOT matmul is the fastest ternary operation M4 silicon can do.
- * It exists because ternary weights {-1, 0, +1} stored as int8 are
- * valid SDOT operands, and MTFP4 activations in int8 are also valid.
- * The int32 accumulator holds the sum without rescale (ternary × MTFP4
- * stays in MTFP4 units; no SCALE division needed).
+ * SDOT is the hardware-native ternary matmul (§8.4 Case W — the output
+ * widens to MTFP19 mantissa exactly; the 16-byte MTFP4 block maps to
+ * one SDOT input, the 16-byte MTFP19 block to one SDOT output).
  *
- * v0 scope notes:
- * - Conversion functions (mtfp19↔mtfp4) are scalar. NEON when needed.
- * - No NEON vector ops (vec_add, etc.) for MTFP4 — add when routing
- *   layer needs element-wise MTFP4 throughput at 16 lanes.
- * - mul rounding uses SCALE/2 = 4 (truncated from 4.5). Proportionally
- *   larger bias than MTFP19 (11% vs 0.002%). Acceptable for routing
- *   scores where relative ordering matters more than absolute precision.
+ * This header exposes only what live consumers demand:
+ *   - m4t_mtfp4_clamp — saturating narrow of an int32 accumulator to
+ *     MTFP4 mantissa. Used by the SDOT matmul store and by the
+ *     conversion routines. Case S (§8.5) — fixed-output saturation.
+ *   - m4t_mtfp4_sdot_matmul_bt — the SDOT primitive.
+ *   - m4t_mtfp19_to_mtfp4 / m4t_mtfp4_to_mtfp19 — cell-width narrow/
+ *     widen conversions under the default-block-exponent convention.
+ *     The widen (to MTFP19) is exact. The narrow (to MTFP4) rounds at
+ *     the cell boundary and is a named lossy op — consumers that need
+ *     exactness should stay in MTFP19 or request a Case R opt-in (not
+ *     provided until a consumer drives it; see §14.2).
+ *
+ * Scalar arithmetic primitives (add/sub/neg/mul) are intentionally
+ * absent from this header. Under the substrate discipline ("no
+ * primitive without named consumer demand"), they re-emerge when a
+ * consumer asks — and when they do, they land with §8.5-compliant
+ * semantics (mul widens to MTFP9 mantissa, not a silent-rounding MTFP4).
  */
 
 #ifndef M4T_MTFP4_H
@@ -36,37 +46,15 @@
 extern "C" {
 #endif
 
-/* ── Scalar arithmetic ─────────────────────────────────────────────────── */
+/* ── Saturating clamp (Case S per §8.5) ───────────────────────────────── */
 
+/* Narrow an int32 accumulator to an MTFP4 mantissa cell. Exact when
+ * |v| ≤ M4T_MTFP4_MAX_VAL; saturates at ±MAX_VAL otherwise. Used by the
+ * SDOT matmul store and by the cell-width conversion routines. */
 static inline m4t_mtfp4_t m4t_mtfp4_clamp(int32_t v) {
     if (v >  (int32_t)M4T_MTFP4_MAX_VAL) return  M4T_MTFP4_MAX_VAL;
     if (v < -(int32_t)M4T_MTFP4_MAX_VAL) return -M4T_MTFP4_MAX_VAL;
     return (m4t_mtfp4_t)v;
-}
-
-static inline m4t_mtfp4_t m4t_mtfp4_add(m4t_mtfp4_t a, m4t_mtfp4_t b) {
-    return m4t_mtfp4_clamp((int32_t)a + (int32_t)b);
-}
-
-static inline m4t_mtfp4_t m4t_mtfp4_sub(m4t_mtfp4_t a, m4t_mtfp4_t b) {
-    return m4t_mtfp4_clamp((int32_t)a - (int32_t)b);
-}
-
-static inline m4t_mtfp4_t m4t_mtfp4_neg(m4t_mtfp4_t a) {
-    return (m4t_mtfp4_t)(-a);
-}
-
-/* MTFP4 × MTFP4 multiply: int16 product, rescale by SCALE=9, clamp. */
-static inline m4t_mtfp4_t m4t_mtfp4_mul(m4t_mtfp4_t a, m4t_mtfp4_t b) {
-    int16_t prod = (int16_t)a * (int16_t)b;
-    if (prod >= 0) prod += M4T_MTFP4_SCALE / 2;
-    else           prod -= M4T_MTFP4_SCALE / 2;
-    return m4t_mtfp4_clamp((int32_t)(prod / M4T_MTFP4_SCALE));
-}
-
-/* MTFP4 × trit: no rescale needed. */
-static inline m4t_mtfp4_t m4t_mtfp4_mul_trit(m4t_mtfp4_t a, m4t_trit_t t) {
-    return m4t_mtfp4_clamp((int32_t)a * (int32_t)t);
 }
 
 /* ── SDOT ternary matmul ───────────────────────────────────────────────── */

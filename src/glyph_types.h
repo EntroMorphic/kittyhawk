@@ -13,7 +13,6 @@
 typedef m4t_mtfp4_t   glyph_mtfp4_t;
 typedef m4t_mtfp9_t   glyph_mtfp9_t;
 typedef m4t_mtfp_t    glyph_mtfp_t;
-typedef m4t_mtfp_w_t  glyph_mtfp_w_t;
 typedef m4t_trit_t    glyph_trit_t;
 
 #define GLYPH_MTFP_SCALE      M4T_MTFP_SCALE

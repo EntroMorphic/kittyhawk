@@ -73,12 +73,6 @@ int main(void) {
 
             int result = op_fns[op](a_val, b_val);
 
-            /* Convert result trit to code */
-            int result_code = 0;
-            for (int i = 0; i < 3; i++) {
-                if (trit_vals[i] == result) { result_code = trit_codes[i]; break; }
-            }
-
             /* For the decode LUT we want signed int8, not codes */
             printf("%2d", result);
             if (idx < 15) printf(", ");

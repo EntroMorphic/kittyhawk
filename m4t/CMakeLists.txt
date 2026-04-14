@@ -30,6 +30,7 @@ add_compile_options(
     -Wpedantic
     -Wshadow
     -Wstrict-prototypes
+    -Werror
 )
 
 if(APPLE)
@@ -77,4 +78,20 @@ if(M4T_BUILD_TESTS)
     add_executable(test_m4t_mtfp4 tests/test_m4t_mtfp4.c)
     target_link_libraries(test_m4t_mtfp4 PRIVATE m4t)
     add_test(NAME m4t_mtfp4 COMMAND test_m4t_mtfp4)
+endif()
+
+option(M4T_BUILD_TOOLS "Build M4T dev tools (trit_golden, lut_gen)" OFF)
+if(M4T_BUILD_TOOLS)
+    # Golden-value enumerator for trit op truth tables. Pure substrate,
+    # no float. Useful when regenerating LUT_MUL / LUT_SAT_ADD / etc.
+    add_executable(m4t_trit_golden tools/m4t_trit_golden.c)
+    target_link_libraries(m4t_trit_golden PRIVATE m4t)
+
+    # Offline LUT generator for (future) ternary-float nonlinearities.
+    # This is the ONLY sanctioned place in the ecosystem where binary
+    # float (libm) is used — at build time, not runtime. Currently has
+    # no live consumer inside libm4t; archived nonlinearity consumers
+    # would link its output back in when a consumer demands them.
+    add_executable(m4t_lut_gen tools/m4t_lut_gen.c)
+    target_link_libraries(m4t_lut_gen PRIVATE m)
 endif()
