@@ -435,3 +435,111 @@ Red-team of commit `663c355` (the "routed 97.31% beats dense 97.05% by 10.8×" h
 5. Commit everything as one cohesive correction.
 
 Deferred: L-RT1D (memory).
+
+---
+
+# Fifth red-team round (2026-04-15, audit follow-up)
+
+Scope: the three audit findings raised against the current local repo state.
+
+## H-A1. Repo-root `-Werror` contract is false in practice
+
+**Finding.** `README.md` claims the numeric core compiles clean under `-Werror`, but the repo entrypoint did not apply the warning set to top-level tools. `m4t/CMakeLists.txt` enforced the warning policy only inside the substrate subtree. A root build emitted warnings from `tools/mnist_full_sweep.c` and still succeeded.
+
+**Remediation plan.**
+- [x] Apply the warning policy at the repo root so top-level tools and glyph tests inherit it.
+- [x] Fix the known top-level warning in `tools/mnist_full_sweep.c` instead of weakening the warning policy.
+- [x] Verify with a clean root configure/build, not just a standalone `m4t` build.
+
+**Plan red-team.**
+- Risk: enabling root `-Werror` could uncover unrelated warning debt across the tool layer and turn a small hygiene fix into a large refactor.
+- Counter: keep the change narrow, fix only the warnings exposed by the current tree, and verify with the root CMake entrypoint immediately after the flag change.
+
+**Complete when.** `cmake -S . -B build && cmake --build build` succeeds with the repo-root warning policy in force.
+
+## H-A2. `m4t_mtfp_ternary_matmul_bt` lacks direct automated coverage
+
+**Finding.** The projection kernel is a central live primitive, but the existing test suite covered it only indirectly through consumer tools.
+
+**Remediation plan.**
+- [x] Add `m4t/tests/test_m4t_ternary_matmul.c`.
+- [x] Cover exact small products, all-zero rows, NEON-width `K=16`, NEON+tail `K=20`, and saturating clamp on store.
+- [x] Register the new binary in `m4t/CMakeLists.txt` and include it in `ctest`.
+
+**Plan red-team.**
+- Risk: a shallow test could close the finding cosmetically while still missing the real failure modes (packed-trit decode boundaries, tail handling, or saturation).
+- Counter: make the cases structurally distinct rather than duplicative: one exact scalar-width case, one full-width NEON case, one mixed NEON+tail case, and one explicit saturation case.
+
+**Complete when.** `ctest` includes a dedicated ternary-matmul binary and it passes on the local tree.
+
+## M-A3. Glyph wrapper surface is exported but untested
+
+**Finding.** The top-level `glyph_*` headers are the public consumer surface, but `tests/CMakeLists.txt` still documented wrapper tests as pending.
+
+**Remediation plan.**
+- [x] Rebuild wrapper coverage as `tests/test_glyph_wrapper.c` against the live alias surface.
+- [x] Exercise type aliases, trit-pack aliases, ternary-matmul aliasing, and route aliases.
+- [x] Wire the test into the root `tests/CMakeLists.txt` so it runs through the same `ctest` entrypoint as the rest of the repo.
+
+**Plan red-team.**
+- Risk: a compile-only wrapper test would miss alias drift that still compiles but resolves to the wrong symbol or behavior.
+- Counter: compare glyph-prefixed calls directly against the underlying `m4t_*` functions at runtime for representative operations.
+
+**Complete when.** Root `ctest` runs a glyph-wrapper binary that passes.
+
+## Execution order (fifth round)
+
+1. Fix the root build contract and the warning it exposes.
+2. Add direct ternary-matmul tests and register them.
+3. Rebuild glyph wrapper tests and register them.
+4. Rebuild from the repo root and run `ctest`.
+
+---
+
+# Sixth red-team round (2026-04-15, dense-to-routed conversion)
+
+Scope: remove dense decision paths from the live Trit Lattice architecture and its follow-on tools.
+
+## H-R1. `mnist_trit_lattice.c` is routed only in feature generation
+
+**Finding.** The front-end projection is ternary-routed, but the classifier collapses back to projection-space and pixel-space L1. That leaves the flagship Trit Lattice tool architecturally hybrid.
+
+**Remediation plan.**
+- [x] Replace projection-L1 centroid ranking with class-signature routing over packed trits.
+- [x] Remove pixel-space refinement from the live decision path.
+- [x] Keep the projection front-end intact so the conversion isolates the classifier boundary.
+
+**Plan red-team.**
+- Risk: simply swapping in routing without symmetric tau calibration would repeat the old asymmetric-centroid failure mode.
+- Counter: compute `tau_c` from centroid-diff magnitudes and `tau_q` from query/train projection magnitudes, then count actual zero density on both sides.
+
+## H-R2. Amplification tool still escapes to dense pixel fallback
+
+**Finding.** `mnist_routed_amplified.c` uses a routed ensemble, then abandons the routing surface for dense pixel k-NN on uncertain queries.
+
+**Remediation plan.**
+- [ ] Replace the dense fallback with a routed-only fallback over the existing per-projection top-k evidence.
+- [ ] Preserve the uncertainty-trigger idea, but keep the resolver in ternary signature space.
+
+**Plan red-team.**
+- Risk: a routed fallback that is just a restatement of the ensemble vote adds complexity without adding signal.
+- Counter: make the fallback aggregate finer routed evidence than the coarse per-projection winner, e.g. flattened top-k signature votes or secondary routed ranking.
+
+## H-R3. Cascade tools use a routed filter but dense resolver
+
+**Finding.** `mnist_cascade_*` and `mnist_resolver_sweep.c` all conclude that the filter is good and the resolver is the bottleneck, but the resolver family being tested is still mostly dense (pixel L1/L2, cosine, centroids).
+
+**Remediation plan.**
+- [ ] Replace pixel-space resolution with routed secondary resolution: secondary-hash, multi-seed routed rank fusion, or routed per-class signatures.
+- [ ] Update comments and reporting strings so the tools describe routed filter + routed resolver, not cascade-to-dense.
+
+**Plan red-team.**
+- Risk: swapping to a weaker routed resolver could lower accuracy and obscure whether the architecture is cleaner but empirically worse.
+- Counter: keep the tool outputs explicit about which resolver is primary and compare against pure-hash top-k baselines so regressions stay visible.
+
+## Execution order (sixth round)
+
+1. Convert `mnist_trit_lattice.c` to routed-only classification.
+2. Convert `mnist_routed_amplified.c` to routed-only fallback.
+3. Convert cascade and resolver tools from dense secondary metrics to routed secondary metrics.
+4. After each file: build, red-team, remediate if needed, commit, then move on.
