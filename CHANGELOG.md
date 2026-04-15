@@ -103,6 +103,36 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Amplification experiment — predictions failed honestly
+
+New consumer: `tools/mnist_routed_amplified.c`. Tested two amplification paths proposed from the inspectability analysis: (1) K=5 independent ternary projections with majority-vote ensemble, (2) audit-triggered pixel-k-NN fallback for uncertain queries.
+
+**Predictions:** ensemble +0.3 to +0.5%, fallback +0.1 to +0.2%.
+**Actual results:** ensemble +0.04%, fallback *negative*.
+
+| Configuration | Accuracy |
+|---|---|
+| Best solo projection (rank-k=5) | 97.91 ± 0.04% |
+| **Ensemble (K=5, no fallback)** | **97.90 ± 0.02%** |
+| Ensemble + FB (agree≥5) | 97.75 ± 0.02% (−0.15%) |
+| Ensemble + FB (agree≥4) | 97.86 ± 0.05% (flat) |
+| Ensemble + FB (agree≥3) | 97.90 ± 0.01% (tied) |
+
+**Why the predictions failed:**
+
+1. **Ensemble:** errors don't decorrelate across random projections on MNIST. Failure modes are input-driven (genuinely ambiguous digits) not projection-driven. Different random seeds see the same ambiguities. The ensemble's actual value is deterministic stability (matches best-of-5 with half the variance), not accuracy ceiling.
+
+2. **Fallback:** on the hardest subset (where ensemble is uncertain), pixel-k-NN is *worse* than routing, not better. 46.7% correct on trigger set vs ensemble's ~50% baseline on same subset. Swapping loses ~15 cases per seed.
+
+**What this tells us:**
+- The ~2.1% residual error on MNIST is at or near the floor for this representational family. Aggregating more of the same doesn't recover missing information.
+- The routing surface beats dense pixel k-NN *even on hard cases* — stronger than the previous "wins on average" claim.
+- Audit-based adaptation is a detection tool; correction requires a classifier with *different information*, not just a different view.
+
+**Prediction failure diagnostic:** both predictions were made from whole-set averages (pixel-k-NN is 97.16%, projection errors "should" decorrelate). The relevant performance distribution on the *hard subset* is dramatically different. Future adaptation predictions should use the audit trail to measure on the targeted subset, not extrapolate from headline averages.
+
+Full writeup: `journal/amplification_negative_result.md`.
+
 ### Adapted (failure-guided vote-rule modification — first adaptation loop on substrate)
 
 New consumer: `tools/mnist_routed_weighted.c`. Tests whether distance- or rank-weighted voting recovers the NARROW MISS cases identified by the inspectability trace. Same pipeline as `mnist_routed_knn.c`; only the vote rule differs.
