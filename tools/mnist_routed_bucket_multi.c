@@ -122,17 +122,20 @@ int main(int argc, char** argv) {
     /* Load dataset. */
     glyph_dataset_t ds;
     if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) {
-        fprintf(stderr, "failed to load MNIST from %s\n", cfg.data_dir);
+        fprintf(stderr, "failed to load MNIST-format dataset from %s\n", cfg.data_dir);
         return 1;
     }
-    glyph_dataset_deskew(&ds);
+    if (!cfg.no_deskew) {
+        glyph_dataset_deskew(&ds);
+    }
 
     printf("mnist_routed_bucket_multi (libglyph CLI consumer)\n");
     printf("  data_dir=%s\n", cfg.data_dir);
     printf("  n_proj=%d  density=%.2f  m_max=%d  max_radius=%d  min_cands=%d  max_union=%d\n",
            cfg.n_proj, cfg.density, cfg.m_max, cfg.max_radius, cfg.min_cands, cfg.max_union);
-    printf("  base_seed=%u,%u,%u,%u  mode=%s\n",
-           cfg.base_seed[0], cfg.base_seed[1], cfg.base_seed[2], cfg.base_seed[3], cfg.mode);
+    printf("  base_seed=%u,%u,%u,%u  mode=%s  deskew=%s\n",
+           cfg.base_seed[0], cfg.base_seed[1], cfg.base_seed[2], cfg.base_seed[3],
+           cfg.mode, cfg.no_deskew ? "off" : "on");
     printf("  n_train=%d  n_test=%d  input_dim=%d\n\n",
            ds.n_train, ds.n_test, ds.input_dim);
 

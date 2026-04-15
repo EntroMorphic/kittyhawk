@@ -30,6 +30,13 @@ typedef struct {
 
     /* Optional: restrict the M sweep to a single value. 0 = full sweep. */
     int         single_m;
+
+    /* Set via --no_deskew. Default 0 = apply integer-moment shear
+     * deskewing after loading the dataset. The deskew pass is optimal
+     * for MNIST digits (aligns the vertical stroke axis) but may
+     * distort datasets without a canonical shear axis (e.g. clothing
+     * items in Fashion-MNIST). */
+    int         no_deskew;
 } glyph_config_t;
 
 /* Fill with project defaults (matches the values from Phase 3 run). */

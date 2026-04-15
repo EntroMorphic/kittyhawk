@@ -89,10 +89,12 @@ int main(int argc, char** argv) {
 
     glyph_dataset_t ds;
     if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) {
-        fprintf(stderr, "failed to load MNIST from %s\n", cfg.data_dir);
+        fprintf(stderr, "failed to load MNIST-format dataset from %s\n", cfg.data_dir);
         return 1;
     }
-    glyph_dataset_deskew(&ds);
+    if (!cfg.no_deskew) {
+        glyph_dataset_deskew(&ds);
+    }
 
     printf("mnist_routed_bucket (libglyph single-table consumer, Axis 5)\n");
     printf("  data_dir=%s\n", cfg.data_dir);

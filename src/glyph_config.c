@@ -39,6 +39,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->mode        = "oracle";
     cfg->verbose     = 0;
     cfg->single_m    = 0;
+    cfg->no_deskew   = 0;
 }
 
 void glyph_config_print_usage(const char* progname) {
@@ -58,6 +59,10 @@ void glyph_config_print_usage(const char* progname) {
         "                           reproduces the Phase 3 measurement byte-for-byte)\n"
         "  --mode <str>            'oracle' (default) or 'full' (+ resolvers)\n"
         "  --single_m <int>        restrict sweep to a single M value [0 = full sweep]\n"
+        "  --no_deskew             skip the integer image-moment shear preprocessing step\n"
+        "                          (default: deskew; recommended ON for MNIST digits,\n"
+        "                           OFF for datasets without a canonical shear axis like\n"
+        "                           Fashion-MNIST clothing or CIFAR-10 natural images)\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -132,7 +137,8 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
             glyph_config_print_usage(argv[0]);
             return -1;
         }
-        if (strcmp(arg, "--verbose") == 0) { cfg->verbose = 1; continue; }
+        if (strcmp(arg, "--verbose") == 0)   { cfg->verbose = 1;   continue; }
+        if (strcmp(arg, "--no_deskew") == 0) { cfg->no_deskew = 1; continue; }
 
         /* All other options take a value in argv[i+1]. */
         if (i + 1 >= argc) {
