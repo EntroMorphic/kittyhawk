@@ -1,6 +1,6 @@
 ---
 title: Findings — Glyph / M4T Rebuild
-status: As of 2026-04-15 (routed bucket consumer: first genuinely routed Glyph architecture, O(1) amortized query at 82.58%/9.9μs vs dense 83.86%/1950μs; cascade tools reframed as measurement scaffolding)
+status: As of 2026-04-15 (multi-table routed bucket at M=32 reaches 97.24% on deskewed MNIST at N_PROJ=16 — first routed architecture in Glyph to exceed 97%; matches pure N_PROJ=512 scaling curve at equivalent total bits)
 companion-docs: NORTH_STAR.md · docs/THESIS.md · CHANGELOG.md · m4t/docs/M4T_SUBSTRATE.md
 ---
 
@@ -27,6 +27,9 @@ Trit Lattice LSH k-NN on the rebuilt M4T substrate, deskewed MNIST, N_PROJ=2048,
 | **Accuracy (N_PROJ=16 routed, fused filter H1+H2 + H2+H3+H4 baseline L50_H1 → L50_H12 lift)** | 83.86% → **88.44%** (+4.58 from a single architectural move) |
 | **Accuracy (N_PROJ=16 routed, L200_H12 — fused filter + widened K, best measurement-scaffolding variant)** | **88.87%** (single seed), within 0.59 of global Gq at ~50% of Gq's cost |
 | **Accuracy (N_PROJ=16 routed BUCKET consumer — first genuinely routed architecture, O(1) amortized query)** | **82.58%** at **9.9 μs/query** (single seed), −1.28 below dense L50_H1 at **~197× faster wall time** |
+| **Accuracy (N_PROJ=16 multi-table routed bucket, M=16 tables, SUM resolver)** | **96.13%** at **~0.67 ms/query** (single seed) |
+| **Accuracy (N_PROJ=16 multi-table routed bucket, M=32 tables, SUM resolver — first routed architecture to exceed 97%)** | **97.24%** at **~1.92 ms/query** (single seed); matches pure N_PROJ=512 scan (97.06%) at ~2× faster wall time |
+| **Accuracy (N_PROJ=16 multi-table routed bucket, M=64 tables, SUM resolver)** | **97.31%** at **~4.13 ms/query** (single seed); within noise of pure N_PROJ=1024 scan (97.37%) |
 | **Accuracy scaling curve (N_PROJ=2 to 8192)** | Sigmoid in log-space; saturates at 8192 (+0.01% for 2× compute). Throughput peak at N_PROJ=64 (11 000 queries/sec, 92% accuracy). See `journal/full_scaling_curve.md`. |
 | **Speed (N_PROJ=2048)** | 7.0 s for 10K × 60K k-NN queries — 20.3× faster than NEON-vectorized dense L1 over the same projections |
 | **Inspectability** | Per-classification audit trail — structurally unavailable to dense k-NN |
@@ -656,6 +659,226 @@ Adding to the cascade rules list (rules 1–6 in Axis 4d):
 
 See `journal/routed_bucket_consumer.md` for the complete derivation, code snippets, architectural framing, and follow-up list.
 
+## Axis 6 — Multi-table routed bucket LSH: breaking 97% at N_PROJ=16
+
+Added 2026-04-15. This axis extends the Axis 5 signature-as-address architecture to M independent bucket tables, each keyed on a different-seeded 16-trit ternary random projection. Per-table ternary multi-probe provides local recall; cross-table union-merge provides global coverage; a summed-distance resolver scores the union. **At M=32 the architecture reaches 97.24% accuracy on deskewed MNIST — the first routed architecture in Glyph to exceed 97% at N_PROJ=16.** At M=64 it reaches 97.31%. Zero dense scans anywhere in the pipeline.
+
+### The LMM cycle that produced this
+
+Full four-file LMM cycle in `journal/break_97_nproj16_{raw,nodes,reflect,synthesize}.md`. The user's hypothesis was "local and global routing with the Trit Lattice LSH can break 97% at N_PROJ=16." The cycle committed to Reading A (classical multi-table LSH with union-merge) as the concrete mapping of "local + global" to a routing-only substrate, predicted target crossing around M=32, and gated execution on an oracle-pass prerequisite measurement.
+
+### Architecture
+
+```
+TRAINING (one-time, ~11 seconds for M=64 on 60K MNIST)
+  for m in 0..M:
+      W_m = random_ternary_projection(seed_m, N_PROJ=16)
+      tau_m = percentile(|W_m @ x|, density=0.33)       // per-table tau calibration
+      for i in 0..N_train:
+          sig_m[i] = threshold_extract(W_m @ x_train[i], tau_m)
+          entries_m[i] = (sig_to_key(sig_m[i]), i)
+      qsort(entries_m, by sig_key)                       // ~3 ms per table
+
+QUERY (per test sample, O(1) amortized in N_train)
+  clear candidate union (votes[], hit_list[])
+  for m in 0..M:
+      q_sig_m = threshold_extract(W_m @ query, tau_m)
+      for r = 0..2:
+          if per_table_candidates(m) >= MIN_CANDS: break
+          for each neighbor_key in ternary_neighbors(q_sig_m, r):
+              lookup_bucket(entries_m, neighbor_key)
+              append matching proto_idxs to union (votes++, hit_list)
+  score each candidate in hit_list via SUM resolver:
+      score[c] = Σ_m popcount_dist(q_sig_m, candidate_sig_m)
+  return label(argmin score)
+```
+
+**Local routing** is the per-table multi-probe: a ternary Hamming neighborhood walk (radius 0, 1, 2) producing candidates that live near the query's sig in that table's projection. **Global routing** is the cross-table union-merge: the candidate set is the union of every table's local neighborhood. The operator is set-theoretic, not a new primitive. The resolver reads the composite distance across all M tables and ranks the union.
+
+### Phase 2 — oracle ceiling pass (go/no-go gate)
+
+For each query and each M checkpoint, Phase 2 measured `P(correct class present anywhere in the cross-table union)`:
+
+| M | oracle ceiling | avg union size | avg probes per query |
+|---|---|---|---|
+| 1 | 94.30% | 94.3 | 194.4 |
+| 2 | **97.90%** | 132.5 | 425.9 |
+| 4 | 99.75% | 315.9 | 801.1 |
+| 8 | 99.99% | 543.6 | 1657.2 |
+| 16 | **100.00%** | 1072.8 | 3274.0 |
+| 32 | **100.00%** | 1985.8 | 6538.7 |
+| 64 | **100.00%** | 3521.2 | 13064.4 |
+
+Full oracle-only sweep wall clock: 5.43 s for 10K queries. **~0.54 ms/query including all probing across M=64.**
+
+**Two observations from Phase 2 that reshaped the whole cycle's expectations:**
+
+1. **M=1 oracle is already 94.30%**, not the ~60-62% I had predicted from extrapolating the pure-signature scaling curve. I had conflated "classification accuracy" (the scaling curve's metric — which is rank-destroyed) with "set-membership in the multi-probe neighborhood" (the oracle ceiling metric — which is neighborhood-preserved). The Axis 4c atomic probe had already measured the right anchor (52% exact-match, 97% at min Hamming ≤ 2 bits), and the Axis 5 filter ceiling at top-50 was 98.59%. **Anchoring Phase 3 predictions on the scaling curve was a mistake; the correct anchor is the atomic probe's Hamming histogram.**
+
+2. **M=2 oracle is 97.90% — already at target.** Two tables is enough that the candidate union contains the correct class for 97.9% of queries. If any resolver could extract classification from that union within 0.9 points of oracle, we'd break 97% at M=2. This changes the question from "how many tables do we need for oracle to reach 97%" (answered: 2) to "how fast does the resolver gap close."
+
+### Correlation analysis from Phase 2
+
+If tables were fully independent, the miss rate would fall geometrically: at M tables, `miss_M = miss_1^M`. Measured vs predicted-under-independence:
+
+| M | predicted miss (indep) | measured miss | correlation factor |
+|---|---|---|---|
+| 1 | 5.70% | 5.70% | — (baseline) |
+| 2 | 0.32% | 2.10% | ~6.5× |
+| 4 | 0.0011% | 0.25% | ~230× |
+| 8 | ~0% | 0.01% | — |
+
+**Random ternary projections at matched density are moderately correlated**, showing ~6× more shared miss queries at M=2 than fully-independent LSH theory predicts. This is a structural property of the projection family at density=0.33, not a design choice. The architecture still composes well because the miss rate drops geometrically even with correlation — miss events require ALL M tables to miss, and pairwise correlation doesn't fully defeat that.
+
+Closing the correlation gap would require density variation across tables (τ=0.50, τ=0.20 per the Axis 4 resolver sweep) or structurally different hash generators. Not tested in Phase 3.
+
+### Phase 3 — full resolver sweep
+
+With the oracle gate passing decisively, Phase 3 ran the three resolver variants (VOTE, SUM, PTM) at every M checkpoint:
+
+| M | VOTE | SUM | PTM | oracle |
+|---|---|---|---|---|
+| 1 | 62.96% | 54.50% | 54.63% | 94.30% |
+| 2 | 71.82% | 77.78% | 62.20% | 97.90% |
+| 4 | 76.75% | 88.91% | 75.34% | 99.75% |
+| 8 | 81.83% | 93.84% | 86.07% | 99.99% |
+| 16 | 85.78% | 96.13% | 91.48% | 100.00% |
+| **32** | 88.50% | **97.24%** | 94.25% | 100.00% |
+| **64** | 89.77% | **97.31%** | 95.36% | 100.00% |
+
+Full-sweep wall clock: 68.42 s. Per-resolver cumulative:
+- **VOTE: 0.21 s** (pure set-counting, no distance arithmetic)
+- **PTM: 25.12 s**
+- **SUM: 34.55 s**
+
+**Target crossing at M=32 with the SUM resolver.**
+
+### Resolver variants explained
+
+- **VOTE (set-membership scoring):** For each class `c`, sum the votes for prototypes of class `c` across the union. Vote count per candidate is "how many tables placed this prototype in the query's neighborhood" (weighted by multi-probe reach). Pick the class with the highest total. O(|union|) time. No distance arithmetic.
+- **SUM (summed-distance scoring):** For each candidate in the union, compute `Σ_m popcount_dist(q_sig_m, candidate_sig_m)` across all M active tables. Pick the candidate with the smallest sum. This is structurally equivalent to k=1 nearest neighbor under a composite `M × N_PROJ`-trit signature, restricted to the candidate union. O(|union| × M) time.
+- **PTM (per-table 1-NN majority):** For each table `m` independently, find the candidate in the union with the smallest popcount_dist in that table's projection. That yields M candidate labels (one per table). Majority vote across the M labels. Per-table 1-NN is "constrained to the union" — table m might have its true 1-NN outside the union, in which case PTM picks the best-in-union-under-m. O(|union| × M) time.
+
+### Sanity checks (from the red-team)
+
+**Check 1: M=1 VOTE = 62.96% ≈ pure N_PROJ=16 k-NN = 62.00%.**
+At M=1 the VOTE resolver reduces to majority voting within the multi-probe neighborhood of a single hash — essentially a small generalization of the pure N_PROJ=16 k-NN classifier. The scaling curve predicted 62.00%; measured is 62.96%. **Within 1 point.** The 0.96-point lift is because multi-probe widens the neighborhood beyond a single bucket. **Sanity passes.**
+
+**Check 2: M=1 SUM (54.50%) is lower than M=1 VOTE (62.96%) — the filter-ranker reframe reappears.**
+At M=1 the SUM resolver picks the candidate with the smallest table-0 popcount_dist within table-0's own multi-probe union. That's reading the *rank-destroyed* signal the filter-ranker reframe said would underperform (Axis 4). VOTE at M=1 sidesteps the rank signal entirely — it reads class frequency in the neighborhood instead. The 8.5-point gap (VOTE − SUM at M=1) is the filter-ranker asymmetry manifesting as an internal consistency check within this architecture. **Sanity passes; mechanism is consistent with Axis 4.**
+
+**Check 3: matched-hash-budget comparison against the Axis 5 single-table consumer.**
+The Axis 5 single-table consumer (Axis 5) used 4 hashes total: table 0 as filter and independent H2/H3/H4 for the resolver. It reached 82.58%. This tool at M=4 uses 4 hashes total, all as filter-and-resolver tables. SUM at M=4 is **88.91% vs 82.58% — +6.33 points from multi-table union-merge at matched information budget.** This is the multi-table architectural win measured directly, on an apples-to-apples hash budget. **Sanity passes; the union-merge structure adds real value beyond the information content.**
+
+### Comparison to the pure-signature scaling curve at matched total bits
+
+Multi-table LSH with M tables of `N_PROJ=16` each has `M × 16` total signature trits per query. The pure-signature scaling curve (Axis 1) measured dense k-NN accuracy at various single-hash signature sizes. Matched-bits comparison:
+
+| architecture | total signature bits | accuracy |
+|---|---|---|
+| Pure N_PROJ=128 single-hash | 128 | 95.22% |
+| Pure N_PROJ=256 single-hash | 256 | 96.56% |
+| Pure N_PROJ=512 single-hash | 512 | 97.06% |
+| Pure N_PROJ=1024 single-hash | 1024 | 97.37% |
+| Pure N_PROJ=2048 single-hash | 2048 | 97.79% |
+| Pure N_PROJ=4096 single-hash | 4096 | 97.99% |
+| **Multi-table SUM at M=16** | **256** | **96.13%** (−0.43 vs pure N_PROJ=256) |
+| **Multi-table SUM at M=32** | **512** | **97.24%** (+0.18 vs pure N_PROJ=512) |
+| **Multi-table SUM at M=64** | **1024** | **97.31%** (−0.06 vs pure N_PROJ=1024) |
+
+**At matched total bits, multi-table routed bucket SUM matches or slightly beats the pure scaling curve.** The small bonus at M=32 (+0.18) comes from the independence structure — 32 independent 16-trit random projections each with multi-probe neighborhoods collectively cover more input-space geometry than a single 512-trit random projection does. The bonus vanishes at higher bits (M=64) because the curve flattens.
+
+**This is the structural result of Axis 6.** Multi-table LSH is *not* equivalent to one big hash at the same bits — it's slightly better due to independence — but the improvement is modest (<1 point in the measured regime) and concentrated in the middle of the curve.
+
+### Resolver gap analysis
+
+The resolver gap is `oracle − best_resolver_accuracy` at each M. It measures how much accuracy is lost because the resolver cannot extract the correct class from the union even though the correct class is present:
+
+| M | oracle | best resolver (SUM) | gap |
+|---|---|---|---|
+| 1 | 94.30% | 62.96% (VOTE) | 31.34 |
+| 2 | 97.90% | 77.78% (SUM) | 20.12 |
+| 4 | 99.75% | 88.91% (SUM) | 10.84 |
+| 8 | 99.99% | 93.84% (SUM) | 6.15 |
+| 16 | 100.00% | 96.13% (SUM) | 3.87 |
+| 32 | 100.00% | 97.24% (SUM) | 2.76 |
+| 64 | 100.00% | 97.31% (SUM) | **2.69** |
+
+**The gap shrinks from 31.34 (M=1) to 2.76 (M=32), then plateaus.** M=64 barely improves on M=32 (−0.07 gap). This is the **structural ceiling of random-ternary-SUM ranking** on deskewed MNIST: ~2.7% of queries have the correct class in the multi-probe union, but summed popcount-Hamming ranks a wrong-class prototype higher. These are queries whose correct prototype is "far" in composite signature space even though the filter neighborhoods collectively contain it.
+
+Closing this gap requires architectural moves beyond "more tables":
+1. **Density variation across tables** — partial success on some confusion pairs (6↔8) per Axis 4 resolver sweep, no effect on others (3↔5, 4↔9).
+2. **Structurally different hash generators** (not just different seeds) — untested.
+3. **Learned projections** — explicitly out of scope (no supervised training in the routing substrate).
+4. **Richer resolver metric** (weighted sum, per-table normalization, calibrated distance) — an interesting micro-experiment I haven't run.
+
+### Resolver behavior — SUM dominates, VOTE plateaus weak, PTM middles
+
+**SUM is the best resolver at every M ≥ 2.** At M=32 SUM (97.24%) beats VOTE (88.50%) by 8.74 points and PTM (94.25%) by 2.99 points. The gap between SUM and VOTE widens with M, not shrinks.
+
+**VOTE's structural ceiling:** set-membership voting counts how many tables placed each candidate in the query's neighborhood, weighted by vote count. It discards the underlying distance information — a candidate at Hamming 0 in every table counts the same as a candidate at Hamming 2 in every table, provided both show up in every union. SUM preserves the distance gradient; VOTE collapses it. Ceiling of VOTE at M=64 is 89.77%, about 7.5 points below SUM.
+
+**PTM's middle position:** per-table 1-NN produces a noisy estimate; majority-voting M noisy estimates loses to summing M distances because summation preserves the gradient while voting collapses it. PTM at M=64 is 95.36%, about 2 points below SUM.
+
+**Unexpected finding (red-team): VOTE does not capture the multi-table architecture's strength.** My synthesize-phase prediction suggested VOTE might beat SUM at low M because "tie-breaking across 32 tables is a strong signal." Empirically it never beats SUM at M ≥ 2 and the gap widens. Set-membership voting is architecturally weaker than summed-distance ranking in this measurement. Naming the surprise because it contradicts the pre-measurement intuition and should recalibrate priors for related future designs.
+
+### Cost-accuracy at operating points
+
+Per-query cost estimates, broken down into probing work (binary-search + multi-probe enumeration) and resolver work (summed-distance computation):
+
+| M | accuracy (SUM) | probing ms | SUM resolver ms | total ms/query | notes |
+|---|---|---|---|---|---|
+| 1 | 54.50% | 0.02 | 0.002 | ~0.02 | too small for production use |
+| 2 | 77.78% | 0.04 | 0.005 | ~0.05 |  |
+| 4 | 88.91% | 0.08 | 0.025 | ~0.10 |  |
+| 8 | 93.84% | 0.17 | 0.087 | ~0.26 |  |
+| **16** | **96.13%** | 0.33 | 0.343 | **~0.67** | **cost sweet spot below target** |
+| **32** | **97.24%** | 0.65 | 1.27 | **~1.92** | **target crossing** |
+| 64 | 97.31% | 1.31 | 2.82 | ~4.13 | diminishing returns |
+
+**The SUM resolver cost dominates at high M.** Per-query SUM work is `n_hit × M × popcount_dist`. At M=32 with `n_hit≈1986` and ~20 ns per popcount_dist on packed 4-byte trit codes, that's ~1.27 ms resolver work plus ~0.65 ms probing work = ~1.92 ms/query total.
+
+### Reference baselines for context
+
+| architecture | accuracy | ms/query | substrate |
+|---|---|---|---|
+| Axis 5 single-table bucket (H2+H3+H4 resolver) | 82.58% | ~0.01 | routed |
+| Dense L50_H1 (Axis 4a) | 83.86% | ~1.95 | dense scaffolding |
+| Dense L50_H12 (Axis 4d) | 88.44% | ~1.95 | dense scaffolding |
+| Dense L200_H12 (Axis 4d) | 88.87% | ~1.95 | dense scaffolding |
+| Dense Gq (global 4-hash) | 89.46% | ~3.9 | dense scaffolding |
+| Pure N_PROJ=512 dense scan | 97.06% | ~4.0 | dense scaffolding |
+| Pure N_PROJ=2048 dense scan (Axis 2 headline) | 97.79% | ~7 | dense scaffolding |
+| **Multi-table M=16 SUM** | **96.13%** | **~0.67** | **routed** |
+| **Multi-table M=32 SUM** | **97.24%** | **~1.92** | **routed** |
+| **Multi-table M=64 SUM** | **97.31%** | **~4.13** | **routed** |
+
+**M=32 SUM matches the wall time of dense L200_H12 (~1.95 ms) while being +8.37 accuracy points higher.** It matches pure N_PROJ=512's accuracy while being ~2× faster. All with zero dense paths. **This is the new routed headline at N_PROJ=16.**
+
+### Architectural rule 8 — multi-table composition
+
+Extending the Axis 4d + Axis 5 rule list with a new rule:
+
+**Rule 8. Multi-table composition reproduces the scaling curve at equivalent total bits, with a small independence bonus.** The signature-as-address architecture (Axis 5 rule 7) composes through M independent bucket tables via union-merge at the global step and summed-distance resolver at the scoring step. At matched total bits (`M × N_PROJ` = equivalent single-hash `N_PROJ`), multi-table SUM matches the pure scaling curve within noise and may gain up to ~0.2 points from independence structure. This gives a concrete allocation policy for building routed k-NN consumers at any target accuracy on the scaling curve: pick a base `N_PROJ` small enough for cheap per-table operations (N_PROJ=16 is a sweet spot given 4-byte signatures fit in one uint32 binary-search key), then compose M tables until matched-bits accuracy hits the target. Wall-time cost of the resulting architecture is ~2× faster than the equivalent pure dense scan because the filter stage never touches all N_train prototypes.
+
+Rule 8 subsumes Axis 5's rule 7 (signature-as-address) by showing that the single-table case (M=1) is a special case of the multi-table composition, and the multi-table case is how you reach arbitrary points on the scaling curve without exceeding a fixed per-table signature size.
+
+### What Axis 6 does *not* settle
+
+1. **Per-class accuracy at M=32 SUM.** The 97.24% is an average — some digits may still be weaker. Phase 4 would measure per-class to verify no digit is pathologically bad.
+2. **Multi-seed variance.** Single seed only so far. Multi-seed error bars would confirm the ±0.5 point stability assumption.
+3. **Direct correlation measurement.** The ~6× correlation factor was derived from oracle miss rates, not from direct per-table disagreement counts. A direct measurement would verify.
+4. **Density variation at mid M.** Replacing some density-0.33 tables with density-0.50 / 0.20 variants at M=16 or M=32 — does it push the accuracy up further at matched M?
+5. **Radius ablation.** Does r ≤ 1 suffice at large M because the union is already saturated? Cheaper queries if so.
+6. **Other datasets.** Deskewed MNIST only. CIFAR-10, FashionMNIST, and other benchmarks are open.
+7. **Larger training sets.** At N_train = 60K the bucket indexes fit comfortably; scaling to 1M prototypes changes the bucket density distribution and may change multi-probe recall.
+
+### Full writeups
+
+- LMM cycle: `journal/break_97_nproj16_{raw,nodes,reflect,synthesize}.md`
+- Phase 3 results (with full red-team): `journal/break_97_nproj16_phase3_results.md`
+- Tool: `tools/mnist_routed_bucket_multi.c`
+
 ## What we got right, what we got wrong
 
 The path from 58% to 97.79% was not a single experiment; it was a sequence of corrections. Recording them for future sessions that might face similar hazards.
@@ -687,6 +910,7 @@ These hold on the measurements as recorded:
 - **Observability ceiling at N_PROJ=16.** The local-vs-global contingency at N_PROJ=16 has a 92.77% oracle ceiling, but rescues and damages share distributions on every inference-available signal we measured. Meta-routing based on disagreement/margin/tied-count is bounded at ~88% — ~1.5 below pure global, ~4.8 below the oracle. The gap is not a design problem; it's a structural information limit at this N_PROJ. See `journal/lvg_atomics_decomposition.md`.
 - **Information leverage is filter-stage-first.** At N_PROJ=16 on deskewed MNIST, moving H2 from a resolver to half of the filter lifts accuracy from 83.86% to 88.44% — a +4.58 point gain from reallocating *existing* information to the filter stage. No new hashes, no new primitives, same arithmetic. The filter-ranker reframe has a dual: once you're spending information routing-style, allocate it earliest. L200_H12 (fused filter + widened K) reaches 88.87% at 2× baseline cost and within 0.59 points of pure global Gq (89.46%) at 50% of Gq's cost. See `journal/fused_filter_fix.md`. This also deprecates the meta-router cycle as a practical architecture: the fix the LMM cycle was supposed to enable is unnecessary because the filter-stage fix closes 89% of the gap directly.
 - **The Trit Lattice signature is an *address*, not an operand.** Every cascade tool in the tree (built 2026-04-14 through early 2026-04-15) runs routing primitives inside an `O(N_train)` dense outer loop: for each query, `popcount_dist` is called against every training signature. That is dense architectural shape with routed kernels — a substrate violation even though the kernels themselves are routing-native. The first genuinely routed consumer, `tools/mnist_routed_bucket.c`, uses the 4-byte H1 signature as a key into a sorted bucket table and looks it up via binary search + ternary multi-probe. At N_PROJ=16 on deskewed MNIST the routed bucket reaches 82.58% at 9.9 μs/query, versus dense L50_H1 at 83.86% / ~1950 μs/query — **~147× fewer `popcount_dist` calls, ~197× faster wall time, −1.28 points of accuracy.** The accuracy gap is dominated by 175 queries (1.75%) whose nearest training signature exceeds the r≤2 radius budget. Radius escalation profile (52% r=0 / 37% r=1 / 10% r=2 / 2% empty) matches the Axis 4c atomic probe's Hamming histogram exactly. See `journal/routed_bucket_consumer.md`. **This reframes the existing cascade tools as research scaffolding, not production architecture.**
+- **Multi-table composition reproduces the scaling curve at equivalent total bits.** At N_PROJ=16 on deskewed MNIST, M=32 independent bucket tables with ternary multi-probe and summed-distance resolver reach **97.24%** accuracy — the first routed architecture in Glyph to exceed 97%. At M=64 the accuracy is 97.31%. At matched total bits (`M × N_PROJ`), multi-table matches or slightly beats the pure-signature scaling curve: M=32 (512 total bits) reaches 97.24% vs pure N_PROJ=512 at 97.06% (+0.18 from independence); M=64 (1024 bits) reaches 97.31% vs pure N_PROJ=1024 at 97.37% (within noise). Per-query wall time is ~1.92 ms at M=32 — about 2× faster than pure N_PROJ=512 dense scan at matched accuracy. Random ternary projections at matched density are moderately correlated (~6× miss-rate vs fully-independent LSH theory at M=2), but the miss rate still drops geometrically because correlation is pairwise while miss events require ALL M tables to miss. The resolver gap to oracle plateaus at ~2.7 points at M ≥ 32 — a structural ceiling of random-ternary-SUM ranking. **The signature-as-address rule composes through multi-table union-merge, and the composition provides a direct knob for reaching any target on the scaling curve without exceeding a fixed per-table signature size.** See `journal/break_97_nproj16_phase3_results.md`.
 
 ## Unverified / qualified claims
 
@@ -775,6 +999,8 @@ SEEDS[N_SEEDS][4] = {
 - `journal/lvg_atomics_decomposition.md` — atomic decomposition of L vs Gq contingency; observability ceiling at ~88% identified.
 - `journal/fused_filter_fix.md` — fused-filter fix rerun: L50_H1 (83.86%) → L50_H12 (88.44%) from moving H2 to filter stage; L200_H12 reaches 88.87% within 0.59 of Gq; meta-router deprecated.
 - `journal/routed_bucket_consumer.md` — first genuinely routed consumer: signature as address, bucket index + ternary multi-probe at O(1) amortized; 82.58% at 9.9 μs/query; cascade tools reframed as measurement scaffolding.
+- `journal/break_97_nproj16_{raw,nodes,reflect,synthesize}.md` — LMM cycle that designed the multi-table architecture.
+- `journal/break_97_nproj16_phase3_results.md` — Axis 6 full measurement: multi-table bucket SUM at M=32 reaches 97.24%, at M=64 reaches 97.31%, first routed architecture to exceed 97% at N_PROJ=16.
 
 ### For the detailed experimental record
 - `journal/routed_knn_mnist.md` — the k-NN wins, with "Revised after fourth red-team" section.

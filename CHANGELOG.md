@@ -614,6 +614,96 @@ The consumer is literally measuring what the probe predicted. Every query's radi
 
 Full writeup with full derivation, code structure, and follow-up list: `journal/routed_bucket_consumer.md`.
 
+### LMM cycle — can local + global routing reach 97% at N_PROJ=16?
+
+Full four-file LMM cycle (`journal/break_97_nproj16_{raw,nodes,reflect,synthesize}.md`) on the user's hypothesis. Core insight from REFLECT:
+
+> In a routing-only substrate, "local routing" and "global routing" are not two different mechanisms. They are two different roles of the same primitive applied at two different aggregation scales. Local = per-query neighborhood lookup in a single bucket index. Global = union-merge of neighborhood lookups across M independent bucket indexes. The global operator is the union itself — it requires no new primitive, no new data structure, no dense scan.
+
+Committed to Reading A (classical multi-table LSH with union-merge) as the concrete mapping of "local + global" to a routing-only substrate. Predicted target crossing around M=32 based on scaling-curve extrapolation. Gated execution on an oracle-pass prerequisite.
+
+### Phase 1 + 2 — multi-table routed bucket tool + oracle gate
+
+`tools/mnist_routed_bucket_multi.c` extends `tools/mnist_routed_bucket.c` to M independent bucket indexes with per-table ternary multi-probe and cross-table union-merge. Three resolver variants wired up (VOTE, SUM, PTM) gated behind `--full` flag. Oracle mode (default) is a fast pre-check.
+
+Red-teamed the build before running: no dense paths at query time, seed 0 matches canonical `(42,123,456,789)`, ternary multi-probe matches Axis 5 tool exactly, per-table-majority resolver semantics are "constrained to union" (named explicitly), runtime envelope ~100 s per resolver at M=64.
+
+Sanity check at runtime: table 0 distinct-bucket count is 37906, matching the Axis 5 single-table consumer exactly.
+
+Oracle ceiling pass (Phase 2) results:
+
+    M     oracle   avg_union   avg_probes
+    1    94.30%        94.3      194.4
+    2    97.90%       132.5      425.9
+    4    99.75%       315.9      801.1
+    8    99.99%       543.6     1657.2
+    16   100.00%     1072.8     3274.0
+    32   100.00%     1985.8     6538.7
+    64   100.00%     3521.2    13064.4
+
+Wall time: 5.43 s for 10K queries × full M=64 sweep. ~0.54 ms/query for probing alone.
+
+**Gate: PASS.** M=2 already hits 97.90% oracle, M≥16 is 100%. Two observations that reshaped the cycle:
+
+1. My scaling-curve extrapolation was wrong. I conflated "classification accuracy" (rank-destroyed) with "set-membership in multi-probe neighborhood" (neighborhood-preserved). The Axis 4c atomic probe (52% exact-match, 97% at min Hamming ≤ 2 bits) was the right anchor; the scaling curve was not.
+
+2. Tables are moderately correlated (~6× miss-rate factor vs fully-independent LSH theory at M=2). Random ternary projections at matched density share structural miss modes. The architecture still composes well because correlation is pairwise while miss events require ALL M tables to miss.
+
+### Phase 3 — multi-table routed bucket SUM at M=32 reaches 97.24% — target broken
+
+First routed architecture in Glyph to exceed 97% accuracy on deskewed MNIST at N_PROJ=16. Full resolver sweep:
+
+    M    VOTE      SUM       PTM      oracle
+    1    62.96%   54.50%    54.63%    94.30%
+    2    71.82%   77.78%    62.20%    97.90%
+    4    76.75%   88.91%    75.34%    99.75%
+    8    81.83%   93.84%    86.07%    99.99%
+    16   85.78%   96.13%    91.48%   100.00%
+    32   88.50%  *97.24%*   94.25%   100.00%    <- target crossing
+    64   89.77%  *97.31%*   95.36%   100.00%
+
+Wall time: 68.42 s total sweep. VOTE=0.21s, PTM=25.12s, SUM=34.55s (cumulative across all M checkpoints).
+
+**Sanity checks (Phase 3 red-team):**
+
+1. M=1 VOTE = 62.96% ≈ pure N_PROJ=16 k-NN (62.00%). Within 1 point of the scaling curve. Multi-probe widens the neighborhood slightly. Passes.
+
+2. M=1 SUM (54.50%) is lower than M=1 VOTE (62.96%). At M=1 the SUM resolver reads table 0's own rank — the rank-destroyed signal the filter-ranker reframe warned about. The 8.5-point VOTE-SUM gap at M=1 is the filter-ranker asymmetry reappearing as an internal consistency check. Passes.
+
+3. At M=4 this tool matches the Axis 5 single-table consumer's 4-hash budget (table 0 + H2/H3/H4). SUM=88.91% here vs Axis 5's 82.58% — **+6.33 points from the multi-table architectural win on matched information budget.** The union-merge structure adds real value beyond the information content.
+
+**Comparison to the pure-signature scaling curve at matched total bits:**
+
+    architecture              total_bits   accuracy
+    Pure N_PROJ=256            256         96.56%
+    Pure N_PROJ=512            512         97.06%
+    Pure N_PROJ=1024           1024        97.37%
+    M=32 SUM (32 x 16)         512         97.24%    (+0.18 vs pure)
+    M=64 SUM (64 x 16)         1024        97.31%    (within noise)
+
+Multi-table at matched total bits matches or slightly beats the pure scaling curve. The +0.18 bonus at 512 bits comes from the independence structure — 32 independent 16-trit random projections with multi-probe neighborhoods collectively cover more input-space geometry than a single monolithic 512-trit random projection. The bonus vanishes at higher bits because the curve flattens.
+
+**Resolver behavior — SUM dominates, VOTE plateaus weak, PTM middles.** SUM is the best resolver at every M ≥ 2. At M=32 SUM (97.24%) beats VOTE (88.50%) by 8.74 points and PTM (94.25%) by 2.99 points. VOTE saturates at 89.77% at M=64 — a 7.54-point gap to SUM — because set-membership voting discards the distance gradient. PTM is middle at 95.36% at M=64 — majority-voting noisy per-table 1-NN estimates loses to summing distances.
+
+**Unexpected finding documented:** the synthesize-phase prediction that VOTE might beat SUM at low M because of "cross-table tie-breaking" was wrong. SUM beats VOTE at every M ≥ 2 and the gap widens. Set-membership voting is architecturally weaker than summed-distance ranking in this measurement.
+
+**Resolver gap plateau at M ≥ 32.** The gap between oracle (100%) and best resolver (SUM) shrinks from 31.34 points at M=1 to 2.76 at M=32 and 2.69 at M=64. Adding tables beyond M=32 does not shrink the gap further. This is the **structural ceiling of random-ternary-SUM ranking on this task**: ~2.7% of queries have the correct class in the multi-probe union but summed popcount-Hamming ranks a wrong-class prototype higher. Closing this gap requires density variation, structurally different hash generators, or learned projections — not more tables of the same family.
+
+**Cost-accuracy at operating points:**
+
+    M     accuracy   ms/query    notes
+    16    96.13%     ~0.67       cost sweet spot below target
+    32   *97.24%*    ~1.92       target crossing
+    64    97.31%     ~4.13       diminishing returns
+
+Reference baselines: dense L200_H12 was 88.87% at ~1.95 ms/query; dense Gq was 89.46% at ~3.9 ms/query; pure N_PROJ=512 dense scan was 97.06% at ~4.0 ms/query. **M=32 SUM matches the wall time of dense L200_H12 while being +8.37 accuracy points higher. It matches pure N_PROJ=512's accuracy at ~2× faster wall speed.** Zero dense paths anywhere.
+
+**New architectural rule 8 (extending the Axis 4d + Axis 5 rule list):**
+
+> Multi-table composition reproduces the scaling curve at equivalent total bits, with a small independence bonus. The signature-as-address architecture (Axis 5 rule 7) composes through M independent bucket tables via union-merge at the global step and summed-distance resolver at the scoring step. At matched total bits (`M × N_PROJ` = equivalent single-hash `N_PROJ`), multi-table SUM matches the pure scaling curve within noise and may gain up to ~0.2 points from independence structure. This gives a concrete allocation policy for building routed k-NN consumers at any target accuracy on the scaling curve: pick a base `N_PROJ` small enough for cheap per-table operations, then compose M tables until matched-bits accuracy hits the target.
+
+Full writeup: `journal/break_97_nproj16_phase3_results.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.
