@@ -1,4 +1,13 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Pre-Axis-5 headline tool; produced 97.79% / 97.86% / 97.99% across
+ * the N=2048/4096 configurations under "routed kernels vs dense
+ * kernels inside the same dense application shape" — a compression
+ * win, not a routing-architecture win.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_routed_knn.c — Trit Lattice LSH with k-NN; fair comparison edition.
  *
  * Four classifier tracks, all k-NN:

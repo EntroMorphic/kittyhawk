@@ -1,4 +1,17 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ *
+ * This tool runs routing primitives (popcount_dist, threshold_extract)
+ * inside an O(N_train) dense outer loop — dense application shape with
+ * routed kernels. It produced research observations (filter-ranker
+ * reframe, cascade atomics) that motivated the bucket-indexed
+ * production consumers, but it is NOT the routing architecture the
+ * thesis demands. See docs/FINDINGS.md Axis 5 and
+ * journal/routed_bucket_consumer.md for the architectural correction.
+ * For production routed k-NN use tools/mnist_routed_bucket.c
+ * (single-table) or tools/mnist_routed_bucket_multi.c (multi-table,
+ * 97.24% at N_PROJ=16).
+ *
  * mnist_cascade_nproj16.c — routed cascade experiment at N_PROJ=16.
  *
  * Sixth-round remediation removes the dense pixel resolver family from this

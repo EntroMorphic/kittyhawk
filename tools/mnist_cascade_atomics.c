@@ -1,4 +1,11 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Produced cascade atomics that motivated the bucket architecture.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5 and
+ * journal/routed_bucket_consumer.md.
+ *
  * mnist_cascade_atomics.c — atomic decomposition of WHY the N_PROJ=16
  * routed cascade works.
  *

@@ -1,4 +1,10 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * P1 gate for the meta-router LMM cycle; contingency-table diagnostic.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 4c.
+ *
  * mnist_local_vs_global.c — prerequisite P1 gate for the meta-router LMM.
  *
  * See journal/meta_router_online_synthesize.md for the full design.

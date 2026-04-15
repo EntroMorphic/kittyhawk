@@ -1,4 +1,11 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Resolver sweep that produced the H2+H3+H4 quadruple-fusion finding
+ * and the voting-at-resolver rule revision.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 4b and Axis 5.
+ *
  * mnist_resolver_sweep.c — routed resolver sweep over the cascade.
  *
  * Sixth-round remediation removes the dense resolver family and replaces it

@@ -1,4 +1,12 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Centroid-based Trit Lattice classification; diagnostic for tau
+ * sweeps and the §18 emission-coverage criterion. Reached 58.37%
+ * at best — the "MNIST is adapter-efficient for routing" result.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_routed_lattice.c — Trit Lattice classification, genuinely routed.
  *
  * Same pipeline prefix as mnist_trit_lattice.c (random ternary projection

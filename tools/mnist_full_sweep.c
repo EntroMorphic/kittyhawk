@@ -1,4 +1,11 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Produced the 97.99% dense-scaffolding headline at N_PROJ=4096
+ * before Axis 5 reframed cascade tools as measurement scaffolding.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_full_sweep.c — full matrix sweep over (N_PROJ × density × k × vote_rule).
  *
  * Deskewed MNIST, three RNG seeds. For each (N_PROJ, density, seed) the
@@ -38,6 +45,13 @@
 #define N_CLASSES 10
 #define MAX_K 7          /* top-7 kept per query; k ∈ {3,5,7} derived from it */
 #define N_SEEDS 3
+
+enum {
+    N_N_PROJ = 3,
+    N_DENSITIES = 3,
+    N_KS = 3,
+    N_VOTES = 3,
+};
 
 /* ── Data + deskew + RNG + τ helpers (shared with other tools) ───────── */
 
@@ -211,12 +225,8 @@ int main(int argc, char** argv) {
      * values are documented in journal/full_scaling_curve.md; rerun those
      * by editing this array. */
     const int    N_PROJ_VALUES[]  = {1024, 2048, 4096};
-    const int    N_N_PROJ         = 3;
     const double DENSITY_VALUES[] = {0.25, 0.33, 0.50};
-    const int    N_DENSITIES      = 3;
     const int    K_VALUES[]       = {3, 5, 7};
-    const int    N_KS             = 3;
-    const int    N_VOTES          = 3;
     const char*  VOTE_NAMES[]     = {"majority", "rank-wt", "exp-wt"};
 
     const uint32_t SEEDS[N_SEEDS][4] = {

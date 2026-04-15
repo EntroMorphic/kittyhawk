@@ -35,11 +35,11 @@ Masked-VCNT reductions: `signed_sum`, `sparsity`, `counts`. ~14 NEON instruction
 
 ### Routing primitives (`m4t_route.h`)
 Five primitives composing into a k-of-T ternary routing pass:
-- `sign_extract` — int64 values → packed-trit signs
-- `distance_batch` — query signature × T tile signatures → T distances
+- `threshold_extract` — int64 values → packed-trit signs with a symmetric `tau` band. Emits all three trit states (`+1` when `v > tau`, `−1` when `v < −tau`, `0` when `|v| ≤ tau`). `tau = 0` degenerates to binary sign extraction and is the shape `signature_update` uses internally. Replaces the earlier `sign_extract` per the §18 emission-coverage criterion.
+- `distance_batch` — query signature × T tile signatures → T distances (wraps `popcount_dist`).
 - `topk_abs` — scores → k (tile, sign) decisions (bitmask uniqueness, T ≤ `M4T_ROUTE_MAX_T` = 64)
 - `apply_signed` — decisions × tile outputs → accumulated MTFP19 result (Case S saturation via vec_add/sub)
-- `signature_update` — weight-derived signatures (setup-time compound op, heap-allocated row buffer)
+- `signature_update` — weight-derived signatures (setup-time compound op, heap-allocated row buffer; internally calls `threshold_extract` with `tau = 0`)
 
 ### Ternary matmul — MTFP19 (`m4t_ternary_matmul.h`)
 MTFP19 activations × 2-bit packed ternary weights → MTFP19. Inner loop uses `vbslq_s32` + `vnegq_s32` over decoded signs in {-1, 0, +1}; no `vmulq_s32`, no dense shape. Int64 accumulator, clamp on store (Case S).
@@ -76,7 +76,7 @@ Five test binaries, all with hand-derived integer golden values. Zero float in t
 | `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
 | `test_m4t_trit_ops` | all 9 input pairs × all 6 ops; 65-trit NEON+tail case |
 | `test_m4t_trit_reducers` | signed_sum, sparsity, counts across zero/pos/neg/mixed inputs |
-| `test_m4t_route` | sign_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass |
+| `test_m4t_route` | threshold_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass |
 | `test_m4t_mtfp4` | clamp, SDOT matmul (multiple K values including tail), MTFP19↔MTFP4 conversion |
 
 ## What's not here

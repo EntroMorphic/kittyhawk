@@ -1,4 +1,12 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Failure-guided adaptation test using distance-weighted voting.
+ * Produced the rank-weighted k=5 adaptation finding that motivated
+ * the "mechanism that worked" LMM cycle.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_routed_weighted.c — failure-guided adaptation test: does
  * distance-weighted voting recover the NARROW MISS cases the audit
  * trail exposed?

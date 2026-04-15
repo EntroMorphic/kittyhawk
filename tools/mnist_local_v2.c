@@ -1,4 +1,10 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Used to test the fused-filter fix that closed 82% of the L→Gq gap.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 4d and Axis 5.
+ *
  * mnist_local_v2.c — rerun P1 with fixed local architectures.
  *
  * Atomic decomposition of the P1 gate (journal/lvg_atomics_decomposition.md)

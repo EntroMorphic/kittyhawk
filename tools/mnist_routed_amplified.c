@@ -1,4 +1,11 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Multi-projection ensemble with audit-triggered routed fallback;
+ * produced the amplification negative result.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_routed_amplified.c — multi-projection ensemble with
  * audit-triggered routed fallback.
  *

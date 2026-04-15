@@ -1,4 +1,11 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * The original provisional consumer per docs/THESIS.md §3. Centroid-
+ * based Trit Lattice classification, superseded by the Axis 5 bucket
+ * consumers. Runs routing primitives inside a dense outer scan.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph.
+ *
  * mnist_trit_lattice.c — fully routed Trit Lattice classification on MNIST.
  *
  * Projection stays the same as the original tool: random ternary routing

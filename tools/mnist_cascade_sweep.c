@@ -1,4 +1,10 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Used to map the cascade crossover curve across N_PROJ.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 5.
+ *
  * mnist_cascade_sweep.c — routed cascade vs pure-hash across N_PROJ.
  *
  * Sixth-round remediation removes the dense pixel resolver from the live

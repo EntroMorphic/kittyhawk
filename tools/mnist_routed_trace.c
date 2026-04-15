@@ -1,4 +1,13 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Inspectability demo — produces per-classification audit trails
+ * (per-trit decomposition of Hamming distances, failure typing).
+ * The inspectability result (Axis 3) is architecturally valid and
+ * ports directly to the bucket consumers if needed.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 3 and Axis 5.
+ *
  * mnist_routed_trace.c — inspectability demo for routed k-NN decisions.
  *
  * Dense k-NN produces a scalar L1 distance per prototype — a summed black

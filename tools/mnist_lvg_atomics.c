@@ -1,4 +1,10 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Atomic decomposition that identified the observability ceiling.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 4c.
+ *
  * mnist_lvg_atomics.c — atomic decomposition of the local-vs-global
  * contingency at N_PROJ=16.
  *

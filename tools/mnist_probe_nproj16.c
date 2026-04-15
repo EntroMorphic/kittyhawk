@@ -1,4 +1,12 @@
 /*
+ * STATUS: research scaffolding, not production architecture.
+ * Runs routing primitives inside an O(N_train) dense outer loop.
+ * Atomic probe that produced the partition-asymmetry finding at
+ * N_PROJ=16 and seeded the filter-ranker reframe. Produced the
+ * Hamming histogram that anchors later predictions.
+ * For production routed k-NN use tools/mnist_routed_bucket{,_multi}.c
+ * on libglyph. See docs/FINDINGS.md Axis 4c.
+ *
  * mnist_probe_nproj16.c — atomic investigation of the vote-rule inversion
  * at N_PROJ=16.
  *
