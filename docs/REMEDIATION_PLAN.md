@@ -530,8 +530,8 @@ Scope: remove dense decision paths from the live Trit Lattice architecture and i
 **Finding.** `mnist_cascade_*` and `mnist_resolver_sweep.c` all conclude that the filter is good and the resolver is the bottleneck, but the resolver family being tested is still mostly dense (pixel L1/L2, cosine, centroids).
 
 **Remediation plan.**
-- [ ] Replace pixel-space resolution with routed secondary resolution: secondary-hash, multi-seed routed rank fusion, or routed per-class signatures.
-- [ ] Update comments and reporting strings so the tools describe routed filter + routed resolver, not cascade-to-dense.
+- [x] Replace pixel-space resolution with routed secondary resolution: secondary-hash, multi-seed routed rank fusion, or routed per-class signatures.
+- [x] Update comments and reporting strings so the tools describe routed filter + routed resolver, not cascade-to-dense.
 
 **Plan red-team.**
 - Risk: swapping to a weaker routed resolver could lower accuracy and obscure whether the architecture is cleaner but empirically worse.
