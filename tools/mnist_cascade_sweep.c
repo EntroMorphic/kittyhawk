@@ -1,17 +1,20 @@
 /*
- * mnist_cascade_sweep.c — cascade vs pure-hash across N_PROJ.
+ * mnist_cascade_sweep.c — routed cascade vs pure-hash across N_PROJ.
  *
- * Verifies the prediction from cascade atomics: cascade headroom shrinks
- * as N_PROJ grows, with crossover around N_PROJ≈256.
+ * Sixth-round remediation removes the dense pixel resolver from the live
+ * cascade sweep. The new cascade is routed on both stages:
+ *
+ *   primary hash   -> top-K filter
+ *   secondary hash -> 1-NN resolver within top-K
  *
  * For each N_PROJ in {8,16,32,64,128,256,512,1024,4096}:
  *   - pure-hash k=7 majority accuracy
  *   - pure-hash top-1 accuracy
  *   - ceiling at K=50 (correct class in top-50)
- *   - cascade K=50 pixel-L2 1-NN accuracy
- *   - Δ (cascade - pure-maj)
+ *   - routed cascade K=50 accuracy
+ *   - Delta (cascade - pure-maj)
  *
- * Single seed (42) per N_PROJ — mechanism, not ±σ.
+ * Single primary/secondary seed pair per N_PROJ — mechanism, not sigma.
  *
  * Usage: ./mnist_cascade_sweep <mnist_dir>
  */
@@ -35,7 +38,7 @@
 #define DENSITY 0.33
 #define K_RESOLVE 50
 
-/* ── Loaders, deskew, RNG, τ, pixel-L2 (mirrored from prior tools) ───── */
+/* ── Loaders, deskew, RNG, tau (mirrored from prior tools) ───────────── */
 
 static uint32_t read_u32_be(FILE* f) {
     uint8_t b[4]; fread(b,1,4,f);
@@ -119,15 +122,6 @@ static int64_t tau_for_density(int64_t* v, size_t n, double d) {
     if (idx >= n) idx = n-1;
     return v[idx];
 }
-static int64_t pixel_l2sq(const m4t_mtfp_t* a, const m4t_mtfp_t* b) {
-    int64_t s=0;
-    for(int i=0;i<INPUT_DIM;i++){
-        int32_t d=(int32_t)a[i]-(int32_t)b[i];
-        s += (int64_t)d*d;
-    }
-    return s;
-}
-
 /* ── One-point evaluation at a given N_PROJ. ─────────────────────────── */
 
 typedef struct {
@@ -146,55 +140,75 @@ static void eval_one(int N_proj,
 {
     clock_t t0 = clock();
 
-    /* Build projections. */
-    rng_s[0]=42; rng_s[1]=123; rng_s[2]=456; rng_s[3]=789;
-    m4t_trit_t* proj_w=malloc((size_t)N_proj*INPUT_DIM);
-    for(int i=0;i<N_proj*INPUT_DIM;i++){
-        uint32_t r=rng_next()%3;
-        proj_w[i]=(r==0)?-1:(r==1)?0:1;
-    }
-    int proj_Dp=M4T_TRIT_PACKED_BYTES(INPUT_DIM);
-    uint8_t* proj_packed=malloc((size_t)N_proj*proj_Dp);
-    m4t_pack_trits_rowmajor(proj_packed,proj_w,N_proj,INPUT_DIM);
-    free(proj_w);
-
-    m4t_mtfp_t* train_proj=malloc((size_t)n_train*N_proj*sizeof(m4t_mtfp_t));
-    m4t_mtfp_t* test_proj =malloc((size_t)n_test *N_proj*sizeof(m4t_mtfp_t));
-    for(int i=0;i<n_train;i++)
-        m4t_mtfp_ternary_matmul_bt(train_proj+(size_t)i*N_proj,
-                                    x_train+(size_t)i*INPUT_DIM,
-                                    proj_packed,1,INPUT_DIM,N_proj);
-    for(int i=0;i<n_test;i++)
-        m4t_mtfp_ternary_matmul_bt(test_proj+(size_t)i*N_proj,
-                                    x_test+(size_t)i*INPUT_DIM,
-                                    proj_packed,1,INPUT_DIM,N_proj);
-
-    int64_t tau_q;
-    {
-        size_t total=(size_t)1000*N_proj;
-        int64_t* buf=malloc(total*sizeof(int64_t));
-        for(int i=0;i<1000;i++)
-            for(int p=0;p<N_proj;p++){
-                int64_t v=train_proj[(size_t)i*N_proj+p];
-                buf[(size_t)i*N_proj+p]=(v>=0)?v:-v;
-            }
-        tau_q=tau_for_density(buf,total,DENSITY);
-        free(buf);
-    }
-
     int Sp=M4T_TRIT_PACKED_BYTES(N_proj);
-    uint8_t* train_sigs=calloc((size_t)n_train*Sp,1);
-    uint8_t* test_sigs =calloc((size_t)n_test *Sp,1);
-    int64_t* tmp=malloc((size_t)N_proj*sizeof(int64_t));
-    for(int i=0;i<n_train;i++){
-        for(int p=0;p<N_proj;p++) tmp[p]=(int64_t)train_proj[(size_t)i*N_proj+p];
-        m4t_route_threshold_extract(train_sigs+(size_t)i*Sp,tmp,tau_q,N_proj);
+    uint8_t *train_sigs_A, *test_sigs_A, *train_sigs_B, *test_sigs_B;
+    {
+        const uint32_t seeds[2][4] = {
+            {42, 123, 456, 789},
+            {1337, 2718, 3141, 5923}
+        };
+        uint8_t** train_sets[2] = {&train_sigs_A, &train_sigs_B};
+        uint8_t** test_sets[2] = {&test_sigs_A, &test_sigs_B};
+
+        for (int pass = 0; pass < 2; pass++) {
+            rng_s[0]=seeds[pass][0]; rng_s[1]=seeds[pass][1];
+            rng_s[2]=seeds[pass][2]; rng_s[3]=seeds[pass][3];
+            {
+                m4t_trit_t* proj_w=malloc((size_t)N_proj*INPUT_DIM);
+                int proj_Dp=M4T_TRIT_PACKED_BYTES(INPUT_DIM);
+                uint8_t* proj_packed=malloc((size_t)N_proj*proj_Dp);
+                m4t_mtfp_t* train_proj=malloc((size_t)n_train*N_proj*sizeof(m4t_mtfp_t));
+                m4t_mtfp_t* test_proj =malloc((size_t)n_test *N_proj*sizeof(m4t_mtfp_t));
+                int64_t tau_q;
+                int64_t* tmp;
+
+                for(int i=0;i<N_proj*INPUT_DIM;i++){
+                    uint32_t r=rng_next()%3;
+                    proj_w[i]=(r==0)?-1:(r==1)?0:1;
+                }
+                m4t_pack_trits_rowmajor(proj_packed,proj_w,N_proj,INPUT_DIM);
+                free(proj_w);
+
+                for(int i=0;i<n_train;i++)
+                    m4t_mtfp_ternary_matmul_bt(train_proj+(size_t)i*N_proj,
+                                               x_train+(size_t)i*INPUT_DIM,
+                                               proj_packed,1,INPUT_DIM,N_proj);
+                for(int i=0;i<n_test;i++)
+                    m4t_mtfp_ternary_matmul_bt(test_proj+(size_t)i*N_proj,
+                                               x_test+(size_t)i*INPUT_DIM,
+                                               proj_packed,1,INPUT_DIM,N_proj);
+
+                {
+                    size_t total=(size_t)1000*N_proj;
+                    int64_t* buf=malloc(total*sizeof(int64_t));
+                    for(int i=0;i<1000;i++)
+                        for(int p=0;p<N_proj;p++){
+                            int64_t v=train_proj[(size_t)i*N_proj+p];
+                            buf[(size_t)i*N_proj+p]=(v>=0)?v:-v;
+                        }
+                    tau_q=tau_for_density(buf,total,DENSITY);
+                    free(buf);
+                }
+
+                *train_sets[pass]=calloc((size_t)n_train*Sp,1);
+                *test_sets[pass] =calloc((size_t)n_test *Sp,1);
+                tmp=malloc((size_t)N_proj*sizeof(int64_t));
+                for(int i=0;i<n_train;i++){
+                    for(int p=0;p<N_proj;p++) tmp[p]=(int64_t)train_proj[(size_t)i*N_proj+p];
+                    m4t_route_threshold_extract((*train_sets[pass])+(size_t)i*Sp,tmp,tau_q,N_proj);
+                }
+                for(int i=0;i<n_test;i++){
+                    for(int p=0;p<N_proj;p++) tmp[p]=(int64_t)test_proj[(size_t)i*N_proj+p];
+                    m4t_route_threshold_extract((*test_sets[pass])+(size_t)i*Sp,tmp,tau_q,N_proj);
+                }
+
+                free(tmp);
+                free(train_proj);
+                free(test_proj);
+                free(proj_packed);
+            }
+        }
     }
-    for(int i=0;i<n_test;i++){
-        for(int p=0;p<N_proj;p++) tmp[p]=(int64_t)test_proj[(size_t)i*N_proj+p];
-        m4t_route_threshold_extract(test_sigs+(size_t)i*Sp,tmp,tau_q,N_proj);
-    }
-    free(tmp); free(train_proj); free(test_proj); free(proj_packed);
 
     uint8_t* mask=malloc(Sp); memset(mask,0xFF,Sp);
 
@@ -202,13 +216,13 @@ static void eval_one(int N_proj,
     int32_t* dists = malloc((size_t)n_train*sizeof(int32_t));
 
     for (int s = 0; s < n_test; s++) {
-        const uint8_t* q_sig = test_sigs + (size_t)s*Sp;
-        const m4t_mtfp_t* q_img = x_test + (size_t)s*INPUT_DIM;
+        const uint8_t* q_sig_A = test_sigs_A + (size_t)s*Sp;
+        const uint8_t* q_sig_B = test_sigs_B + (size_t)s*Sp;
         int y = y_test[s];
 
         for (int i = 0; i < n_train; i++) {
-            const uint8_t* r_sig = train_sigs + (size_t)i*Sp;
-            dists[i] = m4t_popcount_dist(q_sig, r_sig, mask, Sp);
+            const uint8_t* r_sig_A = train_sigs_A + (size_t)i*Sp;
+            dists[i] = m4t_popcount_dist(q_sig_A, r_sig_A, mask, Sp);
         }
 
         /* Top-K_RESOLVE by hash distance (partial insertion sort). */
@@ -242,16 +256,19 @@ static void eval_one(int N_proj,
             if (y_train[topi[j]] == y) { ceiling++; break; }
         }
 
-        /* Cascade: pixel-L2sq 1-NN within top-K_RESOLVE. */
-        int64_t best_d = INT64_MAX; int best_label = -1;
+        /* Routed cascade: secondary-hash 1-NN within primary top-K_RESOLVE. */
+        int32_t best_d = INT32_MAX; int best_label = -1;
         for (int j=0;j<K_RESOLVE;j++) {
-            int64_t l2 = pixel_l2sq(q_img, x_train + (size_t)topi[j]*INPUT_DIM);
-            if (l2 < best_d) { best_d = l2; best_label = y_train[topi[j]]; }
+            const uint8_t* r_sig_B = train_sigs_B + (size_t)topi[j]*Sp;
+            int32_t d = m4t_popcount_dist(q_sig_B, r_sig_B, mask, Sp);
+            if (d < best_d) { best_d = d; best_label = y_train[topi[j]]; }
         }
         if (best_label == y) cascade++;
     }
 
-    free(dists); free(mask); free(train_sigs); free(test_sigs);
+    free(dists); free(mask);
+    free(train_sigs_A); free(test_sigs_A);
+    free(train_sigs_B); free(test_sigs_B);
 
     out->N_proj = N_proj;
     out->pure_top1 = pure_top1;
@@ -280,11 +297,12 @@ int main(int argc, char** argv) {
     int N_projs[] = {8, 16, 32, 64, 128, 256, 512, 1024, 4096};
     int nN = sizeof(N_projs)/sizeof(N_projs[0]);
 
-    printf("Cascade-vs-pure sweep across N_PROJ.\n");
-    printf("K_RESOLVE=%d, density=%.2f, seed=42, deskewed MNIST.\n", K_RESOLVE, DENSITY);
+    printf("Routed-cascade-vs-pure sweep across N_PROJ.\n");
+    printf("K_RESOLVE=%d, density=%.2f, primary seed=42, secondary seed=1337, deskewed MNIST.\n",
+           K_RESOLVE, DENSITY);
     printf("%d train, %d test.\n\n", n_train, n_test);
 
-    printf(" N_PROJ   pure_top1   pure_maj7   ceiling@%d   cascade_L2   Δ(casc-maj)   Δ(casc-top1)   time\n",
+    printf(" N_PROJ   pure_top1   pure_maj7   ceiling@%d   cascade_R2   Δ(casc-maj)   Δ(casc-top1)   time\n",
            K_RESOLVE);
 
     sweep_row_t rows[9];
@@ -300,10 +318,10 @@ int main(int argc, char** argv) {
     }
 
     printf("\nInterpretation:\n");
-    printf("  Δ(casc-maj) = cascade gain over pure-hash k=7 majority.\n");
-    printf("  Δ(casc-top1) = cascade gain over pure-hash top-1 (hash-only 1-NN).\n");
-    printf("  Crossover where cascade no longer helps should appear when\n");
-    printf("  pure-hash accuracy approaches the ceiling — predicted near N_PROJ=256.\n");
+    printf("  Delta(casc-maj) = routed cascade gain over pure-hash k=7 majority.\n");
+    printf("  Delta(casc-top1) = routed cascade gain over pure-hash top-1.\n");
+    printf("  Secondary hash keeps the cascade fully ternary-routed: filter and\n");
+    printf("  resolver both operate on packed-trit signatures.\n");
 
     free(x_train); free(y_train); free(x_test); free(y_test);
     return 0;
