@@ -59,4 +59,7 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_cascade_nproj16 tools/mnist_cascade_nproj16.c)
     target_link_libraries(mnist_cascade_nproj16 PRIVATE m4t)
+
+    add_executable(mnist_cascade_atomics tools/mnist_cascade_atomics.c)
+    target_link_libraries(mnist_cascade_atomics PRIVATE m4t)
 endif()
