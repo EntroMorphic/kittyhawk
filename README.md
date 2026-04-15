@@ -68,6 +68,7 @@ cmake --build build-tools -j
 | File | Purpose |
 |---|---|
 | [`NORTH_STAR.md`](NORTH_STAR.md) | The vision. Why base-3, why routing, what the end-game is not. Re-read when base-2 gravity pulls. |
+| [`docs/FINDINGS.md`](docs/FINDINGS.md) | Consolidated measurements and what they mean. The logbook to NORTH_STAR's compass. |
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Current provisional consumer. Open benchmark bed. |
 | [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md) | The substrate specification. 16 numbered sections, traceable to conversation. |
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Red-team findings and remediation status. |
