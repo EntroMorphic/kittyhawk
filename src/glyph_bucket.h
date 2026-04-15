@@ -9,7 +9,29 @@
  * Current constraint: 4-byte signatures (N_PROJ=16) fit in uint32 keys.
  * Longer signatures would need a different key type (uint64 for 8 bytes)
  * or a different structure (hash table). Kept simple until N_PROJ>16
- * bucket variants become interesting.
+ * bucket variants become interesting. Generalizing to uint64 keys is
+ * tracked as the next libglyph API extension (enables the fused-filter
+ * variant with concatenated H1+H2 signatures).
+ *
+ * Typical lookup pattern (matching-run scan):
+ *
+ *     uint32_t key = glyph_sig_to_key_u32(query_sig);
+ *     int lb = glyph_bucket_lower_bound(&bt, key);
+ *     if (lb < bt.n_entries && bt.entries[lb].key == key) {
+ *         // Same-key entries form a contiguous run because the table
+ *         // is sorted. Walk forward while the key still matches.
+ *         for (int i = lb;
+ *              i < bt.n_entries && bt.entries[i].key == key;
+ *              i++) {
+ *             int proto_idx = bt.entries[i].proto_idx;
+ *             // ... score / vote / accumulate candidate ...
+ *         }
+ *     }
+ *
+ * This pattern is what the multi-probe callback in the bucket consumer
+ * tools uses to collect candidates from the query's signature
+ * neighborhood. For a complete working example see
+ * tools/mnist_routed_bucket.c and tools/mnist_routed_bucket_multi.c.
  */
 
 #ifndef GLYPH_BUCKET_H

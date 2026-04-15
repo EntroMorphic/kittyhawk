@@ -34,7 +34,38 @@ void   glyph_write_trit(uint8_t* sig, int j, int8_t t);
 
 /* Callback invoked once per enumerated probe signature. Return non-zero
  * to stop enumeration early (e.g., when the caller's candidate budget
- * is filled). */
+ * is filled).
+ *
+ * Typical use — look up each probe in a bucket index, accumulate
+ * candidates into a hit_list, stop when the budget fills:
+ *
+ *     typedef struct {
+ *         const glyph_bucket_table_t* bt;
+ *         int32_t* hit_list;
+ *         int      n_hit;
+ *         int      max_hit;
+ *     } my_ctx_t;
+ *
+ *     static int my_cb(const uint8_t* probe_sig, void* vctx) {
+ *         my_ctx_t* c = (my_ctx_t*)vctx;
+ *         uint32_t key = glyph_sig_to_key_u32(probe_sig);
+ *         int lb = glyph_bucket_lower_bound(c->bt, key);
+ *         for (int i = lb;
+ *              i < c->bt->n_entries && c->bt->entries[i].key == key;
+ *              i++) {
+ *             if (c->n_hit >= c->max_hit) return 1;  // stop enumeration
+ *             c->hit_list[c->n_hit++] = c->bt->entries[i].proto_idx;
+ *         }
+ *         return 0;  // continue enumeration
+ *     }
+ *
+ *     uint8_t scratch[4];
+ *     my_ctx_t ctx = { &bt, hit_list, 0, MAX_UNION };
+ *     for (int r = 0; r <= 2; r++) {
+ *         if (ctx.n_hit >= MIN_CANDS) break;
+ *         glyph_multiprobe_enumerate(q_sig, 16, 4, r, scratch, my_cb, &ctx);
+ *     }
+ */
 typedef int (*glyph_probe_cb)(const uint8_t* probe_sig, void* ctx);
 
 /* Enumerate every signature at EXACTLY ternary Hamming cost equal to

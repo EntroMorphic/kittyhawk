@@ -8,6 +8,31 @@
  * Under the hood it uses m4t_route_threshold_extract + m4t_ternary_matmul_bt.
  * The abstraction exists so consumers don't re-do the projection +
  * calibration dance in every tool.
+ *
+ * Typical use (init → encode → free):
+ *
+ *     glyph_sig_builder_t sb;
+ *     if (glyph_sig_builder_init(
+ *             &sb,
+ *             16,                         // N_PROJ (signature dimension)
+ *             ds.input_dim,               // e.g. 784 for MNIST
+ *             0.33,                       // balanced base-3 density
+ *             42, 123, 456, 789,          // RNG seed quadruple
+ *             ds.x_train, 1000) != 0) {   // calibration subset
+ *         // handle OOM
+ *     }
+ *
+ *     uint8_t* train_sigs = calloc((size_t)ds.n_train * sb.sig_bytes, 1);
+ *     glyph_sig_encode_batch(&sb, ds.x_train, ds.n_train, train_sigs);
+ *
+ *     uint8_t* test_sigs = calloc((size_t)ds.n_test * sb.sig_bytes, 1);
+ *     glyph_sig_encode_batch(&sb, ds.x_test, ds.n_test, test_sigs);
+ *
+ *     // ... feed train_sigs into glyph_bucket_build, query via test_sigs ...
+ *
+ *     free(train_sigs);
+ *     free(test_sigs);
+ *     glyph_sig_builder_free(&sb);
  */
 
 #ifndef GLYPH_SIG_H
