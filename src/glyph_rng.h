@@ -1,9 +1,17 @@
 /*
- * glyph_rng.h — xoshiro128** RNG state and primitives.
+ * glyph_rng.h — xoshiro128+ RNG state and primitives.
  *
- * The RNG is used for generating random ternary projection matrices
- * and deriving independent table seeds in multi-table LSH consumers.
- * Deterministic given the same seed quadruple.
+ * Small, fast, deterministic RNG used to generate random ternary
+ * projection matrices. This is the "plus" variant of Blackman and
+ * Vigna's xoshiro128 family: state update is the standard xoshiro128
+ * step (xor + shift + rotate), output is `s[0] + s[3]` (NOT the
+ * `starstar` output mix). This is the variant every cascade tool has
+ * used historically; libglyph preserves it for reproducibility with
+ * Phase 3 measurements.
+ *
+ * IMPORTANT: xoshiro requires at least one non-zero state element.
+ * Seeding with (0,0,0,0) produces all zeros forever. Callers must
+ * pick a non-degenerate seed quadruple.
  */
 
 #ifndef GLYPH_RNG_H

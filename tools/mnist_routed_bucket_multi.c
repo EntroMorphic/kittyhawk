@@ -210,7 +210,11 @@ int main(int argc, char** argv) {
     st.max_union = cfg.max_union;
     st.n_hit = 0;
 
-    uint8_t scratch[8];          /* sig_bytes<=8 for foreseeable N_PROJ */
+    /* Scratch buffer for ternary multi-probe neighbor enumeration.
+     * sig_bytes is hard-enforced to 4 above (the bucket index currently
+     * supports only uint32 keys); enlarge this when the library gains
+     * uint64 keys for the fused-filter variant. */
+    uint8_t scratch[4];
     uint8_t* mask = malloc(sig_bytes);
     memset(mask, 0xFF, sig_bytes);
 
@@ -222,10 +226,11 @@ int main(int argc, char** argv) {
     long* total_union   = calloc((size_t)n_M, sizeof(long));
     long* total_probes  = calloc((size_t)n_M, sizeof(long));
 
-    /* Per-query: fixed-size pointer arrays for table sigs and query sigs. */
-    uint8_t**       train_sigs_p = calloc((size_t)cfg.m_max, sizeof(uint8_t*));
-    const uint8_t** q_sigs_p     = calloc((size_t)cfg.m_max, sizeof(uint8_t*));
-    for (int m = 0; m < cfg.m_max; m++) train_sigs_p[m] = train_sigs[m];
+    /* Per-query array of query-sig pointers (one per table). Reused
+     * across queries; only the pointer targets change. train_sigs
+     * itself is already a uint8_t**, so we pass it directly to the
+     * resolvers — no redundant parallel copy. */
+    const uint8_t** q_sigs_p = calloc((size_t)cfg.m_max, sizeof(uint8_t*));
 
     glyph_union_t u = {0};
     u.y_train = ds.y_train;
@@ -263,11 +268,11 @@ int main(int argc, char** argv) {
                 if (pred_v == y) vote_correct[mi]++;
 
                 int pred_s = glyph_resolver_sum(&u, M_target, sig_bytes,
-                                                train_sigs_p, q_sigs_p, mask);
+                                                train_sigs, q_sigs_p, mask);
                 if (pred_s == y) sum_correct[mi]++;
 
                 int pred_p = glyph_resolver_per_table_majority(&u, M_target, sig_bytes,
-                                                train_sigs_p, q_sigs_p, mask);
+                                                train_sigs, q_sigs_p, mask);
                 if (pred_p == y) ptm_correct[mi]++;
             }
 
@@ -310,7 +315,7 @@ int main(int argc, char** argv) {
     free(st.votes); free(st.hit_list);
     free(oracle_correct); free(vote_correct); free(sum_correct); free(ptm_correct);
     free(total_union); free(total_probes);
-    free(train_sigs_p); free(q_sigs_p);
+    free(q_sigs_p);
 
     for (int m = 0; m < cfg.m_max; m++) {
         glyph_sig_builder_free(&builders[m]);
