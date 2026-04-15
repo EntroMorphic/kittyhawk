@@ -76,9 +76,18 @@ cmake --build build-tools -j
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
 
-## Results
+## Results (rebuilt substrate)
 
-Earlier-era measurements (MNIST 97.61% dense k-NN, 81.40% LSH routing) came from the pre-rebuild substrate. They are not claimed by the current state until a consumer runs on the rebuilt primitives and the numbers are re-measured. The thesis that "routing will naturally outperform dense in a base-3 environment" is open empirically — see [`docs/THESIS.md`](docs/THESIS.md) §2–§4.
+| Path | MNIST accuracy | Wall time | Notes |
+|---|---|---|---|
+| **Trit Lattice LSH k-NN (N_PROJ=2048, k=3, fully routed)** | **97.31%** | 7.0 s | Symmetric balanced-base-3 deployment; §18-passing. |
+| MTFP19 L1 k-NN (N_PROJ=2048, k=3) | 97.05% | 75.9 s | Information-fidelity baseline; dense. |
+| Trit Lattice LSH k-NN (N_PROJ=512, k=5, fully routed) | 96.81% | 1.8 s | Smaller projection space. |
+| Trit Lattice LSH (L1 centroid, N_PROJ=2048) | 81.40% | ~10 s | Centroid simplification; not real LSH. |
+
+Routed k-NN beats the dense MTFP L1 baseline on accuracy (0.26 points at k=3) AND speed (10.8× faster). This is the first empirical confirmation of NORTH_STAR's "routing will naturally outperform dense in a base-3 environment" on the rebuilt substrate. See [`journal/routed_knn_mnist.md`](journal/routed_knn_mnist.md) for the full writeup.
+
+The thesis remains open for harder benchmarks; MNIST is one data point, not the end-game. See [`docs/THESIS.md`](docs/THESIS.md) §2–§4.
 
 ## Origin
 

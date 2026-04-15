@@ -103,6 +103,19 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Measured (real Trit Lattice LSH with k-NN — routing beats dense)
+
+New consumer: `tools/mnist_routed_knn.c`. Full LSH architecture — 60 000 training signatures as prototypes, k-NN classification via Hamming distance, symmetric balanced-base-3 zero distribution via per-side τ calibration.
+
+- **N_PROJ=2048, k=3, fully routed: 97.31% MNIST accuracy.** Beats MTFP19 L1 k-NN at the same config (97.05%) by 0.26 points; runs **10.8× faster** (7.0 s vs 75.9 s).
+- Routed wins at every k value for N_PROJ=2048: k=1 (96.93% vs 96.88%), k=3 (97.31% vs 97.05%), k=5 (97.21% vs 96.91%).
+- Symmetric deployment verified: train %zero = 32.87%, test %zero = 32.58%; both within 0.5% of the 33% target.
+- **First empirical confirmation of NORTH_STAR §Claim on the rebuilt substrate.** "Routing is essential, and will naturally outperform dense, in a base-3 environment." Demonstrated on MNIST at 10K test images.
+
+**Supersedes** the conclusion in `journal/tau_sweep_routed_mnist.md` ("three-state routing loses to sign-only on MNIST"). That claim was correct within its measurement (centroid-based routing with asymmetric τ) but wrong as a general statement. The full LSH k-NN consumer with symmetric τ contradicts it.
+
+Full writeup: `journal/routed_knn_mnist.md`.
+
 ### Measured (τ sweep on the fully-routed MNIST classifier)
 
 First experiment that empirically distinguishes a §18-failing deployment from §18-passing deployments on the same routing primitive. tools/mnist_routed_lattice.c now sweeps τ ∈ {0, 10K, 50K, 200K, 1M} for each N_PROJ.
