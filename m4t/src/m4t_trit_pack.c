@@ -11,6 +11,17 @@
 #include <assert.h>
 #include <string.h>
 
+/* Lock the 2-bit-per-trit packing: 4 trits per byte. Any refactor that
+ * widens to sign-only (8 trits per byte) or narrows to a larger code
+ * changes the ternary Hamming interpretation of m4t_popcount_dist — see
+ * the guard comment on that function in m4t_trit_pack.h. */
+_Static_assert(
+    M4T_TRIT_PACKED_BYTES(4) == 1 && M4T_TRIT_PACKED_BYTES(8) == 2,
+    "m4t_trit_pack: packing ratio is load-bearing (4 trits per byte, "
+    "2 bits per trit). m4t_popcount_dist measures ternary Hamming only "
+    "under this layout; see m4t_trit_pack.h guard comment."
+);
+
 /* Decode LUT: maps 2-bit trit codes to signed trit values.
  * Pattern repeats 4× so the same LUT drives vqtbl1q_s8 against any 16-byte
  * register of codes in [0, 3]. */
@@ -78,6 +89,10 @@ void m4t_unpack_trits_rowmajor(
 int32_t m4t_popcount_dist(
     const uint8_t* a, const uint8_t* b, const uint8_t* mask, int packed_bytes)
 {
+    /* Ternary Hamming distance; see guard comment in m4t_trit_pack.h.
+     * Correctness depends on the 2-bit trit codes (+1=0b01, 0=0b00,
+     * -1=0b10). Per-position cost is 0/1/2 from XOR popcount on each
+     * 2-bit field; max distance is 2·N trits, not N. */
     int32_t total = 0;
     int i = 0;
 

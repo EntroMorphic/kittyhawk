@@ -40,9 +40,34 @@ void m4t_unpack_trits_rowmajor(
     int M, int K
 );
 
-/* Hamming-style distance between two packed trit buffers, masked by a
- * per-bit mask. Counts mismatching bits where the mask is set. Used as the
- * XOR+POPCNT routing distance; NEON uses VEOR + VAND + VCNT + VADDL. */
+/* Ternary Hamming distance between two packed trit buffers, masked by a
+ * per-bit mask. The kernel is a byte-level XOR + VCNT popcount; its
+ * *ternary* interpretation is load-bearing on the 2-bit-per-trit packing
+ * convention established by `m4t_pack_trits_1d` / `trit_to_code`:
+ *
+ *     +1 → 0b01      0 → 0b00      −1 → 0b10
+ *
+ * With that convention, XOR of two trit codes produces:
+ *
+ *     same trit (any state)            → 0b00   popcount 0   cost 0 (agree)
+ *     ±1 vs 0                          → 0b01   popcount 1   cost 1 (partial)
+ *     +1 vs −1                         → 0b11   popcount 2   cost 2 (opposite)
+ *
+ * So this function returns a ternary Hamming distance with max = 2·N trits,
+ * not a binary Hamming distance with max = N. Consumers rely on this in
+ * `MAX_DIST = 2 * N_PROJ` (`tools/mnist_probe_nproj16.c` and the cascade
+ * tools) and in `max_dist = 2 * N_PROJ` in `tools/mnist_routed_weighted.c`.
+ *
+ * WARNING — guard on the packing convention. If anyone ever changes the
+ * packing to a 1-bit sign-only layout (collapsing +1 and −1 to one state),
+ * this function will silently start measuring a binary Hamming distance
+ * and every downstream distance/threshold/vote-rule calibration will drift
+ * without a build error. The 2-bit code is encoded by `trit_to_code` and
+ * decoded by `M4T_TRIT_DECODE_LUT`; both must move together. See §18 of
+ * `m4t/docs/M4T_SUBSTRATE.md` — emission coverage is this primitive's
+ * contract with the rest of the substrate.
+ *
+ * NEON path: VEOR + VAND + VCNT + VADDLP (widen) + VADDV. */
 int32_t m4t_popcount_dist(
     const uint8_t* a,
     const uint8_t* b,
