@@ -103,6 +103,44 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Full matrix sweep — 97.99% new best; mechanism predictions confirmed
+
+New consumer: `tools/mnist_full_sweep.c`. First comprehensive sweep over (N_PROJ × density × k × vote_rule). 81 configurations × 3 seeds = 243 measurements. Runtime 9.1 minutes.
+
+**New headline: 97.99 ± 0.01% at N_PROJ=4096, density=0.33, k=5, rank-weighted.** Three-seed measurement with ±0.01% variance.
+
+Per-N_PROJ scaling (d=0.33, k=5, rank-wt):
+
+| N_PROJ | Accuracy | Δ from prior N_PROJ |
+|---|---|---|
+| 1024 | 97.75 ± 0.07% | — |
+| 2048 | 97.86 ± 0.01% | +0.11% |
+| 4096 | **97.99 ± 0.01%** | +0.13% |
+
+Clean ~0.12% gain per doubling. Not saturated; N_PROJ=8192 plausible.
+
+**Mechanism cycle predictions confirmed empirically:**
+
+1. **Exponential weighting (2^(k-rank-1)) collapses to top-1 classification.** At any k, top-1's weight exceeds the sum of all other weights combined (57%, 52%, 50.4% at k=3, 5, 7). The matrix shows exp-wt producing identical accuracy across k=3, 5, 7 for every (N_PROJ, density) — empirical demonstration of the "too-steep" failure mode predicted in `journal/mechanism_that_worked_*.md`.
+
+2. **Rank-weighted k=5 is the dominant (rule, k) sweet spot.** Appears in 7 of top 10 configurations. Rank-k=7 is close but slightly below at the peak (97.95 vs 97.99 at N_PROJ=4096).
+
+**Density 0.33 confirmed empirically optimal:**
+
+| Density | Accuracy (at N_PROJ=4096, k=5, rank-wt) |
+|---|---|
+| 0.25 | 97.91 ± 0.05% |
+| **0.33** | **97.99 ± 0.01%** |
+| 0.50 | 97.73 ± 0.06% |
+
+Balanced base-3 isn't just aesthetic; it's empirically the peak AND the most stable across seeds (tightest stddev).
+
+**Amplification ceiling for this representational family: ~98%.** Each extra basis point costs doubling compute. To push further would need either structurally different representations (multi-stage, per-class τ, pair-specific masks) or data-level interventions (augmentation).
+
+**Gap to dense baseline has grown.** Deskewed-pixel dense L1 k-NN: 97.16%. Routed 97.99%. Routing wins by **0.83 points** on accuracy, still ~20× faster on wall time.
+
+Full writeup: `journal/full_matrix_sweep.md`.
+
 ### Amplification experiment — predictions failed honestly
 
 New consumer: `tools/mnist_routed_amplified.c`. Tested two amplification paths proposed from the inspectability analysis: (1) K=5 independent ternary projections with majority-vote ensemble, (2) audit-triggered pixel-k-NN fallback for uncertain queries.

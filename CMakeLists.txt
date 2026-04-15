@@ -50,4 +50,7 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_routed_amplified tools/mnist_routed_amplified.c)
     target_link_libraries(mnist_routed_amplified PRIVATE m4t)
+
+    add_executable(mnist_full_sweep tools/mnist_full_sweep.c)
+    target_link_libraries(mnist_full_sweep PRIVATE m4t)
 endif()

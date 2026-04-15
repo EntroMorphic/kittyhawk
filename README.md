@@ -69,6 +69,7 @@ cmake --build build-tools -j
 |---|---|
 | [`NORTH_STAR.md`](NORTH_STAR.md) | The vision. Why base-3, why routing, what the end-game is not. Re-read when base-2 gravity pulls. |
 | [`docs/FINDINGS.md`](docs/FINDINGS.md) | Consolidated measurements and what they mean. The logbook to NORTH_STAR's compass. |
+| [`docs/HYPERPARAMETERS.md`](docs/HYPERPARAMETERS.md) | Every parameter across every experiment. Reference for reproduction. |
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Current provisional consumer. Open benchmark bed. |
 | [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md) | The substrate specification. 16 numbered sections, traceable to conversation. |
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Red-team findings and remediation status. |
@@ -77,19 +78,18 @@ cmake --build build-tools -j
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
 
-## Results (rebuilt substrate, fair comparison — 3 seeds)
+## Results (rebuilt substrate, 3-seed multi-config)
 
 | Path | Config | Accuracy | Time |
 |---|---|---|---|
-| **Trit Lattice LSH k-NN (routed)** | deskewed proj, N=2048, k=3 | **97.79 ± 0.05%** | 7.0 s |
+| **Trit Lattice LSH k-NN (routed)** | deskewed, N=4096, k=5, rank-weighted | **97.99 ± 0.01%** | ~14 s |
+| Trit Lattice LSH k-NN (routed) | deskewed, N=2048, k=5, rank-weighted | 97.86 ± 0.01% | 7.0 s |
+| Trit Lattice LSH k-NN (routed) | deskewed, N=2048, k=3, majority | 97.79 ± 0.05% | 7.0 s |
 | NEON L1 k-NN | deskewed proj, N=2048, k=3 | 97.62 ± 0.07% | 141.9 s |
 | **Dense pixel k-NN (classical baseline)** | deskewed pixels, k=3 | 97.16% | 45.4 s |
-| Trit Lattice LSH k-NN (routed) | raw proj, N=2048, k=3 | 97.30 ± 0.03% | 7.0 s |
-| NEON L1 k-NN | raw proj, N=2048, k=3 | 97.00 ± 0.05% | 141.4 s |
-| Dense pixel k-NN | raw pixels, k=3 | 96.33% | 45.6 s |
-| Trit Lattice LSH (centroid simplification) | N=2048 | 81.40% | ~10 s |
+| Trit Lattice LSH (centroid simplification, historic) | N=2048 | 81.40% | ~10 s |
 
-**Routed k-NN beats the strong dense baseline by 0.63 points and runs 20.3× faster than NEON-vectorized L1 k-NN over the same projections.** Symmetric balanced-base-3 distribution (+33.4% / 0 32.9% / -33.7%) verified on the signatures. This is the empirical confirmation of NORTH_STAR's "routing will naturally outperform dense in a base-3 environment" on the rebuilt substrate. Gaps against same-projection L1 are significant at 4-6σ at N_PROJ=2048 (k=3, k=5). See [`journal/routed_knn_mnist.md`](journal/routed_knn_mnist.md) (Revised section) for the full writeup and multi-seed statistics.
+**Routed k-NN beats the classical dense baseline by 0.83 points** at the best configuration (97.99% vs 97.16%) and runs ~20× faster than NEON-vectorized L1 over the same projections. Symmetric balanced-base-3 distribution (density 0.33) empirically confirmed optimal via an 81-cell matrix sweep. Gap is significant at 4-6σ at N_PROJ=2048; at N_PROJ=4096 the stddev shrinks to ±0.01% giving even cleaner separation. See [`journal/full_matrix_sweep.md`](journal/full_matrix_sweep.md) for the full sweep and [`journal/routed_knn_mnist.md`](journal/routed_knn_mnist.md) for the fair-comparison methodology.
 
 The thesis remains open for harder benchmarks; MNIST with k-NN is cooperative for both approaches. See [`docs/THESIS.md`](docs/THESIS.md) §2–§4.
 
