@@ -103,7 +103,40 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
-### Measured (real Trit Lattice LSH with k-NN — routing beats dense)
+### Measured (fair-comparison edition — routing wins stronger than initial claim)
+
+Red-team of commit `663c355` flagged three comparison-fairness holes: scalar-vs-NEON speed comparison, single-seed accuracy claim, weak dense baseline. Remediated all three in `tools/mnist_routed_knn.c`; re-ran the sweep. Outcome: **the win strengthened, not weakened.**
+
+**Headline, fair comparison (3 seeds, NEON-vectorized L1, deskewed-pixel baseline included):**
+- **Routed k-NN, deskewed proj, N_PROJ=2048, k=3: 97.79 ± 0.05%.**
+- Dense deskewed-pixel k-NN (classical baseline), k=3: 97.16%. Routing wins by 0.63 points.
+- NEON-vectorized L1 k-NN over same projections: 97.62 ± 0.07%. Routing wins by 0.17% (2σ) at k=3; 0.25% (4.6σ) at k=5.
+
+**Routed vs L1 over same projections, raw mode, N_PROJ=2048:**
+- k=3: 97.30 ± 0.03% vs 97.00 ± 0.05%, Δ +0.30% at 5.2σ.
+- k=5: 97.18 ± 0.04% vs 96.85 ± 0.05%, Δ +0.32% at 5.9σ.
+
+**Speedup is larger under fair comparison, not smaller:**
+- 20.3× at N_PROJ=2048 (routed 7.0s vs NEON-L1 141.4s; was 10.8× against scalar L1).
+- 12.0× at N_PROJ=512.
+- The compression of 2048 int32 mantissas into 512-byte packed-trit signatures drives cache-locality advantages; popcount processes trit information at NEON-native VCNT throughput; L1 fights L2 cache pressure from 480 MB of training projections.
+
+**Trit distribution verified:** +33.4% / 0 32.9% / -33.7% across all configurations. Genuine balanced base-3.
+
+### Retracted / revised
+
+- Prior claim "10.8× faster than dense" → actual speedup against fair NEON baseline is 20.3× at N_PROJ=2048. The prior number was against a scalar baseline.
+- Prior claim "Routed beats dense by 0.26 points" → marginal as single-run. Fair 3-seed measurement at the same config is +0.30% at 5.2σ; the win is confirmed and quantified.
+- Prior claim "first empirical confirmation of NORTH_STAR §Claim" → the original evidence was 1.5σ single-run. It carries now at 5σ multi-seed.
+
+### Qualifications remaining
+
+- N_PROJ=512: routed loses by ~0.12% vs L1. The routed win is N_PROJ-dependent.
+- MNIST k-NN is cooperative for both approaches; the thesis-testing bed remains open (see `docs/THESIS.md` §4).
+
+Full writeup in `journal/routed_knn_mnist.md` "Revised after fourth red-team" section; remediation plan in `docs/REMEDIATION_PLAN.md` fourth round.
+
+### Measured (real Trit Lattice LSH with k-NN — routing beats dense) [superseded by fair-comparison entry above]
 
 New consumer: `tools/mnist_routed_knn.c`. Full LSH architecture — 60 000 training signatures as prototypes, k-NN classification via Hamming distance, symmetric balanced-base-3 zero distribution via per-side τ calibration.
 

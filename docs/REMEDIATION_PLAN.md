@@ -341,3 +341,97 @@ Severity key unchanged: **H**, **M**, **L**.
 5. Build + test + commit.
 
 L-RT1A and L-RT3A explicitly deferred with rationale.
+
+---
+
+# Fourth red-team round (2026-04-14, post routed-knn 97.31% claim)
+
+Red-team of commit `663c355` (the "routed 97.31% beats dense 97.05% by 10.8×" headline). Findings qualify but don't invalidate the core result. Seven items across three severity levels.
+
+## H-RT1D. Speed comparison is apples-to-oranges (scalar L1 vs NEON popcount)
+
+**Finding.** `mnist_routed_knn.c`'s L1 k-NN baseline uses a scalar `int64_t` inner loop with no SIMD; `m4t_popcount_dist` is hand-NEON. The 10.8× speedup conflates algorithmic win (popcount-over-bits vs abs-diff-sum per dim) with SIMD deployment. The raw claim inflates the algorithmic edge.
+
+**Remediation.**
+- [ ] Rewrite the L1 k-NN inner loop with NEON (`vabdq_s32` + `vaddw_s32` widening accumulate to int64). Lanes: 4 int32 absolute differences per vector, widen-add into two int64x2_t accumulators, horizontal reduce at the end.
+- [ ] Re-run the comparison with the vectorized baseline.
+- [ ] Update the reported speedup — expected ~3-5× once L1 is vectorized (popcount processes 128 bits per VCNT; abs-diff-sum processes 4 int32s per vabdq; algorithmic ratio is ~5-10× but real overhead compresses this).
+
+**Complete when.** L1 baseline is NEON-vectorized; routed vs L1 wall time reflects only the algorithmic difference, not SIMD deployment asymmetry.
+
+## H-RT2D. Accuracy gap is ~1.5σ; single-run, not statistically significant
+
+**Finding.** 97.31% vs 97.05% at n=10 000 is a 26-sample difference. Binomial standard error at p≈0.97, n=10K is ≈0.17%. The 0.26% gap is ~1.5σ — suggestive, not decisive. One RNG seed isn't enough to distinguish "routing really wins" from "this run's random projection happened to favor routing."
+
+**Remediation.**
+- [ ] Run at least 5 RNG seeds per configuration.
+- [ ] Report mean ± stddev for each (N_PROJ, k) cell in the results table.
+- [ ] Apply honest interpretation: if routed's mean minus L1's mean is within one stddev, call it a tie. Otherwise claim the gap as measured.
+
+**Complete when.** Every reported accuracy has a mean ± stddev over multiple seeds; no single-run numbers quoted as headlines.
+
+## M-RT1D. Best-of-six selection bias on the 97.31% headline
+
+**Finding.** 6 configurations ran for routed (2 N_PROJs × 3 k values). 97.31% was the best of 6. Best-of-k from noise-distributions with σ≈0.17% biases the maximum upward by ~0.3-0.5%. The honest out-of-sample routed number is probably ~97.0% ± 0.2%.
+
+**Remediation.**
+- [ ] Report all configurations tested, not just the winner. Include the full grid in the output table.
+- [ ] Caveat the "best" number with explicit selection-bias acknowledgment.
+
+**Complete when.** Every reported accuracy is contextualized with the sweep it was the maximum over.
+
+## M-RT2D + M-RT3D. Dense baseline is too weak; no deskewing tested
+
+**Finding.**
+- The "L1 k-NN (MTFP19 projections)" baseline in the current tool isn't the strongest classical dense baseline. It's L1 over *the same ternary projections* as the routed path — isolates the classifier contribution but isn't "dense ML wins on this task."
+- The stronger dense baseline is k-NN over deskewed pixels (journal: 97.61%). We haven't re-measured this on the rebuilt substrate.
+- Deskewing boosts accuracy by ~1.5-2 points. The routed path hasn't been run on deskewed inputs either.
+
+**Remediation.**
+- [ ] Port `deskew_image` / `deskew_all` from `archive/tools/mnist_knn_lattice.c` into the k-NN tool.
+- [ ] Add a deskewed-pixel dense k-NN baseline (L1 distance over 784-dim MTFP pixel vectors, k ∈ {1, 3, 5}).
+- [ ] Add an optional deskewing pass for the routed path (deskew pixels → project → extract signature → k-NN).
+- [ ] Report all four tracks side-by-side: raw-proj L1, raw-proj routed, deskewed-pixel L1, deskewed-proj routed.
+
+**Complete when.** Results include both deskewed and non-deskewed variants on both the dense (pixel + projection) and routed paths.
+
+## M-RT4D. Zero density verified but not full trit distribution
+
+**Finding.** We verified train %zero = 32.87%, test %zero = 32.58% — close to 33%. We did NOT verify that the nonzero trits split ~50/50 between +1 and -1. If the distribution is skewed (e.g., 33% zeros, 40% +1, 27% -1), §18 passes at emission-coverage but the base-3 distribution isn't symmetric.
+
+**Remediation.**
+- [ ] Instrument to count +1, 0, -1 trits separately.
+- [ ] Report the full three-way distribution on both train and test signatures.
+- [ ] Verify ~33/33/33 split (or document the actual split if asymmetric).
+
+**Complete when.** Output shows %+1, %0, %-1 distributions for each signature population; symmetric-trichotomy confirmed or the asymmetry explicitly documented.
+
+## L-RT1D. Memory 600+ MB at N_PROJ=2048 (hygiene)
+
+**Finding.** `train_proj` alone is 480 MB. With `test_proj` and signatures, peak memory is ~600 MB. Fine on modern hardware but limits the tool on tighter machines.
+
+**Remediation (accepted).**
+- [ ] *Defer.* Acceptable for a research tool; memory is not the binding resource. A streaming-projection variant is straightforward if a tighter consumer arises.
+
+## L-RT2D. Document revised claims everywhere
+
+**Finding.** The prior `journal/routed_knn_mnist.md`, `CHANGELOG.md`, and `README.md` all carry the overclaimed "routing beats dense by 10.8×" framing. Once the remediation measurements are in, every doc that quotes the headline needs correcting.
+
+**Remediation.**
+- [ ] Update `README.md` Results table with multi-seed, vectorized-baseline, deskewed numbers.
+- [ ] Add a correction entry to `CHANGELOG.md` retracting the overclaim with revised measurements.
+- [ ] Append a "Revised after fourth red-team" section to `journal/routed_knn_mnist.md` with the new numbers; keep the prior text for historical record.
+
+**Complete when.** No repo document quotes the 10.8× speedup or 97.31% as "beats dense by X points" without the seed-variance and baseline-fairness qualifiers.
+
+---
+
+## Execution order (fourth round)
+
+1. Update `mnist_routed_knn.c`: add vectorized L1, deskewing, multi-seed loop, ±1 trit count, full-sweep output.
+2. Rebuild.
+3. Run the new configuration. Capture full results.
+4. Update docs with honest revised claims (README, CHANGELOG, journal entry).
+5. Commit everything as one cohesive correction.
+
+Deferred: L-RT1D (memory).

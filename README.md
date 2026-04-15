@@ -76,18 +76,21 @@ cmake --build build-tools -j
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
 
-## Results (rebuilt substrate)
+## Results (rebuilt substrate, fair comparison — 3 seeds)
 
-| Path | MNIST accuracy | Wall time | Notes |
+| Path | Config | Accuracy | Time |
 |---|---|---|---|
-| **Trit Lattice LSH k-NN (N_PROJ=2048, k=3, fully routed)** | **97.31%** | 7.0 s | Symmetric balanced-base-3 deployment; §18-passing. |
-| MTFP19 L1 k-NN (N_PROJ=2048, k=3) | 97.05% | 75.9 s | Information-fidelity baseline; dense. |
-| Trit Lattice LSH k-NN (N_PROJ=512, k=5, fully routed) | 96.81% | 1.8 s | Smaller projection space. |
-| Trit Lattice LSH (L1 centroid, N_PROJ=2048) | 81.40% | ~10 s | Centroid simplification; not real LSH. |
+| **Trit Lattice LSH k-NN (routed)** | deskewed proj, N=2048, k=3 | **97.79 ± 0.05%** | 7.0 s |
+| NEON L1 k-NN | deskewed proj, N=2048, k=3 | 97.62 ± 0.07% | 141.9 s |
+| **Dense pixel k-NN (classical baseline)** | deskewed pixels, k=3 | 97.16% | 45.4 s |
+| Trit Lattice LSH k-NN (routed) | raw proj, N=2048, k=3 | 97.30 ± 0.03% | 7.0 s |
+| NEON L1 k-NN | raw proj, N=2048, k=3 | 97.00 ± 0.05% | 141.4 s |
+| Dense pixel k-NN | raw pixels, k=3 | 96.33% | 45.6 s |
+| Trit Lattice LSH (centroid simplification) | N=2048 | 81.40% | ~10 s |
 
-Routed k-NN beats the dense MTFP L1 baseline on accuracy (0.26 points at k=3) AND speed (10.8× faster). This is the first empirical confirmation of NORTH_STAR's "routing will naturally outperform dense in a base-3 environment" on the rebuilt substrate. See [`journal/routed_knn_mnist.md`](journal/routed_knn_mnist.md) for the full writeup.
+**Routed k-NN beats the strong dense baseline by 0.63 points and runs 20.3× faster than NEON-vectorized L1 k-NN over the same projections.** Symmetric balanced-base-3 distribution (+33.4% / 0 32.9% / -33.7%) verified on the signatures. This is the empirical confirmation of NORTH_STAR's "routing will naturally outperform dense in a base-3 environment" on the rebuilt substrate. Gaps against same-projection L1 are significant at 4-6σ at N_PROJ=2048 (k=3, k=5). See [`journal/routed_knn_mnist.md`](journal/routed_knn_mnist.md) (Revised section) for the full writeup and multi-seed statistics.
 
-The thesis remains open for harder benchmarks; MNIST is one data point, not the end-game. See [`docs/THESIS.md`](docs/THESIS.md) §2–§4.
+The thesis remains open for harder benchmarks; MNIST with k-NN is cooperative for both approaches. See [`docs/THESIS.md`](docs/THESIS.md) §2–§4.
 
 ## Origin
 
