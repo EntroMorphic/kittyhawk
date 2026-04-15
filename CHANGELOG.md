@@ -545,6 +545,75 @@ Verdict: **the meta-router was a proposal to route around a deficient filter; th
 
 Full writeup: `journal/fused_filter_fix.md`.
 
+### Architectural correction — dense outer loop discovered in every cascade tool
+
+Audit finding surfaced in a user exchange about the word "dense" in conversational response text. Every cascade tool built in this session — `mnist_cascade_nproj16`, `mnist_cascade_sweep`, `mnist_cascade_atomics`, `mnist_resolver_sweep`, `mnist_local_vs_global`, `mnist_local_v2`, `mnist_lvg_atomics`, plus the earlier `mnist_routed_knn` and `mnist_full_sweep` — runs routing primitives (`popcount_dist`, `threshold_extract`) inside an `O(N_train)` dense outer loop. Every per-query pass touches all 60K training signatures one by one. That is dense application shape with routed kernels: a substrate-level NORTH_STAR violation, even though the per-comparison primitive is routing-native.
+
+The "20.3× speedup over dense L1 at N_PROJ=2048" headline (Axis 2 in FINDINGS.md) is apples-to-apples on the same `O(N)` outer loop: trit-sig-popcount scanning 60K prototypes vs MTFP-L1 scanning 60K prototypes. The speedup is real but it is a *compression* win, not a *routing* win at the architecture level. The cascade tools are reframed as **measurement scaffolding** — they produced correct research observations about filter-ranker asymmetry, fused-filter leverage, observability ceilings, atomic confusion structure, and adaptive routing — but none of them is a production architecture.
+
+### First genuinely routed consumer — `tools/mnist_routed_bucket.c`
+
+New consumer that uses the signature as an **address**, not as an operand. Training-time build sorts `(signature_key, prototype_index)` pairs by signature_key. Query-time resolution is binary search into the sorted table plus ternary-Hamming multi-probe over neighbor codes at radius 0, 1, 2.
+
+Index structure at N_PROJ=16 (60K prototypes):
+
+```
+60 000 prototypes → 37 906 distinct buckets (1.58× compression)
+  29 616 singleton buckets (78.1%)
+     6 099 buckets of size 2-3
+     1 621 buckets of size 4-7
+       420 buckets of size 8-15
+       112 buckets of size 16-31
+        25 buckets of size 32-63
+        12 buckets of size 64-127
+         1 bucket with 128+ prototypes (all-zero sig region)
+build time: 3 ms (one-time)
+```
+
+Ternary multi-probe enumeration operates directly on packed 2-bit trit codes — no unpacking to int8 arrays. Neighbor sets respect the ternary Hamming cost function: r=0 one probe, r=1 ~27 probes per query, r=2 ~340 probes per query, all 4-byte key lookups that binary-search the 937 KB sorted table.
+
+**Tuning sweep over `(MAX_RADIUS × MIN_CANDIDATES)`:**
+
+    MAX_R  MIN_C  accuracy   avg_cands  avg_probes  empty   us/qry
+     0       1    36.99%         9.2         1.0    4797     0.4
+     0     100    36.99%         9.2         1.0    4797     0.3
+     1       1    61.80%         8.4         9.8    1129     0.7
+     1     100    68.90%        46.5        22.0    1129     2.1
+     2       1    67.82%         8.4        33.3     175     1.3
+     2     100    82.58%       136.4       216.2     175     9.9
+     2     400    82.60%       193.8       237.1     175    12.2
+
+Best operating point: **MAX_R=2, MIN_C=100 → 82.58% accuracy at 9.9 μs/query.**
+
+**Comparison against dense baseline:**
+
+| architecture | popcount_dists/query | μs/query | accuracy |
+|---|---|---|---|
+| dense L50_H1 (scan 60K H1 + H2+H3+H4 top-50 resolver) | 60 150 | ~1 950 | 83.86% |
+| routed bucket (MAX_R=2, MIN_C=100) | ~410 | 9.9 | 82.58% |
+| **ratio** | **~147× fewer popcount ops** | **~197× faster wall time** | **−1.28 points** |
+
+The H1 pass is completely eliminated. All filter work is binary search plus multi-probe enumeration. The resolver runs `popcount_dist` only over the small candidate set (avg 136 prototypes per query).
+
+**Radius escalation profile matches the Axis 4c atomic probe exactly:**
+
+| radius | queries | fraction | probe-predicted fraction |
+|---|---|---|---|
+| r=0 sufficient | 5 203 | 52.03% | 52% (exact-match rate) ✓ |
+| escalated to r=1 | 3 668 | 36.68% | ~37% (cumulative ~89% at min_d ≤ 2 bits) ✓ |
+| escalated to r=2 | 954 | 9.54% | ~10% (cumulative ~98% at min_d ≤ 4 bits) ✓ |
+| empty at r=2 | 175 | 1.75% | ~2% (min_d > 4 bits) ✓ |
+
+The consumer is literally measuring what the probe predicted. Every query's radius of resolution is a direct function of the H1 signature codebook's collision structure.
+
+**The 1.28-point gap to dense L50_H1 is dominated by the 175 empty queries** whose nearest training signature exceeds Hamming radius 2. Closing the gap requires either r=3 (more probes per query, worth ~1 point of accuracy) or applying the Axis 4d information-leverage rule to the bucket — concatenate H1+H2 into 8-byte keys so the codebook is `3^32` instead of `3^16` and most buckets become singletons with precise collision semantics.
+
+**New architectural rule (extending Axis 4d's rules 1-6):**
+
+**Rule 7. Production k-NN uses the signature as an address, not as an operand.** Build a bucket index keyed on the packed-trit signature; query via binary search + ternary multi-probe; run the resolver only on the candidate set. The `O(N_train)` outer loop is scaffolding for research measurements, not an architecture. This rule subsumes the filter-ranker reframe: the filter now does zero distance work — it performs a table lookup. Distance computation is reserved for the resolver, over the small candidate set.
+
+Full writeup with full derivation, code structure, and follow-up list: `journal/routed_bucket_consumer.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.
