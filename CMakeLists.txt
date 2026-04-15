@@ -83,6 +83,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_local_v2 tools/mnist_local_v2.c)
     target_link_libraries(mnist_local_v2 PRIVATE m4t)
+
+    add_executable(mnist_routed_bucket tools/mnist_routed_bucket.c)
+    target_link_libraries(mnist_routed_bucket PRIVATE m4t)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
