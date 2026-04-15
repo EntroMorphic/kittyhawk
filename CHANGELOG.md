@@ -103,6 +103,22 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Demonstrated (routed k-NN inspectability — the third axis)
+
+New consumer: `tools/mnist_routed_trace.c`. For each misclassified MNIST test image, prints the complete audit trail of the routed decision: top-5 nearest training prototypes with distances, vote composition at k=3, per-trit decomposition of the distance to the top-1 (agreements split by trit value; disagreements split by sign-flip cost-2 vs zero-vs-sign cost-1), per-class nearest-prototype distance over all 60 000 prototypes, and a failure classification derived from those integer thresholds.
+
+**Failure distribution over 221 misclassifications at 97.79% deskewed N=2048 k=3:**
+- NARROW MISS (correct class within 10 bits of winner): 74 (33.5%)
+- VISUAL CONFUSION (both classes have near prototypes): 65 (29.4%)
+- SEPARATED (correct class genuinely far): 82 (37.1%)
+- OUTLIER (no class has a close prototype): 0 (0.0%)
+
+**Structural observation from per-trit breakdown:** errors cluster at the quantization boundary, not at semantic opposition. Of the ~30% disagreement bits in typical near-misses, 90-95% are zero-vs-sign (cost 1) mismatches; sign-flips (cost 2, full opposition) are a small minority. The router rarely says "+1" where the correct class says "-1"; it more often says "0" where the correct class says ±1.
+
+**What dense k-NN cannot produce:** per-prototype reasoning. Dense L1 is a scalar sum; the contributing dims aren't separable. Routed Hamming IS the per-trit cost sum by construction; inspectability is a substrate-level property, not an add-on.
+
+Full writeup: `journal/routed_inspectability_trace.md`.
+
 ### Measured (fair-comparison edition — routing wins stronger than initial claim)
 
 Red-team of commit `663c355` flagged three comparison-fairness holes: scalar-vs-NEON speed comparison, single-seed accuracy claim, weak dense baseline. Remediated all three in `tools/mnist_routed_knn.c`; re-ran the sweep. Outcome: **the win strengthened, not weakened.**

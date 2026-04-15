@@ -41,4 +41,7 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_routed_knn tools/mnist_routed_knn.c)
     target_link_libraries(mnist_routed_knn PRIVATE m4t)
+
+    add_executable(mnist_routed_trace tools/mnist_routed_trace.c)
+    target_link_libraries(mnist_routed_trace PRIVATE m4t)
 endif()
