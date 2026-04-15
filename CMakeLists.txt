@@ -80,6 +80,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_lvg_atomics tools/mnist_lvg_atomics.c)
     target_link_libraries(mnist_lvg_atomics PRIVATE m4t)
+
+    add_executable(mnist_local_v2 tools/mnist_local_v2.c)
+    target_link_libraries(mnist_local_v2 PRIVATE m4t)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
