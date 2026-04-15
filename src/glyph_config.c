@@ -40,6 +40,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->verbose     = 0;
     cfg->single_m    = 0;
     cfg->no_deskew   = 0;
+    cfg->resolver_sum = "scalar";
 }
 
 void glyph_config_print_usage(const char* progname) {
@@ -63,6 +64,10 @@ void glyph_config_print_usage(const char* progname) {
         "                          (default: deskew; recommended ON for MNIST digits,\n"
         "                           OFF for datasets without a canonical shear axis like\n"
         "                           Fashion-MNIST clothing or CIFAR-10 natural images)\n"
+        "  --resolver_sum <mode>   SUM resolver implementation: 'scalar' (default) uses the\n"
+        "                          general-purpose path; 'neon4' uses a NEON-batched variant\n"
+        "                          specialized for N_PROJ=16 / sig_bytes=4 (4 candidates per\n"
+        "                          16-byte vector). bit-exact equivalent — unit test covers.\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -149,6 +154,7 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
 
         if      (strcmp(arg, "--data")       == 0) cfg->data_dir   = val;
         else if (strcmp(arg, "--mode")       == 0) cfg->mode       = val;
+        else if (strcmp(arg, "--resolver_sum") == 0) cfg->resolver_sum = val;
         else if (strcmp(arg, "--n_proj")     == 0) {
             if (parse_int(arg, val, &cfg->n_proj)) return 1;
         }
@@ -218,6 +224,12 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
     }
     if (strcmp(cfg->mode, "oracle") != 0 && strcmp(cfg->mode, "full") != 0) {
         fprintf(stderr, "glyph_config: --mode must be 'oracle' or 'full'\n");
+        return 1;
+    }
+    if (strcmp(cfg->resolver_sum, "scalar") != 0 &&
+        strcmp(cfg->resolver_sum, "neon4") != 0) {
+        fprintf(stderr,
+            "glyph_config: --resolver_sum must be 'scalar' or 'neon4'\n");
         return 1;
     }
     return 0;

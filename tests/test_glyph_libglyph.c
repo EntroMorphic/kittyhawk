@@ -387,6 +387,99 @@ static void test_resolver_vote_weighted(void) {
     TEST_ASSERT_EQ(glyph_resolver_vote(&u), 0, "vote class-weighted sum");
 }
 
+/* Equivalence test: glyph_resolver_sum_neon4 must return bit-exact
+ * identical labels to glyph_resolver_sum when sig_bytes=4 and the
+ * mask is all-ones. Random inputs across a range of m_active and
+ * n_hit values. */
+static void test_resolver_sum_neon4_equivalence(void) {
+    const int sig_bytes = 4;
+    const int n_classes = 10;
+    const int n_train = 256;
+    uint8_t* train_buf = malloc((size_t)n_train * 16 * 4);  /* 16 tables × 4 bytes */
+    uint8_t* query_buf = malloc((size_t)16 * 4);
+    int*     y_train_buf = malloc((size_t)n_train * sizeof(int));
+    int32_t* hit_list   = malloc((size_t)n_train * sizeof(int32_t));
+    uint16_t* votes = calloc((size_t)n_train, sizeof(uint16_t));
+
+    /* Set up pointer arrays for the resolver API. */
+    uint8_t* train_sigs[16];
+    const uint8_t* query_sigs[16];
+    for (int m = 0; m < 16; m++) {
+        train_sigs[m] = train_buf + (size_t)m * n_train * 4;
+        query_sigs[m] = query_buf + (size_t)m * 4;
+    }
+
+    /* Deterministic-ish random fill. */
+    uint32_t seed = 0x9e3779b9u;
+    for (size_t i = 0; i < (size_t)n_train * 16 * 4; i++) {
+        seed = seed * 1103515245u + 12345u;
+        train_buf[i] = (uint8_t)(seed >> 24);
+    }
+    for (size_t i = 0; i < (size_t)16 * 4; i++) {
+        seed = seed * 1103515245u + 12345u;
+        query_buf[i] = (uint8_t)(seed >> 24);
+    }
+    for (int i = 0; i < n_train; i++) y_train_buf[i] = i % n_classes;
+
+    /* Two mask patterns: all-ones (production default) and a
+     * non-trivial pattern that exercises the mask-honoring NEON path.
+     * Any difference between the two would catch a mask-handling bug
+     * in the batched implementation. */
+    uint8_t mask_ones[4]    = {0xff, 0xff, 0xff, 0xff};
+    uint8_t mask_partial[4] = {0x0f, 0xf0, 0xa5, 0x5a};
+
+    /* Several (m_active, n_hit) combinations covering tail cases. */
+    struct { int m; int n; } cases[] = {
+        {1, 1}, {1, 4}, {1, 5}, {1, 7}, {1, 16}, {1, 17},
+        {4, 4}, {4, 16}, {4, 17},
+        {8, 4}, {8, 128},
+        {16, 3}, {16, 4}, {16, 8}, {16, 64}, {16, 200},
+    };
+
+    uint8_t* masks[2] = { mask_ones, mask_partial };
+    const char* mask_names[2] = { "all-ones", "partial" };
+
+    for (int mk = 0; mk < 2; mk++) {
+        for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+            int m_active = cases[c].m;
+            int n_hit = cases[c].n;
+
+            /* Randomize the hit_list contents and votes. */
+            for (int j = 0; j < n_hit; j++) {
+                seed = seed * 1103515245u + 12345u;
+                int idx = (int)((seed >> 8) % (uint32_t)n_train);
+                hit_list[j] = idx;
+                votes[idx] = (uint16_t)((seed >> 16) % 8 + 1);
+            }
+
+            glyph_union_t u = {
+                .hit_list = hit_list,
+                .n_hit = n_hit,
+                .votes = votes,
+                .y_train = y_train_buf,
+                .n_classes = n_classes,
+            };
+
+            int ref = glyph_resolver_sum(&u, m_active, sig_bytes,
+                                          train_sigs, query_sigs, masks[mk]);
+            int neon = glyph_resolver_sum_neon4(&u, m_active, sig_bytes,
+                                                train_sigs, query_sigs, masks[mk]);
+            if (ref != neon) {
+                fprintf(stderr,
+                    "FAIL: neon4 mismatch mask=%s m=%d n=%d: ref=%d neon=%d\n",
+                    mask_names[mk], m_active, n_hit, ref, neon);
+                g_failed++;
+            }
+
+            /* Reset votes for next case. */
+            for (int j = 0; j < n_hit; j++) votes[hit_list[j]] = 0;
+        }
+    }
+
+    free(train_buf); free(query_buf); free(y_train_buf);
+    free(hit_list); free(votes);
+}
+
 static void test_resolver_sum_one_table(void) {
     /* One table, two candidates. SUM resolver = single-table 1-NN
      * within the union. popcount_dist picks the closer candidate. */
@@ -446,6 +539,7 @@ int main(void) {
     test_resolver_vote_tiebreaks_to_lower_class();
     test_resolver_vote_weighted();
     test_resolver_sum_one_table();
+    test_resolver_sum_neon4_equivalence();
 
     if (g_failed > 0) {
         fprintf(stderr, "test_glyph_libglyph: %d FAILURES\n", g_failed);

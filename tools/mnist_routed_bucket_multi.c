@@ -133,9 +133,9 @@ int main(int argc, char** argv) {
     printf("  data_dir=%s\n", cfg.data_dir);
     printf("  n_proj=%d  density=%.2f  m_max=%d  max_radius=%d  min_cands=%d  max_union=%d\n",
            cfg.n_proj, cfg.density, cfg.m_max, cfg.max_radius, cfg.min_cands, cfg.max_union);
-    printf("  base_seed=%u,%u,%u,%u  mode=%s  deskew=%s\n",
+    printf("  base_seed=%u,%u,%u,%u  mode=%s  deskew=%s  resolver_sum=%s\n",
            cfg.base_seed[0], cfg.base_seed[1], cfg.base_seed[2], cfg.base_seed[3],
-           cfg.mode, cfg.no_deskew ? "off" : "on");
+           cfg.mode, cfg.no_deskew ? "off" : "on", cfg.resolver_sum);
     printf("  n_train=%d  n_test=%d  input_dim=%d\n\n",
            ds.n_train, ds.n_test, ds.input_dim);
 
@@ -270,8 +270,14 @@ int main(int argc, char** argv) {
                 int pred_v = glyph_resolver_vote(&u);
                 if (pred_v == y) vote_correct[mi]++;
 
-                int pred_s = glyph_resolver_sum(&u, M_target, sig_bytes,
+                int pred_s;
+                if (strcmp(cfg.resolver_sum, "neon4") == 0 && sig_bytes == 4) {
+                    pred_s = glyph_resolver_sum_neon4(&u, M_target, sig_bytes,
+                                                      train_sigs, q_sigs_p, mask);
+                } else {
+                    pred_s = glyph_resolver_sum(&u, M_target, sig_bytes,
                                                 train_sigs, q_sigs_p, mask);
+                }
                 if (pred_s == y) sum_correct[mi]++;
 
                 int pred_p = glyph_resolver_per_table_majority(&u, M_target, sig_bytes,

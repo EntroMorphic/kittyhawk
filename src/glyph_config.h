@@ -37,6 +37,16 @@ typedef struct {
      * distort datasets without a canonical shear axis (e.g. clothing
      * items in Fashion-MNIST). */
     int         no_deskew;
+
+    /* SUM resolver implementation selector. Default "scalar" uses
+     * glyph_resolver_sum (one popcount_dist call per candidate per
+     * table, with the Fix-1 builtin-popcount fast path for 4-byte
+     * sigs). "neon4" uses glyph_resolver_sum_neon4 which batches
+     * 4 candidates per NEON vector via scalar-gather. Only valid
+     * with N_PROJ=16 (sig_bytes=4); asserted at tool entry. Kept
+     * as a selector so the scalar path remains the portable fallback
+     * and both paths can be benchmarked side by side. */
+    const char* resolver_sum;
 } glyph_config_t;
 
 /* Fill with project defaults (matches the values from Phase 3 run). */

@@ -89,8 +89,40 @@ typedef struct {
 /* VOTE resolver — O(n_hit) time, no distance arithmetic. */
 int glyph_resolver_vote(const glyph_union_t* u);
 
-/* SUM resolver — O(n_hit × m_active) popcount_dist calls. */
+/* SUM resolver — O(n_hit × m_active) popcount_dist calls.
+ *
+ * This is the reference implementation. Accepts any sig_bytes value
+ * supported by m4t_popcount_dist. Use this when sig_bytes != 4 or
+ * when architectural portability matters.
+ */
 int glyph_resolver_sum(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask);
+
+/* SUM resolver — NEON-batched variant specialized for sig_bytes=4
+ * (N_PROJ=16). Honors the mask parameter in full generality — the
+ * mask is broadcast to all four 4-byte lanes and ANDed with the
+ * XOR result before VCNT, matching m4t_popcount_dist's semantics
+ * bit-for-bit regardless of mask value.
+ *
+ * Processes 4 candidates per 16-byte NEON vector: gathers 4 training
+ * signatures into a uint8x16_t register via scalar loads, XORs with
+ * a broadcast of the query's 4-byte signature, ANDs with a broadcast
+ * mask, applies VCNT for per-byte popcount, and pairwise-sums inside
+ * each 4-byte lane to produce 4 per-candidate distances per NEON op.
+ * Accumulates per-candidate scores across all m_active tables.
+ *
+ * Bit-exact equivalent to glyph_resolver_sum when sig_bytes=4 for
+ * any mask. The equivalence test lives in test_glyph_libglyph.c.
+ *
+ * Returns -1 if sig_bytes != 4 (falls through; caller should have
+ * used glyph_resolver_sum).
+ */
+int glyph_resolver_sum_neon4(
     const glyph_union_t* u,
     int                  m_active,
     int                  sig_bytes,
