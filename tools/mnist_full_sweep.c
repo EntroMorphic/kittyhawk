@@ -204,7 +204,12 @@ int main(int argc, char** argv) {
     deskew_all(x_train, n_train);
     deskew_all(x_test,  n_test);
 
-    /* Matrix axes. */
+    /* Matrix axes.
+     *
+     * Canonical sweep covers {1024, 2048, 4096} — the accuracy range where
+     * the substrate's operating points live. Spot probes at other N_PROJ
+     * values are documented in journal/full_scaling_curve.md; rerun those
+     * by editing this array. */
     const int    N_PROJ_VALUES[]  = {1024, 2048, 4096};
     const int    N_N_PROJ         = 3;
     const double DENSITY_VALUES[] = {0.25, 0.33, 0.50};
@@ -221,9 +226,9 @@ int main(int argc, char** argv) {
     };
 
     /* Results array. Index: [n_proj][density][k][vote][seed]. */
-    int results[3][3][3][3][N_SEEDS];
+    int results[16][3][3][3][N_SEEDS];
     memset(results, 0, sizeof(results));
-    double actual_density[3][3][N_SEEDS];
+    double actual_density[16][3][N_SEEDS];
 
     printf("Full matrix sweep — deskewed MNIST, %d seeds per cell\n", N_SEEDS);
     printf("N_PROJ ∈ {1024, 2048, 4096}   density ∈ {0.25, 0.33, 0.50}\n");

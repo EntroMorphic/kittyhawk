@@ -17,6 +17,7 @@ Trit Lattice LSH k-NN on the rebuilt M4T substrate, deskewed MNIST, N_PROJ=2048,
 | **Accuracy (N_PROJ=2048, majority k=3)** | 97.79 ± 0.05% |
 | **Accuracy (N_PROJ=2048, rank-weighted k=5)** | 97.86 ± 0.01% |
 | **Accuracy (N_PROJ=4096, rank-weighted k=5 — current best)** | **97.99 ± 0.01%** |
+| **Accuracy scaling curve (N_PROJ=2 to 8192)** | Sigmoid in log-space; saturates at 8192 (+0.01% for 2× compute). Throughput peak at N_PROJ=64 (11 000 queries/sec, 92% accuracy). See `journal/full_scaling_curve.md`. |
 | **Speed (N_PROJ=2048)** | 7.0 s for 10K × 60K k-NN queries — 20.3× faster than NEON-vectorized dense L1 over the same projections |
 | **Inspectability** | Per-classification audit trail — structurally unavailable to dense k-NN |
 | **Adaptation** | First gradient-free failure-guided classifier modification on the substrate: rank-weighted voting confirmed empirically optimal via full 81-cell matrix sweep. Exponential weighting empirically confirmed to collapse to top-1 at any k ("too-steep" failure mode). |

@@ -103,6 +103,36 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Complete scaling curve mapped — N_PROJ from 2 to 8192
+
+Spot-probed the `mnist_full_sweep.c` tool at extended N_PROJ values (2, 4, 8, 16, 32, 64, 128, 256, 512, 8192) to complete the scaling curve across four orders of magnitude. Canonical tool restored to sweep {1024, 2048, 4096}; other values reproducible by editing `N_PROJ_VALUES[]`.
+
+**The curve is a clean sigmoid in log-space:**
+
+| N_PROJ | Accuracy | Throughput | Notes |
+|---|---|---|---|
+| 2 | 18.84% | 4800/s | Above chance floor (10%) |
+| 16 | 63.47% | 3300/s | Majority beats rank-wt (inversion regime) |
+| 64 | 92.01% | **11000/s** | Throughput peak (NEON alignment) |
+| 256 | 96.89% | 7700/s | Matches dense pixel baseline |
+| 2048 | 97.86% | 1400/s | Sweet-spot deployment |
+| 4096 | 97.99% | 500/s | Knee of the curve |
+| 8192 | 98.00% | 260/s | Saturation (+0.01% for 2× compute) |
+
+**Five new observations confirmed:**
+
+1. **Information-theoretic consistency.** Steep-climb regime matches Shannon bounds: 3^n possible signatures vs 10 MNIST classes. Steepest gain N_PROJ 8→32 where signature space expands from 6561 to 1.85 billion.
+2. **Vote-rule inversion at N_PROJ ≤ 16.** Majority beats rank-weighted in the highly-tied-distance regime. Rank-weighted reclaims at N_PROJ ≥ 32. Predicted by the mechanism cycle — rank-wt amplifies tie-noise when distance quantization is coarse.
+3. **Density 0.33 dominates from N_PROJ=4 to 4096.** Balanced base-3 is empirically optimal across 10 orders of magnitude of signature capacity. Only exception: N_PROJ=2 where density=0.50 wins.
+4. **k=7 bookends k=5.** k=5 wins the middle range (256-4096); k=7 wins both tails (very small and very large N_PROJ).
+5. **Exponential weighting collapses at every scale.** Identical accuracy across k=3/5/7 for every (N_PROJ, density) from 2 to 8192. The "too-steep" failure mode is scale-invariant. Cleanest predicted-failure validation in the project's history.
+
+**N_PROJ=64 is the throughput peak.** 11 000 queries/sec at 92% accuracy. 16-byte signature = one NEON vector; popcount instruction's natural unit. Below 64, scalar tail dominates; above 64, compute grows linearly with signature size.
+
+**Saturation confirmed at N_PROJ=4096.** 8192 adds 2× compute for +0.01% accuracy. Further gains require representational changes (multi-stage, per-class τ, augmentation), not more of the same.
+
+Full writeup: `journal/full_scaling_curve.md`.
+
 ### Full matrix sweep — 97.99% new best; mechanism predictions confirmed
 
 New consumer: `tools/mnist_full_sweep.c`. First comprehensive sweep over (N_PROJ × density × k × vote_rule). 81 configurations × 3 seeds = 243 measurements. Runtime 9.1 minutes.
