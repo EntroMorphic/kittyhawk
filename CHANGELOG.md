@@ -421,6 +421,74 @@ Architectural rule added to `docs/FINDINGS.md` Axis 4: use cascade when N_PROJ �
 
 Full writeup: `journal/cascade_sweep_crossover.md`.
 
+### Routed quadruple-hash fusion at N_PROJ=16: 83.86%
+
+Extended `tools/mnist_resolver_sweep.c` with H4 (fourth independent seed) and H_D50 / H_D20 (density-varied secondaries) plus per-resolver confusion tracking for 3→8 / 3→5 / 6→8. New routed-cascade record at N_PROJ=16:
+
+    R12 H2+H3+H4 1-NN (quadruple)   83.86%  +7.16 over dual-hash
+    R15 H2+H_D50 1-NN               81.78%  +5.08 (dual-density fusion)
+    R9  H2+H3 1-NN (triple)         81.35%  +4.65
+    R2  H1+H2 1-NN (baseline)       76.70%
+
+Marginal-gain curve: dual → triple +4.65, triple → quadruple +2.51. Independent views stack with diminishing returns.
+
+Density decorrelation breaks 6→8 confusion (35 → 14-17 errors with H_D50 or H_D20) but leaves 3→8 / 3→5 essentially unchanged. Those pairs are projection-family-bound, not density-sensitive.
+
+Second finding: k-NN majority at the resolver stage beats 1-NN on the hard regression pairs (R4 gets 3→8 down to 50, the lowest of any resolver). Amends the "don't vote at the resolver" rule from the dense cascade era: **vote when the resolver is noisy, 1-NN when it's precise.**
+
+At N_PROJ=1024 all routed resolvers collapse to ~97.5% — the routed cascade ceiling is independent of resolver choice once the filter is near-perfect.
+
+Full writeup: `journal/routed_quadruple_decorrelation.md`.
+
+### Meta-router LMM cycle — online inline observer as k-NN over routing-context signatures
+
+Four-file LMM cycle (`journal/meta_router_online_{raw,nodes,reflect,synthesize}.md`) on the user's proposal for a global observer that runs inline with the local cascade and learns from prior failures online.
+
+Core insight from REFLECT: the observer is not a predictor of failure (which would require labels or self-supervised proxies that invite closed-loop drift). It is a **routing primitive whose keys are routing-context signatures and whose values are routing decisions**, with a bank that grows from cascade execution traces. The update rule is append-on-execution, not append-on-error — there is no "failure label" to drift against because the bank stores behaviors, not truths.
+
+The routing-context signature packs six cascade byproducts into 16 trits (4 bytes, one NEON Hamming unit): H1 min-distance bucket, tied-min count bucket, H1-H2 disagreement flag, H2-H3 disagreement flag, quadruple-fusion margin bucket, and a query-signature checksum. The meta-router lookup is k-NN over a 4096-entry ring buffer at ~1.7% of the H1 primary cost. Bank update is append-on-ring.
+
+Two-phase experiment plan, gated on P1 (prerequisite): does global quadruple fusion actually beat local quadruple fusion on the queries local fails on?
+
+### P1 gate — global quadruple rescues local 2.7:1 at N_PROJ=16 (PASS)
+
+`tools/mnist_local_vs_global.c` compares three variants at N_PROJ=16, K_RESOLVE=50, single seed, all 10K test queries:
+
+| variant | accuracy |
+|---|---|
+| L — local quadruple (H1 top-50 + H2+H3+H4 fusion) | 83.86% |
+| Gt — global H2+H3+H4 summed over 60K | 86.64% |
+| **Gq — global H1+H2+H3+H4 summed over 60K** | **89.46%** |
+
+2×2 contingency `(L vs Gq)`: 8055 both-right, 331 damages (L right, Gq wrong), 891 rescues (L wrong, Gq right), 723 both-wrong. Rescue:damage ratio **2.7:1**, net +5.60 accuracy if Gq is applied blindly. Oracle ceiling (L ∪ Gq) = **92.77%**.
+
+Gate: PASS. Meta-router P2 has real architectural headroom — +8.91 points of oracle potential over pure local.
+
+### P1 atomics — rescues and damages share observable features (revised P2 ceiling ≈ 88%)
+
+`tools/mnist_lvg_atomics.c` decomposes the P1 contingency across seven signals: H1 min-distance, H1 tied-count, correct-class rank in H1 top-50, ensemble disagreement (H2-H3, H3-H4, H2-H4), fusion pick H1-rank, fusion margin, per-class, and confusion pairs. Reports distributions per contingency cell (LR_GR easy, LR_GW damage, LW_GR rescue, LW_GW both-wrong).
+
+**Headline: on every inference-available signal, rescues and damages have nearly indistinguishable distributions.** Ensemble disagreement cleanly separates easy (21.7%) from hard (~60-68%) but sees all three hard cells at roughly the same rate. H1 min-distance is flat across cells. Tied-count is weak. Fusion margin is weak. The only meaningful secondary signal is fusion pick H1-rank — damages pick deeper (52.9% at ranks 21-50 vs 46.5% easy, 6.7% at ranks 2-5 vs 13.0% rescue) — a 6-8 point gap, marginally usable.
+
+The feature that *would* separate rescue from double-fail is the rank of the correct class in H1's top-50 pool (rescues: 7.4% outside top-50 and 21.1% at rank 1; double-fails: 10.4% outside and 18.4% at rank 1). But that feature requires the true label and is unavailable at inference.
+
+Per-class: class 3 has the worst rescue:damage ratio (94:65 = 1.4:1). Classes 4, 6, 7 are best escalation targets (3.4-4.1 ratio). Class 1 is solved (4:3, negligible). Global has its own 3↔5 / 3↔8 confusions that damage nearly as often as local's failures get rescued.
+
+**Revised P2 prediction:**
+
+| architecture | predicted / measured |
+|---|---|
+| pure local (L) | 83.86% |
+| disagreement meta-router | **~88.0%** |
+| pure global (Gq) | 89.46% |
+| oracle ceiling | 92.77% |
+
+Meta-router's natural ceiling is ~88% at ~30% escalation rate and ~50% of pure-Gq cost. P2 is now primarily a **cost-efficiency test**, not an accuracy-ceiling test — the routing-context signature cannot separate rescue from damage beyond what a disagreement threshold already does.
+
+**New verified claim: observability ceiling at N_PROJ=16.** The 4.77-point gap between the disagreement meta-router and the oracle lives in queries whose rescue/damage label is hidden in information the substrate structurally cannot observe at this signature size. Closing the gap requires structural changes (wider K, fused filter, per-class policy, more independent hashes), not a better meta-router.
+
+Full writeup: `journal/lvg_atomics_decomposition.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.

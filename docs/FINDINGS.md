@@ -302,8 +302,89 @@ Full writeup: `journal/routed_cascade_rerun.md`.
 
 1. Use cascade when N_PROJ ≤ 64 (gain ≥ 2 points over pure majority).
 2. Above N_PROJ ≥ 256 the routed cascade is a wash and trends slightly negative.
-3. To exceed the routed cascade ceiling without reintroducing dense signal, stack independent routed views (H2+H3 fusion; possibly quadruple-hash; learned routed projections).
+3. To exceed the routed cascade ceiling without reintroducing dense signal, stack independent routed views (H2+H3 fusion; quadruple-hash H2+H3+H4 at **83.86%**; possibly learned routed projections).
 4. The filter-ranker reframe is substrate-invariant: the hash is always a better filter than a ranker. Only the resolver's ceiling moves.
+
+## Axis 4c — Meta-routing and the observability ceiling at N_PROJ=16
+
+Added 2026-04-15 after the routed quadruple-hash rerun pushed local cascade to 83.86% at N_PROJ=16. The natural next question: can a global observer layer rescue queries that the local cascade fails on, without reintroducing dense signal? LMM cycle `journal/meta_router_online_{raw,nodes,reflect,synthesize}.md` produced a design; P1 gate + atomic decomposition falsified the strong version of it.
+
+### The P1 prerequisite gate (passed)
+
+`tools/mnist_local_vs_global.c` compares three variants at N_PROJ=16, K_RESOLVE=50, single seed:
+
+| variant | accuracy | Δ vs local |
+|---|---|---|
+| L — local quadruple (H1 top-50 + H2+H3+H4 fusion) | 83.86% | — |
+| Gt — global H2+H3+H4 summed over 60K | 86.64% | +2.78 |
+| **Gq — global H1+H2+H3+H4 summed over 60K** | **89.46%** | **+5.60** |
+
+2×2 contingency `(L vs Gq)`:
+
+|  | Gq right | Gq wrong |
+|---|---|---|
+| L right | 8055 | 331 (damage) |
+| L wrong | 891 (rescue) | 723 (both wrong) |
+
+- Rescue:damage ratio = 891 : 331 ≈ **2.7 : 1**.
+- Conditional `P(Gq correct | L wrong) = 55.2%`.
+- **Oracle ceiling** (L right ∪ Gq right) = 9277 = **92.77%**.
+
+Gate: **PASS.** An architecture that escalates only the rescuable queries would reach 92.77% — an additional +8.91 points over local at bounded cost.
+
+### The atomic decomposition (revised P2 scope)
+
+`tools/mnist_lvg_atomics.c` packs seven signals per query and reports distributions per contingency cell. The headline is negative for the original LMM synthesize's ambition:
+
+**On every inference-available signal, rescues and damages have nearly indistinguishable distributions.** Ensemble disagreement cleanly separates easy (21.7%) from hard (~60-68%), but within the hard set — the 1945 queries where escalation even matters — disagreement sees rescue (67.9%), damage (59.5%), and double-fail (58.9%) as essentially the same.
+
+The feature that *would* separate rescue from double-fail is the rank of the correct class in H1's top-50:
+
+| cell | rank=1 | 2-5 | 6-10 | 11-20 | 21-50 | >50 |
+|---|---|---|---|---|---|---|
+| rescue | 21.1% | 30.5% | 15.0% | 14.5% | 11.5% | **7.4%** |
+| both wrong | 18.4% | 27.8% | 16.3% | 14.7% | 12.5% | **10.4%** |
+
+**7.4% of rescues have correct class *outside* H1's top-50 entirely.** These are filter-miss failures — no resolver reading only the filtered pool can fix them; global fusion rescues them precisely because it sees all 60K prototypes. But this feature requires knowing the true label, so it's unavailable at inference.
+
+One modest observable: damages pick fusion winners deeper in H1's ordering (52.9% at ranks 21-50 vs 46.5% for easy, 6.7% at ranks 2-5 vs 13.0% for rescue). A 6-8 point gap — marginal selectivity.
+
+Per-class:
+
+| class | rescues | damages | rescue:damage |
+|---|---|---|---|
+| 3 | 94 | 65 | **1.4** |
+| 4 | 117 | 34 | 3.4 |
+| 6 | 77 | 19 | 4.1 |
+| 7 | 67 | 17 | 3.9 |
+
+**Class 3 has the worst rescue:damage ratio.** Global fusion has its own 3↔5 and 3↔8 confusions; escalating class-3 queries barely helps. Class 1 is effectively solved (4:3, negligible mass).
+
+### Revised meta-router predictions
+
+Using ensemble disagreement as the primary escalation signal (the only clean observable):
+
+| architecture | predicted / measured |
+|---|---|
+| pure local cascade | 83.86% |
+| **disagreement meta-router (predicted)** | **~88.0%** |
+| pure global Gq | 89.46% |
+| oracle ceiling (perfect router) | 92.77% |
+
+The meta-router's natural ceiling is ~88%, about 1.5 points below pure global at ~50% of pure-global cost. The ~4.77-point gap between meta-router and oracle lives in queries whose rescue/damage label is hidden in information the substrate structurally cannot observe.
+
+### New verified claim
+
+**The observability ceiling at N_PROJ=16.** Rescue and damage classification from global escalation cannot be predicted from inference-available signals. Any meta-router built on `{H1 min_d, tied_count, ensemble disagreement, fusion pick rank, fusion margin}` is bounded at ~88% aggregate accuracy because rescues and damages share distributions on all these axes. The only separator is correct-class rank in H1's pool, which requires label knowledge. See `journal/lvg_atomics_decomposition.md`.
+
+### What would push above 88%
+
+Reading the atomics, closing the gap requires structural changes, not a better meta-router:
+
+1. **Broaden H1's pool.** 7.4% of rescues have correct outside top-50 — widening K to 100 or 200 increases the filter ceiling. Linear resolver-cost.
+2. **Fused filter.** Use H1+H2 (two independent hashes) at the filter stage instead of H1 alone, then resolve locally with H3+H4. Adds information at the filter level where the bottleneck lives.
+3. **Per-class policy.** Use local's predicted class as a routing-context feature — skip escalation on predicted class 3 since global damages ≈ global rescues in that region.
+4. **More independent hashes.** Pentuple-hash fusion (H2+H3+H4+H5) continues the +2.5/+1.5-point gain trajectory at small N_PROJ.
 
 ## What we got right, what we got wrong
 
@@ -333,6 +414,7 @@ These hold on the measurements as recorded:
 - **The 58% → 97.79% progression identifies three distinct error classes** (centroid architecture, asymmetric τ, single-RNG single-baseline) — each one's fix is documented and reproducible.
 - **The Trit Lattice signature is a lossy locality hash, not a classifier.** Ceiling@50 = 98.6% at N_PROJ=16; top-1 = 55.5%. Voting reads the destroyed rank information; the cascade reads the preserved set membership. Verified twice: with a dense pixel resolver (rescue/damage 26:1, +30-point lift) and with a routed secondary-hash resolver (rescue/damage 5:1, +15-point lift). Same mechanism, different resolver ceilings. See `journal/cascade_atomics_mechanism.md`, `journal/cascade_sweep_crossover.md`, and `journal/routed_cascade_rerun.md`.
 - **Filter-ranker reframe is substrate-invariant.** The hash is a filter regardless of what reads it. Resolver choice sets the absolute ceiling (routed ~97.5%, pixel-L2 ~97.6% on deskewed MNIST); it does not change whether the cascade helps.
+- **Observability ceiling at N_PROJ=16.** The local-vs-global contingency at N_PROJ=16 has a 92.77% oracle ceiling, but rescues and damages share distributions on every inference-available signal we measured. Meta-routing based on disagreement/margin/tied-count is bounded at ~88% — ~1.5 below pure global, ~4.8 below the oracle. The gap is not a design problem; it's a structural information limit at this N_PROJ. See `journal/lvg_atomics_decomposition.md`.
 
 ## Unverified / qualified claims
 
@@ -416,6 +498,9 @@ SEEDS[N_SEEDS][4] = {
 - `journal/cascade_atomics_mechanism.md` — historical decomposition with pixel resolver; rescue:damage 26:1.
 - `journal/cascade_sweep_crossover.md` — historical cascade across N_PROJ with pixel resolver; crossover at 512.
 - `journal/routed_cascade_rerun.md` — routed-only cascade rerun: 77.33% at N_PROJ=16 with H2, 81.35% with H2+H3 fusion; crossover at 256; mechanism preserved.
+- `journal/routed_quadruple_decorrelation.md` — H2+H3+H4 quadruple fusion hits 83.86% at N_PROJ=16; density decorrelation partial.
+- `journal/meta_router_online_{raw,nodes,reflect,synthesize}.md` — LMM cycle on an online, inline meta-router as k-NN over routing-context signatures.
+- `journal/lvg_atomics_decomposition.md` — atomic decomposition of L vs Gq contingency; observability ceiling at ~88% identified.
 
 ### For the detailed experimental record
 - `journal/routed_knn_mnist.md` — the k-NN wins, with "Revised after fourth red-team" section.
