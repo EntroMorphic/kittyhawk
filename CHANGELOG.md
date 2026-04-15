@@ -103,6 +103,28 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Adapted (failure-guided vote-rule modification — first adaptation loop on substrate)
+
+New consumer: `tools/mnist_routed_weighted.c`. Tests whether distance- or rank-weighted voting recovers the NARROW MISS cases identified by the inspectability trace. Same pipeline as `mnist_routed_knn.c`; only the vote rule differs.
+
+**Result, 3 seeds, deskewed N=2048:**
+
+| Vote rule | k=3 | k=5 |
+|---|---|---|
+| Majority (baseline) | 97.79 ± 0.05% | 97.77 ± 0.02% |
+| Distance-weighted | 97.84 ± 0.04% (+0.05%) | 97.78 ± 0.03% |
+| Rank-weighted | 97.72 ± 0.06% (-0.07%) | **97.86 ± 0.01%** (+0.09%) |
+
+**New best configuration: rank-weighted k=5 at 97.86 ± 0.01%.** Consistent across all three seeds. Paired t-test ≈ 2.6σ.
+
+**Prediction vs actual:** predicted +0.25-0.30% from the trace; actually got +0.09%. Overestimated by ~3× because the NARROW MISS coarse category is inclusive (captures "correct class was close") rather than discriminative (captures "which vote rule would flip it"). Direction of the effect was correct.
+
+**Significance for the substrate:** first measured ADAPTATION (not measurement, not primitive, not benchmark) on the rebuilt substrate. Trace observation → classifier modification → measured accuracy improvement. All in integer arithmetic over discrete structures — no gradients, no floats, no STE. The full gradient-free adaptation loop works in principle.
+
+**Asymmetric finding:** rank-weighted k=3 *hurts* by -0.07%. The 3/2/1 weighting amplifies top-1's vote; if top-1 is wrong, the wrongness triples. Weighting scheme and k are coupled.
+
+Full writeup: `journal/weighted_voting_adaptation.md`.
+
 ### Demonstrated (routed k-NN inspectability — the third axis)
 
 New consumer: `tools/mnist_routed_trace.c`. For each misclassified MNIST test image, prints the complete audit trail of the routed decision: top-5 nearest training prototypes with distances, vote composition at k=3, per-trit decomposition of the distance to the top-1 (agreements split by trit value; disagreements split by sign-flip cost-2 vs zero-vs-sign cost-1), per-class nearest-prototype distance over all 60 000 prototypes, and a failure classification derived from those integer thresholds.

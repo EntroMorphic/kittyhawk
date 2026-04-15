@@ -44,4 +44,7 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_routed_trace tools/mnist_routed_trace.c)
     target_link_libraries(mnist_routed_trace PRIVATE m4t)
+
+    add_executable(mnist_routed_weighted tools/mnist_routed_weighted.c)
+    target_link_libraries(mnist_routed_weighted PRIVATE m4t)
 endif()

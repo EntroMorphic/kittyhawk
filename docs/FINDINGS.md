@@ -14,9 +14,11 @@ Trit Lattice LSH k-NN on the rebuilt M4T substrate, deskewed MNIST, N_PROJ=2048,
 
 | Axis | Measurement |
 |---|---|
-| **Accuracy** | **97.79 ± 0.05%** |
+| **Accuracy (majority k=3)** | **97.79 ± 0.05%** |
+| **Accuracy (rank-weighted k=5, failure-guided adaptation)** | **97.86 ± 0.01%** |
 | **Speed** | **7.0 s for 10 000 × 60 000 k-NN queries** — 20.3× faster than NEON-vectorized dense L1 over the same projections |
 | **Inspectability** | Per-classification audit trail (top-5 prototypes, per-trit decomposition, per-class nearest-prototype distance, failure classification) — structurally unavailable to dense k-NN |
+| **Adaptation** | First gradient-free failure-guided classifier modification on the substrate: rank-weighted voting recovers ~9 NARROW MISS cases per seed. Paired significance ~2.6σ. |
 
 Routing wins significantly against both the same-features dense baseline (NEON-vectorized L1 over identical projections: 97.62 ± 0.07%; routing Δ +0.17% at k=3, +0.25% at k=5) and the classical dense pixel k-NN baseline (deskewed-pixel L1: 97.16%; routing Δ +0.63 points).
 
