@@ -11,6 +11,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+add_compile_options(
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wshadow
+    -Wstrict-prototypes
+    -Werror
+)
+
+if(APPLE)
+    add_compile_options(-mcpu=native)
+endif()
+
 # Build the M4T substrate first.
 add_subdirectory(m4t)
 
@@ -21,13 +34,6 @@ target_include_directories(glyph INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 target_link_libraries(glyph INTERFACE m4t)
-
-# Glyph tests compile against the glyph headers and link libm4t.a.
-option(GLYPH_BUILD_TESTS "Build glyph wrapper tests" ON)
-if(GLYPH_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
 
 # Consumers built on the substrate. Currently one: the Trit Lattice LSH
 # tool, the provisional primary consumer per docs/THESIS.md.
@@ -65,4 +71,18 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_cascade_sweep tools/mnist_cascade_sweep.c)
     target_link_libraries(mnist_cascade_sweep PRIVATE m4t)
+
+    add_executable(mnist_resolver_sweep tools/mnist_resolver_sweep.c)
+    target_link_libraries(mnist_resolver_sweep PRIVATE m4t m)
+
+    add_executable(mnist_local_vs_global tools/mnist_local_vs_global.c)
+    target_link_libraries(mnist_local_vs_global PRIVATE m4t)
+endif()
+
+# Glyph tests compile against the glyph headers and can smoke-test routed
+# consumers when the tool targets are enabled.
+option(GLYPH_BUILD_TESTS "Build glyph wrapper tests" ON)
+if(GLYPH_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
