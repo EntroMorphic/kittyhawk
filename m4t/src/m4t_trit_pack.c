@@ -92,29 +92,77 @@ int32_t m4t_popcount_dist(
     /* Ternary Hamming distance; see guard comment in m4t_trit_pack.h.
      * Correctness depends on the 2-bit trit codes (+1=0b01, 0=0b00,
      * -1=0b10). Per-position cost is 0/1/2 from XOR popcount on each
-     * 2-bit field; max distance is 2·N trits, not N. */
+     * 2-bit field; max distance is 2·N trits, not N.
+     *
+     * Three-tier implementation covering every N_PROJ regime cleanly:
+     *
+     *   1. NEON 16-byte loop (packed_bytes ≥ 16, i.e. N_PROJ ≥ 64).
+     *      VEOR + VAND + VCNT + pairwise widen accumulate.
+     *   2. Scalar 8-byte loop via __builtin_popcountll for any
+     *      packed_bytes ≥ 8 that didn't divide into 16. Covers the
+     *      N_PROJ=32 fast path (sig_bytes=8) and the 8-byte chunk
+     *      of any tail after the NEON loop.
+     *   3. Scalar 4-byte loop via __builtin_popcount for any
+     *      packed_bytes ≥ 4 that didn't divide into 8. Covers the
+     *      N_PROJ=16 fast path (sig_bytes=4) — critical because at
+     *      N_PROJ=16 the NEON loop never triggers, so without this
+     *      path every popcount_dist call fell through to a
+     *      Kernighan-on-uint8 tail, ~24× slower than the hardware
+     *      CNT instruction.
+     *   4. Byte tail via __builtin_popcount for the last 0–3 bytes.
+     *
+     * The compiler lowers __builtin_popcount{,ll} to the ARMv8 CNT
+     * instruction when targeting M-series silicon (repo is built with
+     * -mcpu=native). Bit-exact equivalent to the prior scalar path;
+     * accuracy is preserved because the operation being computed is
+     * still popcount(XOR & mask). */
     int32_t total = 0;
     int i = 0;
 
 #if M4T_HAS_NEON
-    uint32x4_t acc = vdupq_n_u32(0);
-    for (; i + 16 <= packed_bytes; i += 16) {
-        uint8x16_t va = vld1q_u8(a + i);
-        uint8x16_t vb = vld1q_u8(b + i);
-        uint8x16_t vm = vld1q_u8(mask + i);
-        uint8x16_t diff = vandq_u8(veorq_u8(va, vb), vm);
-        /* VCNT → pairwise widen u8→u16 → u16→u32 → accumulate. */
-        uint16x8_t cnt16 = vpaddlq_u8(vcntq_u8(diff));
-        uint32x4_t cnt32 = vpaddlq_u16(cnt16);
-        acc = vaddq_u32(acc, cnt32);
+    {
+        uint32x4_t acc = vdupq_n_u32(0);
+        for (; i + 16 <= packed_bytes; i += 16) {
+            uint8x16_t va = vld1q_u8(a + i);
+            uint8x16_t vb = vld1q_u8(b + i);
+            uint8x16_t vm = vld1q_u8(mask + i);
+            uint8x16_t diff = vandq_u8(veorq_u8(va, vb), vm);
+            /* VCNT → pairwise widen u8→u16 → u16→u32 → accumulate. */
+            uint16x8_t cnt16 = vpaddlq_u8(vcntq_u8(diff));
+            uint32x4_t cnt32 = vpaddlq_u16(cnt16);
+            acc = vaddq_u32(acc, cnt32);
+        }
+        total += (int32_t)vaddvq_u32(acc);
     }
-    total = (int32_t)vaddvq_u32(acc);
 #endif
 
+    /* 8-byte chunks via __builtin_popcountll. Handles N_PROJ=32 and
+     * the 8-byte portion of any tail after the NEON loop. Uses memcpy
+     * for aligned-load-agnostic portability — the compiler folds it
+     * into a single LDR instruction. */
+    for (; i + 8 <= packed_bytes; i += 8) {
+        uint64_t a64, b64, m64;
+        memcpy(&a64, a    + i, 8);
+        memcpy(&b64, b    + i, 8);
+        memcpy(&m64, mask + i, 8);
+        total += (int32_t)__builtin_popcountll((a64 ^ b64) & m64);
+    }
+
+    /* 4-byte chunks via __builtin_popcount. Handles the critical
+     * N_PROJ=16 fast path (sig_bytes=4) and any 4-byte remainder
+     * after the 8-byte loop. */
+    for (; i + 4 <= packed_bytes; i += 4) {
+        uint32_t a32, b32, m32;
+        memcpy(&a32, a    + i, 4);
+        memcpy(&b32, b    + i, 4);
+        memcpy(&m32, mask + i, 4);
+        total += (int32_t)__builtin_popcount((a32 ^ b32) & m32);
+    }
+
+    /* Byte tail via __builtin_popcount (0–3 bytes remaining). */
     for (; i < packed_bytes; i++) {
-        uint8_t x = (uint8_t)((a[i] ^ b[i]) & mask[i]);
-        /* Kernighan popcount, 8-bit. */
-        while (x) { total++; x = (uint8_t)(x & (uint8_t)(x - 1u)); }
+        total += (int32_t)__builtin_popcount(
+            (unsigned int)((a[i] ^ b[i]) & mask[i]));
     }
     return total;
 }

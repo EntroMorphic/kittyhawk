@@ -78,6 +78,14 @@ if(M4T_BUILD_TESTS)
     add_executable(test_m4t_mtfp4 tests/test_m4t_mtfp4.c)
     target_link_libraries(test_m4t_mtfp4 PRIVATE m4t)
     add_test(NAME m4t_mtfp4 COMMAND test_m4t_mtfp4)
+
+    add_executable(test_m4t_ternary_matmul tests/test_m4t_ternary_matmul.c)
+    target_link_libraries(test_m4t_ternary_matmul PRIVATE m4t)
+    add_test(NAME m4t_ternary_matmul COMMAND test_m4t_ternary_matmul)
+
+    add_executable(test_m4t_trit_pack tests/test_m4t_trit_pack.c)
+    target_link_libraries(test_m4t_trit_pack PRIVATE m4t)
+    add_test(NAME m4t_trit_pack COMMAND test_m4t_trit_pack)
 endif()
 
 option(M4T_BUILD_TOOLS "Build M4T dev tools (trit_golden, lut_gen)" OFF)
