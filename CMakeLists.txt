@@ -27,13 +27,31 @@ endif()
 # Build the M4T substrate first.
 add_subdirectory(m4t)
 
-# Glyph is a header-only wrapper over libm4t.a. No glyph .c files —
-# the glyph headers #include M4T headers and #define glyph_* aliases.
-add_library(glyph INTERFACE)
-target_include_directories(glyph INTERFACE
+# libglyph — higher-level routed k-NN primitives on top of libm4t.
+#
+# The substrate (m4t) provides ternary kernels, packed-trit signatures,
+# and popcount_dist. libglyph adds the consumer-side infrastructure:
+# MNIST dataset loading, signature builder (projection + tau calibration),
+# sorted bucket index, ternary multi-probe enumeration, resolver variants,
+# and CLI hyperparameter parsing.
+#
+# This library started as the Axis 5 / Axis 6 refactor: every cascade
+# tool was duplicating MNIST loader, deskew, RNG, signature building,
+# bucket index, and multi-probe enumeration. Consolidated into libglyph
+# so tools become thin CLI wrappers.
+add_library(glyph STATIC
+    src/glyph_rng.c
+    src/glyph_dataset.c
+    src/glyph_sig.c
+    src/glyph_bucket.c
+    src/glyph_multiprobe.c
+    src/glyph_resolver.c
+    src/glyph_config.c
+)
+target_include_directories(glyph PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
-target_link_libraries(glyph INTERFACE m4t)
+target_link_libraries(glyph PUBLIC m4t)
 
 # Consumers built on the substrate. Currently one: the Trit Lattice LSH
 # tool, the provisional primary consumer per docs/THESIS.md.
@@ -88,7 +106,7 @@ if(GLYPH_BUILD_TOOLS)
     target_link_libraries(mnist_routed_bucket PRIVATE m4t)
 
     add_executable(mnist_routed_bucket_multi tools/mnist_routed_bucket_multi.c)
-    target_link_libraries(mnist_routed_bucket_multi PRIVATE m4t)
+    target_link_libraries(mnist_routed_bucket_multi PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
