@@ -1,23 +1,22 @@
 /*
- * mnist_routed_amplified.c — Multi-projection ensemble with
- * audit-triggered pixel-k-NN fallback.
+ * mnist_routed_amplified.c — multi-projection ensemble with
+ * audit-triggered routed fallback.
  *
  * Two amplification paths stacked:
  *   (1) K independent random ternary projections, each producing its
  *       own 60K-signature set. Each projection gives a rank-weighted
  *       k=5 prediction per test image. Ensemble = majority vote
  *       across the K per-projection predictions.
- *   (2) Audit-triggered fallback: when fewer than AGREE_THRESHOLD
- *       projections agree on the winning class, fall back to
- *       deskewed-pixel L1 k-NN for that query.
+ *   (2) Audit-triggered routed fallback: when fewer than AGREE_THRESHOLD
+ *       projections agree on the winning class, flatten the K per-head
+ *       top-5 routed neighbors and re-vote over that routed evidence.
  *
- * Both amplifications are audit-driven. (1) decorrelates projection-
- * specific errors. (2) uses the K-agreement signal — visible from the
- * ensemble's per-projection predictions — to flag uncertain cases and
- * route them to a stronger (slower) classifier.
+ * The sixth-round remediation removes the dense pixel fallback entirely.
+ * Uncertain queries are still detected from routed audit signals, but the
+ * resolver stays inside ternary signature space.
  *
  * Reports solo per-projection accuracies, ensemble-only, and
- * ensemble+fallback at several agreement thresholds.
+ * ensemble+routed-fallback at several agreement thresholds.
  *
  * Usage: ./mnist_routed_amplified <mnist_dir>
  */
@@ -27,7 +26,6 @@
 #include "m4t_trit_pack.h"
 #include "m4t_ternary_matmul.h"
 #include "m4t_route.h"
-#include "m4t_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,32 +129,6 @@ static int64_t tau_for_density(int64_t* v, size_t n, double d) {
     return v[idx];
 }
 
-/* NEON-vectorized L1 distance (ported from mnist_routed_knn.c). */
-static int64_t l1_distance_mtfp(
-    const m4t_mtfp_t* q, const m4t_mtfp_t* r, int n)
-{
-    int p = 0;
-    int64_t d = 0;
-#if M4T_HAS_NEON
-    int64x2_t acc_lo = vdupq_n_s64(0);
-    int64x2_t acc_hi = vdupq_n_s64(0);
-    for (; p + 4 <= n; p += 4) {
-        int32x4_t vq = vld1q_s32(q + p);
-        int32x4_t vr = vld1q_s32(r + p);
-        int32x4_t va = vabdq_s32(vq, vr);
-        acc_lo = vaddw_s32(acc_lo, vget_low_s32(va));
-        acc_hi = vaddw_s32(acc_hi, vget_high_s32(va));
-    }
-    d = vgetq_lane_s64(acc_lo, 0) + vgetq_lane_s64(acc_lo, 1)
-      + vgetq_lane_s64(acc_hi, 0) + vgetq_lane_s64(acc_hi, 1);
-#endif
-    for (; p < n; p++) {
-        int64_t x = (int64_t)q[p] - (int64_t)r[p];
-        d += (x >= 0) ? x : -x;
-    }
-    return d;
-}
-
 /* ── Top-k and voting ─────────────────────────────────────────────────── */
 
 static void topk_insert_i32(int32_t* dists, int* labels, int k,
@@ -171,19 +143,6 @@ static void topk_insert_i32(int32_t* dists, int* labels, int k,
         } else break;
     }
 }
-static void topk_insert_i64(int64_t* dists, int* labels, int k,
-                             int64_t new_d, int new_l)
-{
-    if (new_d >= dists[k-1]) return;
-    dists[k-1] = new_d; labels[k-1] = new_l;
-    for (int j=k-2; j>=0; j--) {
-        if (dists[j+1] < dists[j]) {
-            int64_t d=dists[j]; dists[j]=dists[j+1]; dists[j+1]=d;
-            int l=labels[j]; labels[j]=labels[j+1]; labels[j+1]=l;
-        } else break;
-    }
-}
-
 /* Rank-weighted vote at k=5: weights {5, 4, 3, 2, 1}. */
 static int vote_rank_weighted_k5(const int* labels) {
     int scores[N_CLASSES] = {0};
@@ -194,14 +153,20 @@ static int vote_rank_weighted_k5(const int* labels) {
     return best;
 }
 
-/* Majority vote at k=3. */
-static int vote_majority_k3(const int* labels) {
-    int counts[N_CLASSES] = {0};
-    for (int i = 0; i < 3; i++) counts[labels[i]]++;
-    int best = 0;
-    for (int c = 1; c < N_CLASSES; c++)
-        if (counts[c] > counts[best]) best = c;
-    return best;
+/* Routed fallback: flatten K heads x top-5 routed neighbors and re-score by
+ * per-head rank. This keeps the resolver in signature space while consuming
+ * more routed evidence than the coarse per-head winner vote. */
+static int vote_flattened_rank_weighted(const int labels[K_PROJS][MAX_K]) {
+    int scores[N_CLASSES] = {0};
+    for (int pk = 0; pk < K_PROJS; pk++)
+        for (int rank = 0; rank < MAX_K; rank++)
+            scores[labels[pk][rank]] += (MAX_K - rank);
+    {
+        int best = 0;
+        for (int c = 1; c < N_CLASSES; c++)
+            if (scores[c] > scores[best]) best = c;
+        return best;
+    }
 }
 
 /* ── Mean/stddev ──────────────────────────────────────────────────────── */
@@ -237,12 +202,12 @@ int main(int argc, char** argv) {
     snprintf(path,512,"%s/t10k-labels-idx1-ubyte",argv[1]);
     int* y_test=load_labels(path,&n_test);
 
-    /* Deskew both train and test. Keep the deskewed pixel tensors for the
-     * audit-triggered pixel-k-NN fallback. */
+    /* Deskew both train and test. Deskewing remains an input transform; the
+     * remediation removes the pixel-space fallback from the decision path. */
     deskew_all(x_train, n_train);
     deskew_all(x_test,  n_test);
 
-    printf("Amplified routed k-NN — ensemble(K=%d) + audit-triggered pixel fallback\n",
+    printf("Amplified routed k-NN — ensemble(K=%d) + audit-triggered routed fallback\n",
            K_PROJS);
     printf("Deskewed MNIST, N_PROJ=%d, density=%.2f, %d master seeds\n\n",
            N_PROJ, DENSITY, N_MASTER_SEEDS);
@@ -258,9 +223,9 @@ int main(int argc, char** argv) {
     /* Per-master-seed results. Columns:
      *   0: best solo projection
      *   1: ensemble-only (K-majority vote of per-proj rank-k5 predictions)
-     *   2: ensemble + fallback @ agree≥5 (fallback when unanimity fails)
-     *   3: ensemble + fallback @ agree≥4
-     *   4: ensemble + fallback @ agree≥3
+     *   2: ensemble + routed fallback @ agree≥5 (when unanimity fails)
+     *   3: ensemble + routed fallback @ agree≥4
+     *   4: ensemble + routed fallback @ agree≥3
      */
     int results[5][N_MASTER_SEEDS];
     int fallback_triggers[3][N_MASTER_SEEDS];       /* triggers for agree≥5,4,3 */
@@ -345,7 +310,8 @@ int main(int argc, char** argv) {
         uint8_t* mask = malloc(Sp); memset(mask, 0xFF, Sp);
 
         /* ── Inference: per-projection top-5, per-projection rank-k=5
-         *    prediction, K-agreement count, ensemble vote, optional fallback. */
+         *    prediction, K-agreement count, ensemble vote, optional routed
+         *    fallback over flattened per-head routed evidence. */
 
         int solo_correct[K_PROJS] = {0};
         int ens_correct = 0;
@@ -356,6 +322,7 @@ int main(int argc, char** argv) {
         for (int s = 0; s < n_test; s++) {
             /* Per-projection top-5 and rank-k=5 prediction. */
             int per_proj_pred[K_PROJS];
+            int per_proj_labels[K_PROJS][MAX_K];
             for (int pk = 0; pk < K_PROJS; pk++) {
                 const uint8_t* q_sig = test_sigs[pk] + (size_t)s * Sp;
                 int32_t dists[MAX_K]; int labels[MAX_K];
@@ -367,6 +334,7 @@ int main(int argc, char** argv) {
                     int32_t d = m4t_popcount_dist(q_sig, r_sig, mask, Sp);
                     topk_insert_i32(dists, labels, MAX_K, d, y_train[i]);
                 }
+                for (int j = 0; j < MAX_K; j++) per_proj_labels[pk][j] = labels[j];
                 per_proj_pred[pk] = vote_rank_weighted_k5(labels);
                 if (per_proj_pred[pk] == y_test[s]) solo_correct[pk]++;
             }
@@ -381,8 +349,8 @@ int main(int argc, char** argv) {
 
             if (ens_pred == y_test[s]) ens_correct++;
 
-            /* Fallback evaluation at three agreement thresholds. A higher
-             * threshold is stricter (more fallbacks); a lower threshold
+            /* Routed fallback evaluation at three agreement thresholds. A
+             * higher threshold is stricter (more reroutes); a lower threshold
              * trusts the ensemble more. */
             const int AGREE_THRESH[3] = {5, 4, 3};
 
@@ -394,20 +362,10 @@ int main(int argc, char** argv) {
                 int final_pred;
 
                 if (use_fallback) {
-                    /* Compute pixel-space k-NN fallback once across all
-                     * thresholds that triggered. */
+                    /* Compute routed fallback once across all thresholds that
+                     * triggered. */
                     if (fallback_pred < 0) {
-                        const m4t_mtfp_t* q_px = x_test + (size_t)s * INPUT_DIM;
-                        int64_t fb_d[3]; int fb_l[3];
-                        for (int j = 0; j < 3; j++) {
-                            fb_d[j] = INT64_MAX; fb_l[j] = -1;
-                        }
-                        for (int i = 0; i < n_train; i++) {
-                            const m4t_mtfp_t* r_px = x_train + (size_t)i * INPUT_DIM;
-                            int64_t d = l1_distance_mtfp(q_px, r_px, INPUT_DIM);
-                            topk_insert_i64(fb_d, fb_l, 3, d, y_train[i]);
-                        }
-                        fallback_pred = vote_majority_k3(fb_l);
+                        fallback_pred = vote_flattened_rank_weighted(per_proj_labels);
                     }
                     final_pred = fallback_pred;
                     fb_triggers_here[ti]++;
@@ -442,11 +400,11 @@ int main(int argc, char** argv) {
         printf("  →  best %.2f\n", results[0][ms_idx]*100.0/n_test);
         printf("  ensemble (no fallback):   %.2f%%\n",
                ens_correct*100.0/n_test);
-        printf("  ensemble+fb (agree≥5):    %.2f%%   (fb triggered %d, fb-correct %d)\n",
+        printf("  ensemble+routed-fb (agree≥5): %.2f%%   (fb triggered %d, fb-correct %d)\n",
                ens_fb_correct[0]*100.0/n_test, fb_triggers_here[0], fb_correct_here[0]);
-        printf("  ensemble+fb (agree≥4):    %.2f%%   (fb triggered %d, fb-correct %d)\n",
+        printf("  ensemble+routed-fb (agree≥4): %.2f%%   (fb triggered %d, fb-correct %d)\n",
                ens_fb_correct[1]*100.0/n_test, fb_triggers_here[1], fb_correct_here[1]);
-        printf("  ensemble+fb (agree≥3):    %.2f%%   (fb triggered %d, fb-correct %d)\n",
+        printf("  ensemble+routed-fb (agree≥3): %.2f%%   (fb triggered %d, fb-correct %d)\n",
                ens_fb_correct[2]*100.0/n_test, fb_triggers_here[2], fb_correct_here[2]);
         printf("  time: %.0f s\n\n", t_elapsed);
 
@@ -464,9 +422,9 @@ int main(int argc, char** argv) {
     const char* row_names[5] = {
         "Best solo projection (rank-k=5)",
         "Ensemble (K=5, no fallback)",
-        "Ensemble+FB (agree≥5 → unanimous-only trust)",
-        "Ensemble+FB (agree≥4 → ≥4-of-5 trust)",
-        "Ensemble+FB (agree≥3 → simple majority trust)"
+        "Ensemble+routed-FB (agree≥5 → unanimous-only trust)",
+        "Ensemble+routed-FB (agree≥4 → ≥4-of-5 trust)",
+        "Ensemble+routed-FB (agree≥3 → simple majority trust)"
     };
     for (int r = 0; r < 5; r++) {
         double m = mean_pct(results[r], N_MASTER_SEEDS, n_test);
@@ -489,10 +447,9 @@ int main(int argc, char** argv) {
                thr_names[ti], trig_mean, rec_mean);
     }
 
-    printf("\nReference baselines (from prior journal entries):\n");
+    printf("\nReference routed baselines (from prior journal entries):\n");
     printf("  rank-weighted k=5 single projection: 97.86 ± 0.01%% (journal/weighted_voting_adaptation.md)\n");
     printf("  majority k=3 single projection:      97.79 ± 0.05%%\n");
-    printf("  dense deskewed-pixel L1 k-NN:        97.16%%\n");
 
     free(x_train); free(y_train); free(x_test); free(y_test);
     return 0;

@@ -518,8 +518,8 @@ Scope: remove dense decision paths from the live Trit Lattice architecture and i
 **Finding.** `mnist_routed_amplified.c` uses a routed ensemble, then abandons the routing surface for dense pixel k-NN on uncertain queries.
 
 **Remediation plan.**
-- [ ] Replace the dense fallback with a routed-only fallback over the existing per-projection top-k evidence.
-- [ ] Preserve the uncertainty-trigger idea, but keep the resolver in ternary signature space.
+- [x] Replace the dense fallback with a routed-only fallback over the existing per-projection top-k evidence.
+- [x] Preserve the uncertainty-trigger idea, but keep the resolver in ternary signature space.
 
 **Plan red-team.**
 - Risk: a routed fallback that is just a restatement of the ensemble vote adds complexity without adding signal.
