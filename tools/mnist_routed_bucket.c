@@ -62,9 +62,7 @@
 #define N_PROJ 16
 #define DENSITY 0.33
 #define SIG_BYTES 4            /* M4T_TRIT_PACKED_BYTES(16) = 4 */
-#define MAX_RADIUS 2
-#define MIN_CANDIDATES 5       /* expand radius until candidate set has this many */
-#define MAX_CANDIDATES 1024    /* bucket-side cap; prevents pathological fan-out */
+#define MAX_CANDIDATES 4096    /* bucket-side cap; prevents pathological fan-out */
 
 /* ── Shared loaders/deskew/RNG/tau (mirrored from prior tools) ───────── */
 
@@ -450,113 +448,90 @@ int main(int argc, char** argv) {
             printf("    %-8s  %6d buckets\n", size_labels[b], bucket_hist[b]);
     printf("\n");
 
-    /* ── Query loop ──────────────────────────────────────────────────── */
+    /* ── Tuning sweep: (MAX_RADIUS, MIN_CANDIDATES) grid ─────────────── */
 
-    int correct = 0;
-    int total_probes = 0;
-    int total_candidates = 0;
-    int total_bucket_hits = 0;
-    int queries_needing_r0 = 0;
-    int queries_needing_r1 = 0;
-    int queries_needing_r2 = 0;
-    int queries_empty = 0;
+    int sweep_radii[]      = {0, 1, 2};
+    int sweep_min_cands[]  = {1, 20, 100, 400};
+    int n_radii = (int)(sizeof(sweep_radii)/sizeof(sweep_radii[0]));
+    int n_cands = (int)(sizeof(sweep_min_cands)/sizeof(sweep_min_cands[0]));
+
+    printf("Sweep of routed bucket accuracy vs cost:\n");
+    printf("  MAX_RADIUS is the multi-probe budget (0 = exact key only).\n");
+    printf("  MIN_CANDIDATES is the target candidate-set size before escalating.\n");
+    printf("  accuracy is over all %d test queries.\n\n", n_test);
+    printf("  MAX_R   MIN_C   accuracy   avg_cands   avg_probes   empty   us/qry\n");
 
     uint8_t scratch[SIG_BYTES];
 
-    clock_t t_query_start = clock();
-    for (int s = 0; s < n_test; s++) {
-        const uint8_t* qA = teA + (size_t)s * Sp;
-        const uint8_t* qB = teB + (size_t)s * Sp;
-        const uint8_t* qC = teC + (size_t)s * Sp;
-        const uint8_t* qD = teD + (size_t)s * Sp;
-        int y = y_test[s];
+    for (int ri = 0; ri < n_radii; ri++) {
+        for (int ci = 0; ci < n_cands; ci++) {
+            int MAX_RADIUS     = sweep_radii[ri];
+            int MIN_CANDIDATES = sweep_min_cands[ci];
 
-        lookup_state_t st = {0};
-        st.entries = entries;
-        st.n_entries = n_train;
+            int correct = 0;
+            long total_probes = 0;
+            long total_candidates = 0;
+            int queries_empty = 0;
 
-        /* Radius 0 first. */
-        int hit_radius = -1;
-        enumerate_radius(qA, 0, scratch, collect_bucket, &st);
-        if (st.n_candidates > 0) { hit_radius = 0; queries_needing_r0++; }
-        if (st.n_candidates < MIN_CANDIDATES) {
-            enumerate_radius(qA, 1, scratch, collect_bucket, &st);
-            if (hit_radius < 0 && st.n_candidates > 0) { hit_radius = 1; }
-            if (hit_radius == 1) queries_needing_r1++;
+            clock_t t_query_start = clock();
+            for (int s = 0; s < n_test; s++) {
+                const uint8_t* qA = teA + (size_t)s * Sp;
+                const uint8_t* qB = teB + (size_t)s * Sp;
+                const uint8_t* qC = teC + (size_t)s * Sp;
+                const uint8_t* qD = teD + (size_t)s * Sp;
+                int y = y_test[s];
+
+                lookup_state_t st = {0};
+                st.entries = entries;
+                st.n_entries = n_train;
+
+                for (int r = 0; r <= MAX_RADIUS; r++) {
+                    if (st.n_candidates >= MIN_CANDIDATES) break;
+                    enumerate_radius(qA, r, scratch, collect_bucket, &st);
+                }
+
+                if (st.n_candidates == 0) { queries_empty++; continue; }
+
+                total_probes += st.probes_issued;
+                total_candidates += st.n_candidates;
+
+                int best_label = -1;
+                int32_t best_score = INT32_MAX;
+                for (int c = 0; c < st.n_candidates; c++) {
+                    int idx = st.candidates[c];
+                    int32_t score =
+                        m4t_popcount_dist(qB, trB + (size_t)idx * Sp, mask, Sp) +
+                        m4t_popcount_dist(qC, trC + (size_t)idx * Sp, mask, Sp) +
+                        m4t_popcount_dist(qD, trD + (size_t)idx * Sp, mask, Sp);
+                    if (score < best_score) { best_score = score; best_label = y_train[idx]; }
+                }
+                if (best_label == y) correct++;
+            }
+            double t_query = (double)(clock() - t_query_start) / CLOCKS_PER_SEC;
+
+            int divisor = (n_test - queries_empty);
+            if (divisor == 0) divisor = 1;
+            printf("   %d      %4d    %6.2f%%    %8.1f   %10.1f   %4d   %6.1f\n",
+                   MAX_RADIUS, MIN_CANDIDATES,
+                   100.0 * correct / n_test,
+                   (double)total_candidates / divisor,
+                   (double)total_probes / divisor,
+                   queries_empty,
+                   1e6 * t_query / n_test);
+            fflush(stdout);
         }
-        if (st.n_candidates < MIN_CANDIDATES) {
-            enumerate_radius(qA, 2, scratch, collect_bucket, &st);
-            if (hit_radius < 0 && st.n_candidates > 0) { hit_radius = 2; }
-            if (hit_radius == 2) queries_needing_r2++;
-        }
-        if (st.n_candidates == 0) { queries_empty++; continue; }
-
-        total_probes += st.probes_issued;
-        total_candidates += st.n_candidates;
-        total_bucket_hits += st.bucket_hits;
-
-        /* Resolver: H2+H3+H4 summed Hamming 1-NN over the candidate set. */
-        int best_label = -1;
-        int32_t best_score = INT32_MAX;
-        for (int c = 0; c < st.n_candidates; c++) {
-            int idx = st.candidates[c];
-            int32_t score =
-                m4t_popcount_dist(qB, trB + (size_t)idx * Sp, mask, Sp) +
-                m4t_popcount_dist(qC, trC + (size_t)idx * Sp, mask, Sp) +
-                m4t_popcount_dist(qD, trD + (size_t)idx * Sp, mask, Sp);
-            if (score < best_score) { best_score = score; best_label = y_train[idx]; }
-        }
-        if (best_label == y) correct++;
     }
-    double t_query = (double)(clock() - t_query_start) / CLOCKS_PER_SEC;
-
-    /* ── Report ──────────────────────────────────────────────────────── */
-
-    printf("Query results (%d test queries):\n", n_test);
-    printf("  accuracy:            %.2f%%   (%d / %d)\n",
-           100.0 * correct / n_test, correct, n_test);
-    printf("  avg candidates/qry:  %.2f\n",
-           (double)total_candidates / (n_test - queries_empty));
-    printf("  avg probes/qry:      %.2f\n",
-           (double)total_probes / (n_test - queries_empty));
-    printf("  avg bucket-hits/qry: %.2f\n",
-           (double)total_bucket_hits / (n_test - queries_empty));
-    printf("  queries empty:       %d\n", queries_empty);
-    printf("  query time:          %.3fs   (%.1f us / query)\n",
-           t_query, 1e6 * t_query / n_test);
     printf("\n");
 
-    printf("Radius escalation profile:\n");
-    printf("  stopped at r=0:      %d  (%.2f%%)\n",
-           queries_needing_r0, 100.0*queries_needing_r0/n_test);
-    printf("  escalated to r=1:    %d  (%.2f%%)\n",
-           queries_needing_r1, 100.0*queries_needing_r1/n_test);
-    printf("  escalated to r=2:    %d  (%.2f%%)\n",
-           queries_needing_r2, 100.0*queries_needing_r2/n_test);
-    printf("\n");
-
-    /* Cost comparison: dense cascade would do 60K popcount_dists for H1
-     * alone, plus K*3 for the resolver. We do ~avg_probes * log(n_train)
-     * for binary searches (ignoring since lb is cheap) plus avg_candidates*3
-     * popcount_dists for the resolver. The H1 pass is completely eliminated. */
-    printf("Cost comparison vs dense L50_H1 baseline:\n");
-    printf("  dense baseline:      %d H1 popcount_dists + %d resolver ops per query\n",
-           n_train, 50 * 3);
-    printf("  bucket consumer:     0 H1 popcount_dists + %.0f resolver ops per query\n",
-           3.0 * total_candidates / (n_test - queries_empty));
-    printf("  ratio of popcount_dist calls: %.3fx\n",
-           (3.0 * total_candidates / (n_test - queries_empty))
-           / (double)(n_train + 150));
-    printf("\n");
+    printf("Dense baseline (for reference):\n");
+    printf("  L50_H1 (H1 top-50 + H2+H3+H4 fusion over top-50):  83.86%% at ~60K popcount_dists/query\n");
+    printf("  L50_H12 (fused H1+H2 filter + H3+H4 fusion):       88.44%% at ~120K popcount_dists/query\n\n");
 
     printf("Interpretation:\n");
-    printf("  The H1 pass is gone. Query cost is dominated by a handful of\n");
-    printf("  binary searches into the sorted bucket table plus a small\n");
-    printf("  resolver pass over the candidate set. Accuracy should track\n");
-    printf("  the dense L50_H1 baseline (83.86%%) because the candidate set\n");
-    printf("  contains all prototypes at minimum Hamming distance plus any\n");
-    printf("  added by multi-probe expansion. Gaps from the dense baseline\n");
-    printf("  indicate MIN_CANDIDATES / MAX_RADIUS tuning room.\n");
+    printf("  The H1 pass is completely eliminated - query cost is binary\n");
+    printf("  search into the sorted bucket table plus the small resolver\n");
+    printf("  pass. Higher MAX_RADIUS trades query cost for recall. Higher\n");
+    printf("  MIN_CANDIDATES forces the resolver to see more per query.\n");
 
     free(entries);
     free(mask);
