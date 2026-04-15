@@ -21,21 +21,47 @@ static uint32_t read_u32_be(FILE* f) {
            (uint32_t)b[3];
 }
 
+/* IDX1/IDX3 magic numbers per http://yann.lecun.com/exdb/mnist/.
+ * 0x00000803 = 3D unsigned byte (images), 0x00000801 = 1D unsigned byte
+ * (labels). Validating these guards against the user pointing --data
+ * at the wrong directory or swapping image/label file roles, which
+ * would otherwise silently load garbage and produce a confusing low
+ * accuracy. */
+#define GLYPH_IDX_MAGIC_IMAGES 0x00000803u
+#define GLYPH_IDX_MAGIC_LABELS 0x00000801u
+
 static m4t_mtfp_t* load_images_mtfp(const char* path, int* n, int* rows, int* cols) {
     FILE* f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "glyph_dataset: cannot open %s\n", path);
         return NULL;
     }
-    read_u32_be(f);                     /* magic number, unused */
+    uint32_t magic = read_u32_be(f);
+    if (magic != GLYPH_IDX_MAGIC_IMAGES) {
+        fprintf(stderr,
+            "glyph_dataset: %s has magic 0x%08x, expected 0x%08x "
+            "(IDX 3D unsigned byte images)\n",
+            path, magic, GLYPH_IDX_MAGIC_IMAGES);
+        fclose(f);
+        return NULL;
+    }
     *n = (int)read_u32_be(f);
     *rows = (int)read_u32_be(f);
     *cols = (int)read_u32_be(f);
+    if (*n <= 0 || *rows <= 0 || *cols <= 0) {
+        fprintf(stderr,
+            "glyph_dataset: %s has invalid shape n=%d rows=%d cols=%d\n",
+            path, *n, *rows, *cols);
+        fclose(f);
+        return NULL;
+    }
     int dim = (*rows) * (*cols);
     size_t total = (size_t)(*n) * dim;
     uint8_t* raw = malloc(total);
     if (!raw) { fclose(f); return NULL; }
     if (fread(raw, 1, total, f) != total) {
+        fprintf(stderr, "glyph_dataset: %s short read (expected %zu bytes)\n",
+                path, total);
         free(raw); fclose(f); return NULL;
     }
     fclose(f);
@@ -54,11 +80,26 @@ static int* load_labels(const char* path, int* n) {
         fprintf(stderr, "glyph_dataset: cannot open %s\n", path);
         return NULL;
     }
-    read_u32_be(f);                     /* magic number, unused */
+    uint32_t magic = read_u32_be(f);
+    if (magic != GLYPH_IDX_MAGIC_LABELS) {
+        fprintf(stderr,
+            "glyph_dataset: %s has magic 0x%08x, expected 0x%08x "
+            "(IDX 1D unsigned byte labels)\n",
+            path, magic, GLYPH_IDX_MAGIC_LABELS);
+        fclose(f);
+        return NULL;
+    }
     *n = (int)read_u32_be(f);
-    uint8_t* raw = malloc(*n);
+    if (*n <= 0) {
+        fprintf(stderr, "glyph_dataset: %s has invalid count n=%d\n", path, *n);
+        fclose(f);
+        return NULL;
+    }
+    uint8_t* raw = malloc((size_t)(*n));
     if (!raw) { fclose(f); return NULL; }
-    if (fread(raw, 1, *n, f) != (size_t)*n) {
+    if (fread(raw, 1, (size_t)(*n), f) != (size_t)(*n)) {
+        fprintf(stderr, "glyph_dataset: %s short read (expected %d bytes)\n",
+                path, *n);
         free(raw); fclose(f); return NULL;
     }
     fclose(f);

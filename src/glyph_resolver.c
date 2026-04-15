@@ -5,14 +5,22 @@
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 
+#include <assert.h>
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 
 int glyph_resolver_vote(const glyph_union_t* u) {
-    int class_votes[32] = {0};   /* u->n_classes is expected to be ≤ 32 */
+    assert(u->n_classes > 0 && u->n_classes <= GLYPH_MAX_CLASSES);
+    int class_votes[GLYPH_MAX_CLASSES];
+    memset(class_votes, 0, (size_t)u->n_classes * sizeof(int));
     for (int j = 0; j < u->n_hit; j++) {
         int idx = u->hit_list[j];
-        class_votes[u->y_train[idx]] += u->votes[idx];
+        int label = u->y_train[idx];
+        /* Label must be in [0, n_classes). Silently clamping would
+         * hide dataset corruption; assert instead. */
+        assert(label >= 0 && label < u->n_classes);
+        class_votes[label] += u->votes[idx];
     }
     int pred = 0;
     for (int c = 1; c < u->n_classes; c++)
@@ -55,7 +63,9 @@ int glyph_resolver_per_table_majority(
     const uint8_t* const* query_sigs,
     const uint8_t*       mask)
 {
-    int label_votes[32] = {0};
+    assert(u->n_classes > 0 && u->n_classes <= GLYPH_MAX_CLASSES);
+    int label_votes[GLYPH_MAX_CLASSES];
+    memset(label_votes, 0, (size_t)u->n_classes * sizeof(int));
     for (int m = 0; m < m_active; m++) {
         int32_t best_d = INT32_MAX;
         int     best_label = -1;

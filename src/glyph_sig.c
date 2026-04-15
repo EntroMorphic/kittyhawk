@@ -44,12 +44,18 @@ int glyph_sig_builder_init(
     sb->density = density;
     sb->seed[0] = s0; sb->seed[1] = s1; sb->seed[2] = s2; sb->seed[3] = s3;
 
+    /* Allocations tracked for goto-cleanup on any OOM path. */
+    m4t_trit_t* proj_w    = NULL;
+    m4t_mtfp_t* calib_proj = NULL;
+    int64_t*    buf        = NULL;
+    int rc = 1;
+
     /* Build the random ternary projection matrix. */
     glyph_rng_t rng;
     glyph_rng_seed(&rng, s0, s1, s2, s3);
 
-    m4t_trit_t* proj_w = malloc((size_t)n_proj * input_dim);
-    if (!proj_w) return 1;
+    proj_w = malloc((size_t)n_proj * input_dim);
+    if (!proj_w) goto cleanup;
     for (int i = 0; i < n_proj * input_dim; i++) {
         uint32_t r = glyph_rng_next(&rng) % 3;
         proj_w[i] = (r == 0) ? -1 : (r == 1) ? 0 : 1;
@@ -57,15 +63,14 @@ int glyph_sig_builder_init(
 
     int proj_Dp = M4T_TRIT_PACKED_BYTES(input_dim);
     sb->proj_packed = malloc((size_t)n_proj * proj_Dp);
-    if (!sb->proj_packed) { free(proj_w); return 1; }
+    if (!sb->proj_packed) goto cleanup;
     m4t_pack_trits_rowmajor(sb->proj_packed, proj_w, n_proj, input_dim);
-    free(proj_w);
 
     /* Calibrate tau from the |projection| distribution of the calibration
      * subset. Uses the same percentile-at-density rule every cascade tool
      * used before this refactor. */
-    m4t_mtfp_t* calib_proj = malloc((size_t)n_calib * n_proj * sizeof(m4t_mtfp_t));
-    if (!calib_proj) return 1;
+    calib_proj = malloc((size_t)n_calib * n_proj * sizeof(m4t_mtfp_t));
+    if (!calib_proj) goto cleanup;
     for (int i = 0; i < n_calib; i++) {
         m4t_mtfp_ternary_matmul_bt(
             calib_proj + (size_t)i * n_proj,
@@ -73,8 +78,8 @@ int glyph_sig_builder_init(
             sb->proj_packed, 1, input_dim, n_proj);
     }
     size_t total = (size_t)n_calib * n_proj;
-    int64_t* buf = malloc(total * sizeof(int64_t));
-    if (!buf) { free(calib_proj); return 1; }
+    buf = malloc(total * sizeof(int64_t));
+    if (!buf) goto cleanup;
     for (int i = 0; i < n_calib; i++) {
         for (int p = 0; p < n_proj; p++) {
             int64_t v = calib_proj[(size_t)i * n_proj + p];
@@ -82,9 +87,19 @@ int glyph_sig_builder_init(
         }
     }
     sb->tau_q = tau_for_density(buf, total, density);
-    free(buf);
+    rc = 0;
+
+cleanup:
+    free(proj_w);
     free(calib_proj);
-    return 0;
+    free(buf);
+    if (rc != 0) {
+        /* Release any partial state owned by sb so the caller sees a
+         * clean zero-initialized builder after a failed init. */
+        free(sb->proj_packed);
+        memset(sb, 0, sizeof(*sb));
+    }
+    return rc;
 }
 
 void glyph_sig_encode(const glyph_sig_builder_t* sb,

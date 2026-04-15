@@ -34,14 +34,55 @@
 extern "C" {
 #endif
 
-/* A union of candidate prototype indices, with per-prototype vote
- * counts indexed by prototype index (not by hit-list position).
- * Caller owns both arrays. */
+/* Compile-time cap on the number of classes a resolver handles. Stack
+ * class-tally buffers are sized to this. Must be >= the largest class
+ * cardinality ever passed via glyph_union_t.n_classes. 256 covers
+ * MNIST (10), Fashion-MNIST (10), EMNIST (47), CIFAR-100 (100) and
+ * ImageNet-scale 200-class benchmarks with room to spare. Larger class
+ * cardinalities require either a resolver API change (caller-supplied
+ * scratch buffer) or bumping this constant. Runtime asserts in the
+ * resolver implementations guard against overruns. */
+#define GLYPH_MAX_CLASSES 256
+
+/* A union of candidate prototype indices, together with per-prototype
+ * vote counts and the shared training-label table the resolvers read
+ * from. All fields are borrowed; the caller owns the memory.
+ *
+ * Lifecycle contract (important):
+ *
+ *   hit_list — array of prototype indices currently in the union.
+ *              Caller appends a proto_idx exactly once when it first
+ *              enters the union (detected via votes[idx] == 0) and
+ *              leaves it sorted by nothing in particular. Max length
+ *              is the caller's per-query union cap.
+ *
+ *   n_hit    — number of valid entries in hit_list.
+ *
+ *   votes    — dense array of length n_train, indexed by prototype
+ *              index (NOT by hit-list position). votes[idx] is the
+ *              count of tables that placed prototype idx in the
+ *              query's multi-probe neighborhood. Must be allocated
+ *              with size >= n_train. Caller must zero entries for
+ *              proto_idxs that were in a prior query's union; the
+ *              efficient pattern is "lazy zero" — iterate hit_list
+ *              at query end and set votes[hit_list[j]] = 0.
+ *
+ *   y_train  — prototype labels, length n_train. Each label must be
+ *              in [0, n_classes). The resolvers read y_train[idx]
+ *              for every idx in hit_list.
+ *
+ *   n_classes — number of distinct classes. Must be <= GLYPH_MAX_CLASSES.
+ *              Runtime-asserted in each resolver implementation.
+ *
+ * The resolvers do NOT mutate any of these fields; they are declared
+ * const where the C type system allows. Callers that invalidate the
+ * union between queries (new n_hit, new hit_list contents, new votes
+ * state) may reuse the same struct across many queries. */
 typedef struct {
-    const int32_t*  hit_list;   /* [n_hit] prototype indices in the union  */
+    const int32_t*  hit_list;
     int             n_hit;
-    const uint16_t* votes;      /* [max_proto_idx+1] vote counts by idx    */
-    const int*      y_train;    /* [n_train] prototype labels              */
+    const uint16_t* votes;
+    const int*      y_train;
     int             n_classes;
 } glyph_union_t;
 
