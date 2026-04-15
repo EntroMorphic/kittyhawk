@@ -229,6 +229,15 @@ int main(int argc, char** argv) {
     long* total_union   = calloc((size_t)n_M, sizeof(long));
     long* total_probes  = calloc((size_t)n_M, sizeof(long));
 
+    /* Per-class confusion at the FINAL M checkpoint under the SUM
+     * resolver (whichever variant is selected). Used to diagnose
+     * whether the resolver gap is concentrated in specific class
+     * pairs. Tracked only at the last M to keep reporting compact. */
+    int  per_class_total[N_CLASSES]  = {0};
+    int  per_class_correct[N_CLASSES] = {0};
+    int  final_confusion[N_CLASSES][N_CLASSES] = {{0}};
+    int  final_M = m_values[n_M - 1];
+
     /* Per-query array of query-sig pointers (one per table). Reused
      * across queries; only the pointer targets change. train_sigs
      * itself is already a uint8_t**, so we pass it directly to the
@@ -242,6 +251,11 @@ int main(int argc, char** argv) {
     clock_t t_sweep = clock();
     for (int s = 0; s < ds.n_test; s++) {
         int y = ds.y_test[s];
+        /* Defensive bound on the per-class counter — the tool is
+         * hardcoded for N_CLASSES=10 but a future caller pointing
+         * --data at a larger-class dataset (e.g. EMNIST with 47
+         * classes) would OOB without this guard. */
+        if (y >= 0 && y < N_CLASSES) per_class_total[y]++;
         for (int m = 0; m < cfg.m_max; m++)
             q_sigs_p[m] = test_sigs[m] + (size_t)s * sig_bytes;
 
@@ -274,11 +288,22 @@ int main(int argc, char** argv) {
                 if (strcmp(cfg.resolver_sum, "neon4") == 0 && sig_bytes == 4) {
                     pred_s = glyph_resolver_sum_neon4(&u, M_target, sig_bytes,
                                                       train_sigs, q_sigs_p, mask);
+                } else if (strcmp(cfg.resolver_sum, "voteweighted") == 0) {
+                    pred_s = glyph_resolver_sum_voteweighted(&u, M_target, sig_bytes,
+                                                              train_sigs, q_sigs_p, mask);
                 } else {
                     pred_s = glyph_resolver_sum(&u, M_target, sig_bytes,
                                                 train_sigs, q_sigs_p, mask);
                 }
                 if (pred_s == y) sum_correct[mi]++;
+
+                /* Record per-class and confusion at the last M value.
+                 * Guards match the per_class_total bounds check. */
+                if (M_target == final_M && y >= 0 && y < N_CLASSES) {
+                    if (pred_s == y) per_class_correct[y]++;
+                    if (pred_s >= 0 && pred_s < N_CLASSES)
+                        final_confusion[y][pred_s]++;
+                }
 
                 int pred_p = glyph_resolver_per_table_majority(&u, M_target, sig_bytes,
                                                 train_sigs, q_sigs_p, mask);
@@ -315,6 +340,52 @@ int main(int argc, char** argv) {
                    100.0 * sum_correct[mi]  / ds.n_test,
                    100.0 * ptm_correct[mi]  / ds.n_test,
                    100.0 * oracle_correct[mi] / ds.n_test);
+        }
+        printf("\n");
+
+        /* Per-class accuracy at the final M checkpoint under the SUM
+         * resolver. Diagnostic for whether the resolver gap is
+         * concentrated in specific classes or uniform. */
+        printf("Per-class SUM accuracy at M=%d (resolver_sum=%s):\n",
+               final_M, cfg.resolver_sum);
+        printf("  class   count   correct   accuracy\n");
+        for (int c = 0; c < N_CLASSES; c++) {
+            if (per_class_total[c] == 0) continue;
+            printf("   %2d    %5d   %5d     %6.2f%%\n",
+                   c, per_class_total[c], per_class_correct[c],
+                   100.0 * per_class_correct[c] / per_class_total[c]);
+        }
+        printf("\n");
+
+        /* Top confusion pairs (true class → predicted class, excluding
+         * the diagonal). Shows which class pairs dominate the error
+         * budget. */
+        printf("Top off-diagonal confusions at M=%d (true → pred):\n", final_M);
+        typedef struct { int t, p, n; } cf_t;
+        cf_t pairs[N_CLASSES * N_CLASSES];
+        int n_pairs = 0;
+        for (int t = 0; t < N_CLASSES; t++)
+            for (int p = 0; p < N_CLASSES; p++) {
+                if (t == p) continue;
+                if (final_confusion[t][p] > 0) {
+                    pairs[n_pairs].t = t;
+                    pairs[n_pairs].p = p;
+                    pairs[n_pairs].n = final_confusion[t][p];
+                    n_pairs++;
+                }
+            }
+        /* Sort descending by count (insertion sort; n_pairs is small). */
+        for (int i = 1; i < n_pairs; i++) {
+            cf_t v = pairs[i];
+            int j = i - 1;
+            while (j >= 0 && pairs[j].n < v.n) { pairs[j+1] = pairs[j]; j--; }
+            pairs[j+1] = v;
+        }
+        int shown = (n_pairs < 10) ? n_pairs : 10;
+        printf("  true  pred  count\n");
+        for (int i = 0; i < shown; i++) {
+            printf("   %2d    %2d   %5d\n",
+                   pairs[i].t, pairs[i].p, pairs[i].n);
         }
         printf("\n");
     }

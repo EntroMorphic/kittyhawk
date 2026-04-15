@@ -130,6 +130,46 @@ int glyph_resolver_sum_neon4(
     const uint8_t* const* query_sigs,
     const uint8_t*       mask);
 
+/* VOTE-WEIGHTED SUM resolver — filter-to-resolver rerouting variant.
+ *
+ * Same O(n_hit × m_active) popcount_dist calls as glyph_resolver_sum,
+ * but scores each candidate as:
+ *
+ *     score(c) = sum_dist(c) / (1.0 + votes[c])
+ *
+ * where votes[c] is the number of tables whose multi-probe neighborhood
+ * included c (the same u->votes field the VOTE resolver reads). The
+ * division amortizes the summed distance by the filter-stage vote
+ * count — candidates that more tables agreed were near the query get
+ * their sum_dist effectively discounted.
+ *
+ * This is the simplest way to fold filter-stage information into the
+ * resolver's ranking. The current SUM resolver reads only the geometric
+ * sum of signature distances; the vote count is a separate dimension
+ * of filter-stage agreement that SUM ignores. On datasets where
+ * signature-space distance is a clean proxy for class similarity
+ * (MNIST), vote-weighting should be marginal or neutral. On datasets
+ * where signature-space distance is noisy (Fashion-MNIST, CIFAR-10),
+ * vote-weighting may recover some of the 15-point resolver gap by
+ * preferring candidates that multiple independent hashes agreed on.
+ *
+ * Computed in a single pass over the hit_list with integer arithmetic:
+ * score_int(c) = sum_dist(c) × 1024 / (1 + votes[c]) to avoid float.
+ * The 1024 scale keeps integer precision sufficient for the argmin
+ * tie-break across typical sum_dist and votes magnitudes.
+ *
+ * Not bit-exact equivalent to glyph_resolver_sum — this is a different
+ * algorithm producing a different ranking. Equivalence on the scalar
+ * argmin is only expected when all candidates have identical votes.
+ */
+int glyph_resolver_sum_voteweighted(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask);
+
 /* PTM resolver — O(n_hit × m_active) popcount_dist calls, different
  * access pattern than SUM. */
 int glyph_resolver_per_table_majority(

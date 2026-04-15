@@ -211,6 +211,45 @@ int glyph_resolver_sum_neon4(
 #endif
 }
 
+int glyph_resolver_sum_voteweighted(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask)
+{
+    /* Integer scaling factor to keep the division (sum_dist /
+     * (1 + votes)) in int64 without losing precision at the argmin
+     * tie-break. 1024 is enough headroom: sum_dist ≤ M × 2 × N_PROJ
+     * (bounded by max Hamming distance per table × tables), so for
+     * M=64, N_PROJ=16 the max is 2048. 2048 × 1024 = 2^21, well
+     * within int64. */
+    enum { VW_SCALE = 1024 };
+
+    int64_t best_score = INT64_MAX;
+    int     best_label = -1;
+    for (int j = 0; j < u->n_hit; j++) {
+        int idx = u->hit_list[j];
+        int32_t sum_dist = 0;
+        for (int m = 0; m < m_active; m++) {
+            sum_dist += m4t_popcount_dist(
+                query_sigs[m],
+                table_train_sigs[m] + (size_t)idx * sig_bytes,
+                mask, sig_bytes);
+        }
+        /* Amortize by (1 + votes). +1 guards against vote=0 and
+         * ensures the ranking is well-defined for any union. */
+        int64_t denom = 1 + (int64_t)u->votes[idx];
+        int64_t score = ((int64_t)sum_dist * VW_SCALE) / denom;
+        if (score < best_score) {
+            best_score = score;
+            best_label = u->y_train[idx];
+        }
+    }
+    return best_label;
+}
+
 int glyph_resolver_per_table_majority(
     const glyph_union_t* u,
     int                  m_active,

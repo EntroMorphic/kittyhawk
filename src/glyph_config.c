@@ -64,10 +64,19 @@ void glyph_config_print_usage(const char* progname) {
         "                          (default: deskew; recommended ON for MNIST digits,\n"
         "                           OFF for datasets without a canonical shear axis like\n"
         "                           Fashion-MNIST clothing or CIFAR-10 natural images)\n"
-        "  --resolver_sum <mode>   SUM resolver implementation: 'scalar' (default) uses the\n"
-        "                          general-purpose path; 'neon4' uses a NEON-batched variant\n"
-        "                          specialized for N_PROJ=16 / sig_bytes=4 (4 candidates per\n"
-        "                          16-byte vector). bit-exact equivalent — unit test covers.\n"
+        "  --resolver_sum <mode>   SUM resolver implementation. Options:\n"
+        "                            'scalar' (default) — general-purpose post-Fix-1 scalar\n"
+        "                                path using builtin popcount on 4-byte sigs.\n"
+        "                            'neon4' — NEON-batched variant for sig_bytes=4, 4\n"
+        "                                candidates per 16-byte vector. Bit-exact equivalent\n"
+        "                                to 'scalar' — chosen for speed only.\n"
+        "                            'voteweighted' — scores each candidate as\n"
+        "                                sum_dist / (1 + filter_votes[c]), folding the\n"
+        "                                filter-stage vote count into the resolver ranking.\n"
+        "                                DIFFERENT algorithm (not bit-exact to 'scalar'),\n"
+        "                                intended to recover the Fashion-MNIST resolver\n"
+        "                                gap by preferring candidates that more tables\n"
+        "                                agreed on.\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -226,10 +235,12 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
         fprintf(stderr, "glyph_config: --mode must be 'oracle' or 'full'\n");
         return 1;
     }
-    if (strcmp(cfg->resolver_sum, "scalar") != 0 &&
-        strcmp(cfg->resolver_sum, "neon4") != 0) {
+    if (strcmp(cfg->resolver_sum, "scalar")       != 0 &&
+        strcmp(cfg->resolver_sum, "neon4")        != 0 &&
+        strcmp(cfg->resolver_sum, "voteweighted") != 0) {
         fprintf(stderr,
-            "glyph_config: --resolver_sum must be 'scalar' or 'neon4'\n");
+            "glyph_config: --resolver_sum must be 'scalar', 'neon4', or "
+            "'voteweighted'\n");
         return 1;
     }
     return 0;
