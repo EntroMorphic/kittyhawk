@@ -95,7 +95,19 @@ void m4t_route_distance_batch(
  * have tile_idx = -1 and sign = 0.
  *
  * T is capped at M4T_ROUTE_MAX_T (uniqueness tracked via a uint64_t
- * bitmask). Uses simple selection, not a heap. */
+ * bitmask). Uses simple selection, not a heap.
+ *
+ * §18 contract (output-side emission coverage):
+ *   Enumerated output state: decision.sign ∈ {+1, -1, 0} where +1/-1
+ *     encode the sign of a selected tile's score and 0 is the sentinel
+ *     for "no tile selected" (tile_idx == -1).
+ *   Sanctioned input class: score arrays with mixed-sign nonzero
+ *     entries plus k configured so that at least one of {k > #nonzero,
+ *     k ≤ #nonzero} is realized across representative calls. Under
+ *     this class all three sign states occur.
+ *   Coverage test: test_topk_abs_basic / test_topk_abs_with_zeros /
+ *     test_topk_abs_all_tiles in test_m4t_route.c (union covers all
+ *     three states). See M4T_SUBSTRATE.md §18. */
 #define M4T_ROUTE_MAX_T 64
 void m4t_route_topk_abs(
     m4t_route_decision_t* decisions,
@@ -110,7 +122,20 @@ void m4t_route_topk_abs(
  *   result[d] += sign * tile_outs[tile_idx * dim + d]   for d in [0, dim)
  *
  * result must be pre-zeroed or contain a prior accumulation.
- * Decisions with tile_idx < 0 are skipped (sentinel from topk_abs). */
+ * Decisions with tile_idx < 0 are skipped (sentinel from topk_abs).
+ *
+ * §18 contract (input-side emission coverage):
+ *   Three-state API locus: the decision.sign field consumed from each
+ *     decision ∈ {+1, -1, 0-sentinel} drives three distinct branches:
+ *     +1 → add tile_outs, -1 → subtract, 0/sentinel → skip. The
+ *     primitive's three-way character is exercised iff decisions
+ *     realize all three sign states across the call.
+ *   Sanctioned input class: decisions produced by m4t_route_topk_abs
+ *     under its sanctioned input class; the three sign states arise
+ *     naturally from mixed-sign scores with some sentinel overflow.
+ *   Coverage test: test_apply_signed (+1 add, -1 sub branches),
+ *     test_apply_signed_sentinel (0-sentinel skip branch) in
+ *     test_m4t_route.c. See M4T_SUBSTRATE.md §18. */
 void m4t_route_apply_signed(
     m4t_mtfp_t* result,
     const m4t_mtfp_t* tile_outs,

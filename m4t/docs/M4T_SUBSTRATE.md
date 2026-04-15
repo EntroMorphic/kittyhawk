@@ -410,33 +410,69 @@ A primitive is "base-3 native" not as an absolute property but as a property of 
 
 ### 18.1 Criterion — emission coverage
 
-A (primitive, input-class) pair passes **emission coverage** iff every output state the primitive's API can emit is emitted non-trivially under that input class.
+A (primitive, input-class) pair passes **emission coverage** iff every three-state position the primitive's API exposes is non-trivially exercised under that input class.
 
-"Non-trivially" means: the state occurs with positive measure under the input distribution — not as a measure-zero coincidence of exact arithmetic equality.
+"Non-trivially" means: each of the three states occurs with positive measure under the input distribution — not as a measure-zero coincidence of exact arithmetic equality.
 
-Examples:
-- `m4t_route_threshold_extract(tau > 0)` + input values whose magnitudes span across tau: all three trit codes occur with positive measure. **Pass.**
-- `m4t_route_threshold_extract(tau = 0)` + input values that can be exactly zero with non-trivial probability (integer arithmetic, col_sum − mean, etc.): all three codes occur. **Pass.**
-- `m4t_route_threshold_extract(tau = 0)` + continuous-valued inputs (MTFP projection outputs): the zero code is measure-zero. **Fail — the primitive produces a sign-only classification in practice.** Consumers in this class should use tau > 0.
+### 18.2 Scope — where the criterion applies
 
-### 18.2 Review gate
+§18 applies to primitives that interact with the trit trichotomy at their API boundary. Three distinct scopes exist, and each primitive falls in exactly one:
+
+**Output-side coverage** — enumerable three-state outputs.
+The primitive emits output states drawn from {+1, 0, -1} (trit codes, decision signs, etc.). Emission coverage is tested at the output: all three codes must be emitted non-trivially under the sanctioned input class.
+- Example: `m4t_route_threshold_extract` emits packed trit codes.
+
+**Input-side coverage** — three-state-dependent behavior over continuous outputs.
+The primitive's output is continuous (int32, MTFP mantissa array, etc.), but its useful semantic depends on the inputs realizing all three trit states. Emission coverage is tested at the input: the consumer must supply inputs that realize all three states, so that the primitive's trichotomy-aware behavior is actually exercised.
+- Example: `m4t_route_distance_batch` outputs int32 distances, but the lattice-geometric distance metric (0-vs-sign = 1 bit, ±1-vs-∓1 = 2 bits) only realizes its three-way character when packed-trit inputs span all three states.
+- Example: `m4t_route_apply_signed` outputs MTFP accumulations, but three-way dispatch (+1 add / -1 sub / 0 skip) only exercises all three branches when the decision array contains all three sign values.
+
+**Not applicable** — primitives outside the trichotomy.
+The primitive performs pure arithmetic on integer mantissas, cell-width conversion, or other operations that don't encode a three-state semantic at either end. §18 is silent; no coverage assertion required.
+- Example: `m4t_mtfp_block_add`, `m4t_mtfp_clamp64`, `m4t_mtfp19_to_mtfp4`.
+
+### 18.3 Worked examples
+
+- `m4t_route_threshold_extract(tau > 0)` + values spanning ±tau: **output-side pass.** All three codes emitted.
+- `m4t_route_threshold_extract(tau = 0)` + integer col_sum − mean inputs (`signature_update` internal): **output-side pass.** Zero occurs with positive measure from exact equality.
+- `m4t_route_threshold_extract(tau = 0)` + continuous MTFP projection outputs: **output-side FAIL.** Zero is measure-zero. Produces sign-only classification in practice. Consumers in this class should use tau > 0.
+- `m4t_route_distance_batch` + signatures from threshold_extract(tau > 0) output: **input-side pass.** Inputs realize all three packed-trit states; the lattice-geometric distance metric is fully exercised.
+- `m4t_mtfp_block_add` + any in-range MTFP inputs: **not applicable.** Integer arithmetic does not encode the trichotomy at the API boundary.
+
+### 18.4 Review gate
 
 Every primitive added to the substrate MUST ship with:
 
-(a) **Enumerated output space.** What codes, ranges, or values the API can emit.
+(a) **Enumerated three-state position.** The API locus at which the trichotomy lives — either the output codes (output-side) or the input codes the primitive's semantic consumes (input-side). For "not applicable" primitives, §18 is declared not applicable in the primitive's docstring.
 (b) **Sanctioned input-class contract.** The input distribution class(es) for which emission coverage holds, stated in the primitive's docstring.
-(c) **Coverage test.** A test in `m4t/tests/` that verifies emission coverage on the sanctioned input class.
+(c) **Coverage test.** A test in `m4t/tests/` that verifies emission coverage — either by exercising the full output code space (output-side) or by supplying inputs that realize all three states (input-side). Coverage tests are labeled with `/* §18 coverage test */` or similar so the audit trail is machine-greppable.
 
 Primitives that fail to ship all three do not land.
 
-### 18.3 Why this matters
+### 18.5 Per-primitive audit (as of 2026-04-14)
+
+Each live routing primitive, classified by §18 scope with a pointer to its coverage evidence.
+
+| Primitive | Scope | Sanctioned input class | Coverage evidence |
+|---|---|---|---|
+| `m4t_route_threshold_extract` | Output-side (emits {+1, 0, -1} trits) | tau > 0 with values spanning ±tau, OR tau = 0 with integer inputs realizing exact zero | `test_threshold_extract_tau0`, `test_threshold_extract_tau5`, `test_threshold_extract_all_within_band` in `test_m4t_route.c` |
+| `m4t_route_distance_batch` | Input-side (consumes packed-trit query and tile signatures) | Signatures from a passing-coverage extractor (so all three packed-trit codes present) | `test_distance_batch` uses three-state tile signatures covering identical / all-differ / one-differs cases |
+| `m4t_route_topk_abs` | Output-side (decision `sign` field ∈ {+1, -1, 0-sentinel}) | Score arrays with mixed signs AND (k > #nonzero OR k ≤ #nonzero) to realize all three sign states | `test_topk_abs_basic` (+1, -1), `test_topk_abs_with_zeros` (+1, 0-sentinel), `test_topk_abs_all_tiles` (+1, -1); union covers all three |
+| `m4t_route_apply_signed` | Input-side (consumes decision `sign` field) | Decisions from `topk_abs` output, exercising all three sign branches under realistic routing loads | `test_apply_signed` (+1 add, -1 sub), `test_apply_signed_sentinel` (0-sentinel skip) |
+| `m4t_route_signature_update` | Compound — internally uses `threshold_extract(tau=0)` on col_sum-minus-mean | Integer weight matrices where col_sum-vs-mean can realize exact equality (typical for ternary weights across T tiles) | `test_signature_update` produces signatures with all three trit states realized |
+| `m4t_mtfp_ternary_matmul_bt` | Input-side (consumes packed-trit weights; three-way branch per trit) | Ternary weight matrices with genuine {-1, 0, +1} sparsity; any MTFP activations | Covered by `test_signature_update` end-to-end and indirectly by `mnist_trit_lattice` consumer |
+| `m4t_mtfp4_sdot_matmul_bt` | Input-side (consumes MTFP4 activations and int8 trit weights) | Ternary weights with genuine {-1, 0, +1} sparsity | `test_f4_sdot_small`, `_k32`, `_k17_tail`, `_sdot_saturation` — all exercise the zero-preserves-zero invariant |
+
+**Primitives §18 does not apply to** (listed for completeness; §18 is silent on these): `m4t_mtfp_clamp64`, `m4t_mtfp_vec_zero`, `m4t_mtfp_block_add/_sub`, `m4t_mtfp_vec_add_inplace/_sub_inplace`, `m4t_mtfp4_clamp`, `m4t_mtfp4_to_mtfp19`, `m4t_mtfp19_to_mtfp4`, trit pack/unpack primitives, trit reducers. These are either pure integer arithmetic or container-level operations that do not encode the trichotomy at their API boundary.
+
+### 18.6 Why this matters
 
 A prior primitive (`m4t_route_sign_extract`, now removed) advertised three output codes in its type system but produced only two on realistic continuous-valued inputs. The type-level three-ness was theater; the behavioral two-ness was what downstream routing actually saw. The resulting consumer experiment lost 23 accuracy points vs. a dense baseline — a failure that was invisible until the primitive was exercised end-to-end.
 
 The emission-coverage criterion is the specific defense against this class of failure. It asks the question the type system cannot: *under the inputs this primitive will actually see, does its three-way semantic actually get exercised?*
 
-### 18.4 History
+### 18.7 History
 
-This section exists because two LMM cycles in sequence converged on it. The first cycle produced a two-part criterion (C-sub: substrate-side three-way capacity; C-con: consumer-side realization). The scrutiny meta-cycle found the two parts collapsed structurally — C-sub applied literally to `sign_extract` fails because collapsing its zero state yields a well-defined binary sign-test. The single-part "emission coverage" criterion subsumes both correctly.
+This section exists because two LMM cycles in sequence converged on it. The first cycle produced a two-part criterion (C-sub: substrate-side three-way capacity; C-con: consumer-side realization). The scrutiny meta-cycle found the two parts collapsed structurally — C-sub applied literally to `sign_extract` fails because collapsing its zero state yields a well-defined binary sign-test. The single-part "emission coverage" criterion subsumes both correctly. A subsequent red-team noted the criterion needed scope qualification (output-side / input-side / not applicable) and a per-primitive audit trail; both landed in §18.2 and §18.5.
 
 Journal record: `base3_native_criterion_{raw,nodes,reflect,synthesize}.md` (first cycle); `updated_model_scrutiny_{raw,nodes,reflect,synthesize}.md` (scrutiny cycle).

@@ -240,10 +240,10 @@ A comprehensive red-team of all live code after first-round remediation. All fir
 
 ## Deferred (second round)
 
-- [ ] **M-RT10.** LSH regression test. Tracked — lands when a cheap synthetic smoke test can exercise the full pipeline without MNIST data.
-- [ ] **T-RT2 / T-RT3.** Broader `signature_update` edge cases and ternary_matmul near-saturation tests. Lands in a dedicated test-expansion pass.
-- [ ] **T-RT4.** End-to-end LSH regression (same as M-RT10).
-- [ ] **T-RT5.** Explicit §8.5 Case-semantic assertions in tests. Annotate existing tests with Case labels rather than adding new ones.
+- [x] **M-RT10.** LSH regression test. Tracked — lands when a cheap synthetic smoke test can exercise the full pipeline without MNIST data.
+- [x] **T-RT2 / T-RT3.** Broader `signature_update` edge cases and ternary_matmul near-saturation tests. Lands in a dedicated test-expansion pass.
+- [x] **T-RT4.** End-to-end LSH regression (same as M-RT10).
+- [x] **T-RT5.** Explicit §8.5 Case-semantic assertions in tests. Annotate existing tests with Case labels rather than adding new ones.
 
 ## Execution order (second round)
 
@@ -254,3 +254,90 @@ A comprehensive red-team of all live code after first-round remediation. All fir
 5. Bit-select rewrite: M-RT1.
 6. Build hygiene: L-RT5, L-RT6, L-RT7.
 7. Build + test + commit.
+
+---
+
+# Third red-team round (2026-04-14, post sign_extract → threshold_extract)
+
+Red-team of commit `ea0e519` (the sign_extract replacement). Subsequent LMM cycles and doc consolidation. Six new findings.
+
+Severity key unchanged: **H**, **M**, **L**.
+
+## M-RT3A. §18 applies cleanly only to enumerable-output primitives; doesn't say so
+
+**Finding.** §18's "every output state must be emitted non-trivially" is well-defined for primitives whose output space is finite and enumerable (trit codes, decision signs). For primitives with continuous outputs (`distance_batch` returns int32 distances; `apply_signed` returns MTFP mantissa arrays), "every output state" becomes "every int32 value" — nonsense. As written, §18 doesn't say where it applies, so applying it to continuous-output primitives leads either to confusion or to silently skipping the review gate.
+
+**Remediation.**
+- [x] Edit `m4t/docs/M4T_SUBSTRATE.md` §18 to name scope explicitly:
+  - **Enumerable-output primitives** (trit-producing extractors, decision primitives): emission coverage applies to the OUTPUT space.
+  - **Continuous-output primitives whose behavior depends on trit structure at the INPUT** (distance_batch over packed trits, apply_signed consuming decision-sign trits): emission coverage applies to the INPUT space.
+  - **Primitives outside the trichotomy** (pure arithmetic on integer mantissas, conversions, etc.): §18 does not apply.
+- [x] Update §18.1 examples to illustrate both input-side and output-side coverage.
+
+**Complete when.** §18 names its own scope; every live primitive has a clear answer for which side of the criterion (output / input / not applicable) applies.
+
+## M-RT3B. topk_abs and apply_signed docstrings not updated
+
+**Finding.** The scrutiny-cycle synthesize committed to updating docstrings on `topk_abs` and `apply_signed` to name their sanctioned input classes under §18. The commit shipped without these updates. `topk_abs` has a three-state output (sign field); `apply_signed` consumes a three-state input (decision sign). Both want explicit contracts.
+
+**Remediation.**
+- [x] `m4t_route.h::m4t_route_topk_abs` docstring additions: enumerated output space (tile_idx, sign ∈ {+1, -1, 0-sentinel}); sanctioned input class (score arrays with mixed nonzero signs, k ≤ T); coverage-test pointer.
+- [x] `m4t_route.h::m4t_route_apply_signed` docstring additions: enumerated input decision-sign space; sanctioned input class (decisions from `topk_abs` output); coverage-test pointer.
+
+**Complete when.** Both primitives' headers carry the §18 review-gate data: enumerated space, sanctioned input class, coverage-test pointer.
+
+## M-RT3C. Coverage tests are not labeled as such
+
+**Finding.** The tests that serve the §18 review-gate coverage role are not labeled. `test_threshold_extract_tau5` IS the coverage test for threshold_extract's primary sanctioned deployment, but a future auditor has to reverse-engineer that. Same gap for `test_topk_abs_*`, `test_apply_signed_*`, `test_signature_update`. Machine-greppable labels fix this.
+
+**Remediation.**
+- [x] Add `/* §18 coverage test: ... */` header comments above each test function that serves the coverage role in `test_m4t_route.c`.
+- [x] For compound tests (e.g., topk_abs coverage spans multiple test functions), a single group comment at the top of the related tests block.
+
+**Complete when.** Every §18 coverage test is labeled with a comment a `grep "§18 coverage"` can find.
+
+## L-RT4A. Meta: re-audit pass not documented
+
+**Finding.** The scrutiny-cycle synthesize committed to "Re-audit all routing primitives against emission coverage before declaring the architecture correct." I did the audit implicitly (§17 cross-reference includes the §18 row), but did not produce a visible audit trail for each primitive. A future auditor can't see which primitive was evaluated against which side of the criterion.
+
+**Remediation.**
+- [x] Add a subsection to §18 (or a new §18.5) enumerating all live routing primitives and their §18 status: output-side vs input-side vs not-applicable; coverage-test reference for each.
+
+**Complete when.** `m4t/docs/M4T_SUBSTRATE.md` contains an explicit per-primitive §18 audit table.
+
+## L-RT1A. `-tau` UB safety is assertion-dependent
+
+**Finding.** `if (v < -tau)` is undefined behavior if `tau == INT64_MIN`. The `assert(tau >= 0)` catches this in debug; in release, a contract-violating caller gets UB.
+
+**Remediation (accepted risk).**
+- [ ] *Defer.* This is the standard C pattern: runtime assertion in debug, precondition documented, contract-violating callers get UB in release. Fixing it would either add a runtime guard (hides bugs) or require restructuring arithmetic (adds complexity for a hypothetical caller error). The paranoid fix does not improve correctness materially; the contract is stated and the assertion is in place.
+
+## L-RT2A. Test coverage gaps
+
+**Finding.** Threshold_extract tests don't cover: `n = 0`; values near INT64_MAX (large positive); packed-byte boundaries (n = 3, 5, 7, 8 — to exercise the pack-bit OR across byte edges).
+
+**Remediation.**
+- [x] Add `test_threshold_extract_n_zero` — `n = 0` returns cleanly; no writes to dst.
+- [x] Add `test_threshold_extract_pack_boundaries` — n ∈ {3, 5, 7, 8}, verify correct placement across packed-byte edges.
+- [x] Add `test_threshold_extract_extremes` — values including INT64_MAX, INT64_MIN+1 (avoid INT64_MIN itself per L-RT1A); verify sign discrimination.
+
+**Complete when.** All three tests land and pass.
+
+## L-RT3A. glyph_route.h untested (pre-existing)
+
+**Finding.** Pre-existing state. The wrapper test was archived with the dense-path aliases. `glyph_route.h` aliases exist but are never compiled under the current build. Not a regression from recent changes.
+
+**Remediation (deferred).**
+- [ ] *Defer.* Untested glyph wrapper lands back in scope when a glyph consumer emerges. Until then, aliases remain theoretical.
+
+---
+
+## Execution order (third round)
+
+1. §18 scope qualifier and per-primitive audit (M-RT3A, L-RT4A). Doc-only.
+2. Docstring updates on `topk_abs` and `apply_signed` (M-RT3B). Doc-only.
+3. Coverage-test labels (M-RT3C). Comments in test file.
+4. Test coverage additions (L-RT2A). New tests + register.
+5. Build + test + commit.
+
+L-RT1A and L-RT3A explicitly deferred with rationale.

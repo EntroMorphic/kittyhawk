@@ -83,6 +83,17 @@ Triggered by a full audit that identified a collapse of Multi-Trit Floating Poin
 - Full sweep (4 projection sizes × L1 / refine-3 / refine-5) wall clock: 41.6 s, single core.
 - The `m4t_ternary_matmul` bit-select rewrite preserved consumer numerics exactly. No silent regression from the base-2-shortcut → base-3-native shape transition.
 
+### §18 scope + per-primitive audit + coverage-test labels
+
+Third-round red-team remediation on commit `ea0e519`. Six findings; four executed, two deferred with rationale (see `docs/REMEDIATION_PLAN.md` third round).
+
+- **§18 now names its own scope** — three cases (output-side, input-side, not applicable) with worked examples. Applies cleanly to `threshold_extract`, `distance_batch`, `topk_abs`, `apply_signed`; explicitly not applicable to `m4t_mtfp_*` arithmetic and conversion primitives.
+- **§18.5 per-primitive audit table** added. Every live routing primitive listed with its §18 scope, sanctioned input class, and coverage-test pointer. Replaces the implicit audit trail with a machine-greppable one.
+- **`topk_abs` and `apply_signed` docstrings** updated with §18 contract data (enumerated three-state position, sanctioned input class, coverage-test pointer). Completes the scope commitment from the scrutiny cycle's synthesize.
+- **Coverage tests labeled** with `/* §18 coverage test: ... */` comments in `test_m4t_route.c`. Group comments at the top of `threshold_extract`, `topk_abs`, `apply_signed`, `signature_update` test blocks. Audit trail is now discoverable by grep.
+- **`threshold_extract` test coverage extended** — three new tests: `n_zero` (defensive), `pack_boundaries` (n ∈ {3, 5, 7, 8}), `extremes` (INT64_MAX, INT64_MIN+1, INT64_MIN). Pack-byte edges and extreme input values now covered.
+- **Deferred:** `-tau` UB paranoid fix (contract + assert deemed sufficient); glyph_route.h testing (pre-existing, no consumer).
+
 ### Architectural correction (sign_extract → threshold_extract)
 
 - **Removed `m4t_route_sign_extract`.** Advertised three output codes in its type system but produced only two on continuous-valued inputs (zero state was measure-zero for MTFP projections). Type-system theater. The fully-routed MNIST experiment's 23-point accuracy loss vs. the L1 baseline was the visible symptom.

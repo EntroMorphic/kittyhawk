@@ -28,10 +28,16 @@
     } \
 } while (0)
 
-/* ── threshold_extract ───────────────────────────────────────────────── */
+/* ── threshold_extract ─────────────────────────────────────────────────
+ *
+ * §18 coverage test group — output-side emission coverage for
+ * m4t_route_threshold_extract. The three test functions below collectively
+ * verify that all three output codes ({+1, 0, -1}) are emitted under the
+ * sanctioned input classes (tau=0 + integer-zero-realizing inputs, tau>0
+ * + values spanning ±tau, plus the band-only-inputs defensive case). */
 
-/* tau=0 degenerate: exact sign-extraction semantics.
- * v > 0 → +1, v < 0 → -1, v == 0 → 0. */
+/* §18 coverage test: tau=0 degenerate path. Input [5, -3, 0, 100, -1, 0, 42]
+ * realizes all three output codes via exact zeros in the input. */
 static int test_threshold_extract_tau0(void) {
     int64_t values[7] = { 5, -3, 0, 100, -1, 0, 42 };
     uint8_t packed[M4T_TRIT_PACKED_BYTES(7)];
@@ -47,8 +53,10 @@ static int test_threshold_extract_tau0(void) {
     return 0;
 }
 
-/* tau>0: values strictly above +tau → +1, strictly below -tau → -1,
- * |v| <= tau → 0. Tests boundary cases at ±tau (inclusive band). */
+/* §18 coverage test: tau>0 path — the primary sanctioned deployment.
+ * Values strictly above +tau → +1, strictly below -tau → -1, |v| <= tau → 0.
+ * Tests boundary cases at ±tau (inclusive band). All three output codes
+ * realized under the sanctioned input class. */
 static int test_threshold_extract_tau5(void) {
     int64_t values[9] = { 6, 5, 4, 0, -4, -5, -6, 100, -100 };
     uint8_t packed[M4T_TRIT_PACKED_BYTES(9)];
@@ -66,9 +74,11 @@ static int test_threshold_extract_tau5(void) {
     return 0;
 }
 
-/* All inputs within the band → all zeros out. Emission coverage fails for
- * the +1 and -1 states here, as expected (this is exactly the input class
- * the primitive's contract documents as borderline). */
+/* §18 coverage test: defensive — demonstrates that when the sanctioned
+ * input class is violated (all inputs within the band), the primitive
+ * correctly produces only the zero output code. Not an assertion of
+ * coverage, but a verification that the primitive's behavior is
+ * deterministic and spec-compliant at the coverage boundary. */
 static int test_threshold_extract_all_within_band(void) {
     int64_t values[5] = { 3, -2, 0, 5, -5 };
     uint8_t packed[M4T_TRIT_PACKED_BYTES(5)];
@@ -79,6 +89,82 @@ static int test_threshold_extract_all_within_band(void) {
 
     for (int i = 0; i < 5; i++) {
         ASSERT_EQ_I32(result[i], 0, "threshold_extract all within band");
+    }
+    return 0;
+}
+
+/* Edge case: n = 0. Must not write to dst, must not crash. */
+static int test_threshold_extract_n_zero(void) {
+    uint8_t packed[1] = { 0xFF };
+    int64_t values[1] = { 42 };
+    m4t_route_threshold_extract(packed, values, 0, 0);
+    ASSERT_EQ_I32(packed[0], 0xFF, "threshold_extract n=0 must not touch dst");
+    return 0;
+}
+
+/* Pack-byte boundary coverage: n values at {3, 5, 7, 8} exercise the bit
+ * placement across byte edges. Each trit pair lives at a specific bit
+ * position within a byte; this test verifies placement is correct at and
+ * across byte boundaries. */
+static int test_threshold_extract_pack_boundaries(void) {
+    /* Pattern: alternating +1, -1 with a zero in the middle. */
+    const int64_t src[8] = { 10, -10, 10, 0, -10, 10, -10, 10 };
+    const m4t_trit_t expected[8] = { 1, -1, 1, 0, -1, 1, -1, 1 };
+
+    int sizes[] = { 3, 5, 7, 8 };
+    for (size_t s_idx = 0; s_idx < sizeof(sizes)/sizeof(sizes[0]); s_idx++) {
+        int n = sizes[s_idx];
+        uint8_t packed[M4T_TRIT_PACKED_BYTES(8)];
+        m4t_route_threshold_extract(packed, src, 0, n);
+
+        m4t_trit_t result[8];
+        m4t_unpack_trits_1d(result, packed, n);
+
+        for (int i = 0; i < n; i++) {
+            if (result[i] != expected[i]) {
+                fprintf(stderr,
+                    "FAIL: pack_boundaries n=%d i=%d got %+d expected %+d (line %d)\n",
+                    n, i, (int)result[i], (int)expected[i], __LINE__);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Extreme value coverage: INT64_MAX and INT64_MIN+1 on both sides of
+ * several tau values. Avoids INT64_MIN (per L-RT1A: -INT64_MIN is UB
+ * even though tau ≥ 0 is the documented precondition, values can legally
+ * be any int64; we exclude INT64_MIN from the test because it isn't a
+ * realistic MTFP mantissa anyway and the comparison is well-defined
+ * regardless: INT64_MIN < -tau for any tau ≥ 0, so result is -1). */
+static int test_threshold_extract_extremes(void) {
+    /* tau = 0: sign of INT64_MAX is +1, sign of INT64_MIN+1 is -1. */
+    {
+        int64_t vals[2] = { INT64_MAX, INT64_MIN + 1 };
+        uint8_t packed[M4T_TRIT_PACKED_BYTES(2)];
+        m4t_route_threshold_extract(packed, vals, 0, 2);
+        m4t_trit_t r[2]; m4t_unpack_trits_1d(r, packed, 2);
+        ASSERT_EQ_I32(r[0],  1, "extremes tau=0 INT64_MAX");
+        ASSERT_EQ_I32(r[1], -1, "extremes tau=0 INT64_MIN+1");
+    }
+    /* tau = 1,000,000: same extremes, same expected output. */
+    {
+        int64_t vals[2] = { INT64_MAX, INT64_MIN + 1 };
+        uint8_t packed[M4T_TRIT_PACKED_BYTES(2)];
+        m4t_route_threshold_extract(packed, vals, 1000000, 2);
+        m4t_trit_t r[2]; m4t_unpack_trits_1d(r, packed, 2);
+        ASSERT_EQ_I32(r[0],  1, "extremes tau=1e6 INT64_MAX");
+        ASSERT_EQ_I32(r[1], -1, "extremes tau=1e6 INT64_MIN+1");
+    }
+    /* Also verify INT64_MIN (allowed input value; -tau ≥ 0 so comparison
+     * v < -tau is well-defined for INT64_MIN regardless). */
+    {
+        int64_t vals[1] = { INT64_MIN };
+        uint8_t packed[M4T_TRIT_PACKED_BYTES(1)];
+        m4t_route_threshold_extract(packed, vals, 0, 1);
+        m4t_trit_t r[1]; m4t_unpack_trits_1d(r, packed, 1);
+        ASSERT_EQ_I32(r[0], -1, "extremes tau=0 INT64_MIN");
     }
     return 0;
 }
@@ -124,8 +210,15 @@ static int test_distance_batch(void) {
     return 0;
 }
 
-/* ── topk_abs ──────────────────────────────────────────────────────────── */
+/* ── topk_abs ──────────────────────────────────────────────────────────
+ *
+ * §18 coverage test group — output-side emission coverage for the
+ * decision.sign field of m4t_route_topk_abs. The three test functions
+ * below collectively verify that all three output sign states
+ * ({+1, -1, 0-sentinel}) are emitted under the sanctioned input class. */
 
+/* §18 coverage test: exercises the -1 sign state (two negative-score tiles
+ * selected). Combined with test_topk_abs_all_tiles, covers {+1, -1}. */
 static int test_topk_abs_basic(void) {
     /* T=4 tiles, scores = [3, -7, 1, -5].
      * |scores| = [3, 7, 1, 5].
@@ -142,6 +235,8 @@ static int test_topk_abs_basic(void) {
     return 0;
 }
 
+/* §18 coverage test: exercises the 0-sentinel sign state (fewer nonzero
+ * tiles than k → remaining decisions are sentinels with sign=0). */
 static int test_topk_abs_with_zeros(void) {
     /* T=4, scores = [0, 5, 0, 0], k=3.
      * Only tile 1 has nonzero score. Remaining decisions are sentinels. */
@@ -156,6 +251,8 @@ static int test_topk_abs_with_zeros(void) {
     return 0;
 }
 
+/* §18 coverage test: exercises both +1 and -1 sign states in a single
+ * call (mixed-sign scores, k == T). */
 static int test_topk_abs_all_tiles(void) {
     /* k == T: select all. */
     int32_t scores[3] = { -2, 3, -1 };
@@ -172,8 +269,14 @@ static int test_topk_abs_all_tiles(void) {
     return 0;
 }
 
-/* ── apply_signed ──────────────────────────────────────────────────────── */
+/* ── apply_signed ──────────────────────────────────────────────────────
+ *
+ * §18 coverage test group — input-side emission coverage for
+ * m4t_route_apply_signed. Three-way branch driven by decision.sign:
+ * +1 → add, -1 → sub, 0/sentinel → skip. The two tests together
+ * exercise all three branches. */
 
+/* §18 coverage test: exercises +1 (add) and -1 (sub) branches. */
 static int test_apply_signed(void) {
     /* 2 tiles, dim=4. tile_outs:
      *   tile 0: [10, 20, 30, 40]
@@ -205,6 +308,7 @@ static int test_apply_signed(void) {
     return 0;
 }
 
+/* §18 coverage test: exercises the 0-sentinel (skip) branch. */
 static int test_apply_signed_sentinel(void) {
     /* Decision with tile_idx=-1 is skipped. */
     const int D = 2;
@@ -224,8 +328,13 @@ static int test_apply_signed_sentinel(void) {
     return 0;
 }
 
-/* ── signature_update ──────────────────────────────────────────────────── */
-
+/* ── signature_update ──────────────────────────────────────────────────
+ *
+ * §18 coverage test: compound primitive that internally uses
+ * threshold_extract(tau=0) on col_sum − mean. Sanctioned input class is
+ * integer weight matrices where col_sum-vs-mean can realize exact equality.
+ * Expected signatures below include all three trit states, verifying
+ * coverage end-to-end. */
 static int test_signature_update(void) {
     /* T=2 tiles, H=3 hidden rows, D=4 dims.
      *
@@ -358,6 +467,9 @@ int main(void) {
     if (test_threshold_extract_tau0())             return 1;
     if (test_threshold_extract_tau5())             return 1;
     if (test_threshold_extract_all_within_band())  return 1;
+    if (test_threshold_extract_n_zero())           return 1;
+    if (test_threshold_extract_pack_boundaries())  return 1;
+    if (test_threshold_extract_extremes())         return 1;
     if (test_distance_batch())        return 1;
     if (test_topk_abs_basic())        return 1;
     if (test_topk_abs_with_zeros())   return 1;
