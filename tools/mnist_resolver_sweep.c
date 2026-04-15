@@ -42,8 +42,10 @@
 #define IMG_H 28
 #define N_CLASSES 10
 #define DENSITY 0.33
+#define DENSITY_D50 0.50
+#define DENSITY_D20 0.20
 #define K_RESOLVE 50
-#define N_RESOLVERS 11
+#define N_RESOLVERS 15
 
 static uint32_t read_u32_be(FILE* f) {
     uint8_t b[4]; fread(b,1,4,f);
@@ -159,7 +161,11 @@ static const char* resolver_names[N_RESOLVERS] = {
     "H3 1-NN              ",
     "H2+H3 1-NN           ",
     "per-class nearest H2 ",
-    "H1+H2 rank hybrid    "
+    "H1+H2 rank hybrid    ",
+    "H2+H3+H4 1-NN        ",
+    "H_D50 1-NN           ",
+    "H_D20 1-NN           ",
+    "H2+H_D50 1-NN        "
 };
 
 static void build_signature_set(
@@ -167,6 +173,7 @@ static void build_signature_set(
     const m4t_mtfp_t* x_train, int n_train,
     const m4t_mtfp_t* x_test, int n_test,
     uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3,
+    double density,
     uint8_t** out_train_sigs, uint8_t** out_test_sigs)
 {
     int Sp=M4T_TRIT_PACKED_BYTES(N_proj);
@@ -206,7 +213,7 @@ static void build_signature_set(
                     int64_t v=train_proj[(size_t)i*N_proj+p];
                     buf[(size_t)i*N_proj+p]=(v>=0)?v:-v;
                 }
-            tau_q=tau_for_density(buf,total,DENSITY);
+            tau_q=tau_for_density(buf,total,density);
             free(buf);
         }
 
@@ -233,6 +240,9 @@ static int eval_n_proj(int N_proj,
                        const m4t_mtfp_t* x_train, int n_train, const int* y_train,
                        const m4t_mtfp_t* x_test,  int n_test,  const int* y_test,
                        int* out_correct_per_resolver,
+                       int* out_confusion_3_8,
+                       int* out_confusion_3_5,
+                       int* out_confusion_6_8,
                        int* out_pure_top1,
                        int* out_ceiling_at_K,
                        double* out_seconds)
@@ -240,20 +250,32 @@ static int eval_n_proj(int N_proj,
     clock_t t0 = clock();
     int Sp=M4T_TRIT_PACKED_BYTES(N_proj);
     uint8_t *train_sigs_A, *test_sigs_A, *train_sigs_B, *test_sigs_B, *train_sigs_C, *test_sigs_C;
+    uint8_t *train_sigs_D, *test_sigs_D, *train_sigs_E, *test_sigs_E, *train_sigs_F, *test_sigs_F;
     uint8_t* mask;
     int32_t* dists;
 
+    /* H1 primary, H2/H3 standard-density secondaries, H4 fourth seed,
+     * H_D50 high-density seed, H_D20 low-density seed. */
     build_signature_set(N_proj, x_train, n_train, x_test, n_test,
-                        42, 123, 456, 789, &train_sigs_A, &test_sigs_A);
+                        42, 123, 456, 789, DENSITY, &train_sigs_A, &test_sigs_A);
     build_signature_set(N_proj, x_train, n_train, x_test, n_test,
-                        1337, 2718, 3141, 5923, &train_sigs_B, &test_sigs_B);
+                        1337, 2718, 3141, 5923, DENSITY, &train_sigs_B, &test_sigs_B);
     build_signature_set(N_proj, x_train, n_train, x_test, n_test,
-                        1009, 2017, 3041, 5059, &train_sigs_C, &test_sigs_C);
+                        1009, 2017, 3041, 5059, DENSITY, &train_sigs_C, &test_sigs_C);
+    build_signature_set(N_proj, x_train, n_train, x_test, n_test,
+                        9001, 9002, 9003, 9004, DENSITY, &train_sigs_D, &test_sigs_D);
+    build_signature_set(N_proj, x_train, n_train, x_test, n_test,
+                        5555, 6666, 7777, 8888, DENSITY_D50, &train_sigs_E, &test_sigs_E);
+    build_signature_set(N_proj, x_train, n_train, x_test, n_test,
+                        3141, 5926, 5358, 9793, DENSITY_D20, &train_sigs_F, &test_sigs_F);
 
     mask=malloc(Sp); memset(mask,0xFF,Sp);
     dists=malloc((size_t)n_train*sizeof(int32_t));
 
     memset(out_correct_per_resolver, 0, N_RESOLVERS*sizeof(int));
+    memset(out_confusion_3_8, 0, N_RESOLVERS*sizeof(int));
+    memset(out_confusion_3_5, 0, N_RESOLVERS*sizeof(int));
+    memset(out_confusion_6_8, 0, N_RESOLVERS*sizeof(int));
     *out_pure_top1 = 0;
     *out_ceiling_at_K = 0;
 
@@ -261,10 +283,13 @@ static int eval_n_proj(int N_proj,
         const uint8_t* q_sig_A = test_sigs_A + (size_t)s*Sp;
         const uint8_t* q_sig_B = test_sigs_B + (size_t)s*Sp;
         const uint8_t* q_sig_C = test_sigs_C + (size_t)s*Sp;
+        const uint8_t* q_sig_D = test_sigs_D + (size_t)s*Sp;
+        const uint8_t* q_sig_E = test_sigs_E + (size_t)s*Sp;
+        const uint8_t* q_sig_F = test_sigs_F + (size_t)s*Sp;
         int y = y_test[s];
         int32_t topd[K_RESOLVE];
         int topi[K_RESOLVE];
-        int32_t dB[K_RESOLVE], dC[K_RESOLVE];
+        int32_t dB[K_RESOLVE], dC[K_RESOLVE], dD[K_RESOLVE], dE[K_RESOLVE], dF[K_RESOLVE];
         int pLbl[K_RESOLVE];
         int rankA[K_RESOLVE], rankB[K_RESOLVE];
         int byB[K_RESOLVE];
@@ -294,8 +319,14 @@ static int eval_n_proj(int N_proj,
         for (int j = 0; j < K_RESOLVE; j++) {
             const uint8_t* rB = train_sigs_B + (size_t)topi[j]*Sp;
             const uint8_t* rC = train_sigs_C + (size_t)topi[j]*Sp;
+            const uint8_t* rD = train_sigs_D + (size_t)topi[j]*Sp;
+            const uint8_t* rE = train_sigs_E + (size_t)topi[j]*Sp;
+            const uint8_t* rF = train_sigs_F + (size_t)topi[j]*Sp;
             dB[j] = m4t_popcount_dist(q_sig_B, rB, mask, Sp);
             dC[j] = m4t_popcount_dist(q_sig_C, rC, mask, Sp);
+            dD[j] = m4t_popcount_dist(q_sig_D, rD, mask, Sp);
+            dE[j] = m4t_popcount_dist(q_sig_E, rE, mask, Sp);
+            dF[j] = m4t_popcount_dist(q_sig_F, rF, mask, Sp);
             pLbl[j] = y_train[topi[j]];
             rankA[j] = j;
             byB[j] = j;
@@ -385,12 +416,142 @@ static int eval_n_proj(int N_proj,
             }
             if (bl==y) out_correct_per_resolver[10]++;
         }
+        /* R12: H2+H3+H4 1-NN (triple secondary-hash fusion). */
+        {
+            int32_t b=INT32_MAX; int bl=-1;
+            for(int j=0;j<K_RESOLVE;j++) {
+                int32_t score = dB[j] + dC[j] + dD[j];
+                if(score < b){ b=score; bl=pLbl[j]; }
+            }
+            if (bl==y) out_correct_per_resolver[11]++;
+            if (y==3 && bl==8) out_confusion_3_8[11]++;
+            if (y==3 && bl==5) out_confusion_3_5[11]++;
+            if (y==6 && bl==8) out_confusion_6_8[11]++;
+        }
+        /* R13: H_D50 1-NN (new seed, density 0.50). */
+        {
+            int32_t b=INT32_MAX; int bl=-1;
+            for(int j=0;j<K_RESOLVE;j++) if(dE[j]<b){b=dE[j];bl=pLbl[j];}
+            if (bl==y) out_correct_per_resolver[12]++;
+            if (y==3 && bl==8) out_confusion_3_8[12]++;
+            if (y==3 && bl==5) out_confusion_3_5[12]++;
+            if (y==6 && bl==8) out_confusion_6_8[12]++;
+        }
+        /* R14: H_D20 1-NN (new seed, density 0.20). */
+        {
+            int32_t b=INT32_MAX; int bl=-1;
+            for(int j=0;j<K_RESOLVE;j++) if(dF[j]<b){b=dF[j];bl=pLbl[j];}
+            if (bl==y) out_correct_per_resolver[13]++;
+            if (y==3 && bl==8) out_confusion_3_8[13]++;
+            if (y==3 && bl==5) out_confusion_3_5[13]++;
+            if (y==6 && bl==8) out_confusion_6_8[13]++;
+        }
+        /* R15: H2+H_D50 1-NN (dual-density fusion). */
+        {
+            int32_t b=INT32_MAX; int bl=-1;
+            for(int j=0;j<K_RESOLVE;j++) {
+                int32_t score = dB[j] + dE[j];
+                if(score < b){ b=score; bl=pLbl[j]; }
+            }
+            if (bl==y) out_correct_per_resolver[14]++;
+            if (y==3 && bl==8) out_confusion_3_8[14]++;
+            if (y==3 && bl==5) out_confusion_3_5[14]++;
+            if (y==6 && bl==8) out_confusion_6_8[14]++;
+        }
+
+        /* Confusion tracking for original R1-R11 (recompute winner labels
+         * with inline logic; cheap since we only need the final predicted
+         * label for the three pair counters). */
+        {
+            int pred[11];
+            /* R1: H2 1-NN */
+            {
+                int32_t b=INT32_MAX; int bl=-1;
+                for(int j=0;j<K_RESOLVE;j++) if(dB[j]<b){b=dB[j];bl=pLbl[j];}
+                pred[0]=bl;
+            }
+            /* R2: H1+H2 1-NN */
+            {
+                int32_t b=INT32_MAX; int bl=-1;
+                for(int j=0;j<K_RESOLVE;j++) {
+                    int32_t score = topd[j] + dB[j];
+                    if(score < b){ b=score; bl=pLbl[j]; }
+                }
+                pred[1]=bl;
+            }
+            /* R3-R5: H2 k-NN majority */
+            for (int kchoice=0;kchoice<3;kchoice++) {
+                int kk = (kchoice==0)?3:(kchoice==1)?5:7;
+                int cc[N_CLASSES]={0};
+                for (int j=0;j<kk;j++) cc[pLbl[byB[j]]]++;
+                int p=0; for(int c=1;c<N_CLASSES;c++) if(cc[c]>cc[p]) p=c;
+                pred[2+kchoice]=p;
+            }
+            /* R6: H2 5-NN rank-wt */
+            {
+                int rw[N_CLASSES]={0};
+                for(int j=0;j<5;j++) rw[pLbl[byB[j]]] += (5-j);
+                int p=0; for(int c=1;c<N_CLASSES;c++) if(rw[c]>rw[p]) p=c;
+                pred[5]=p;
+            }
+            /* R7: H2 5-NN dist-wt */
+            {
+                int dw[N_CLASSES]={0};
+                int32_t max_dist = 2*N_proj;
+                for(int j=0;j<5;j++) dw[pLbl[byB[j]]] += (max_dist - dB[byB[j]]);
+                int p=0; for(int c=1;c<N_CLASSES;c++) if(dw[c]>dw[p]) p=c;
+                pred[6]=p;
+            }
+            /* R8: H3 1-NN */
+            {
+                int32_t b=INT32_MAX; int bl=-1;
+                for(int j=0;j<K_RESOLVE;j++) if(dC[j]<b){b=dC[j];bl=pLbl[j];}
+                pred[7]=bl;
+            }
+            /* R9: H2+H3 1-NN */
+            {
+                int32_t b=INT32_MAX; int bl=-1;
+                for(int j=0;j<K_RESOLVE;j++) {
+                    int32_t score = dB[j]+dC[j];
+                    if(score < b){ b=score; bl=pLbl[j]; }
+                }
+                pred[8]=bl;
+            }
+            /* R10: per-class nearest H2 */
+            {
+                int32_t class_best[N_CLASSES];
+                for (int c=0;c<N_CLASSES;c++) class_best[c] = INT32_MAX;
+                for (int j=0;j<K_RESOLVE;j++)
+                    if (dB[j] < class_best[pLbl[j]]) class_best[pLbl[j]] = dB[j];
+                int32_t b=INT32_MAX; int bl=-1;
+                for (int c=0;c<N_CLASSES;c++)
+                    if (class_best[c] < b) { b=class_best[c]; bl=c; }
+                pred[9]=bl;
+            }
+            /* R11: H1+H2 rank hybrid */
+            {
+                int b_score=1<<30; int bl=-1;
+                for (int j=0;j<K_RESOLVE;j++) {
+                    int score = rankA[j] + rankB[j];
+                    if (score < b_score) { b_score=score; bl=pLbl[j]; }
+                }
+                pred[10]=bl;
+            }
+            for (int r = 0; r < 11; r++) {
+                if (y==3 && pred[r]==8) out_confusion_3_8[r]++;
+                if (y==3 && pred[r]==5) out_confusion_3_5[r]++;
+                if (y==6 && pred[r]==8) out_confusion_6_8[r]++;
+            }
+        }
     }
 
     free(dists); free(mask);
     free(train_sigs_A); free(test_sigs_A);
     free(train_sigs_B); free(test_sigs_B);
     free(train_sigs_C); free(test_sigs_C);
+    free(train_sigs_D); free(test_sigs_D);
+    free(train_sigs_E); free(test_sigs_E);
+    free(train_sigs_F); free(test_sigs_F);
     *out_seconds = (double)(clock()-t0)/CLOCKS_PER_SEC;
     return n_test;
 }
@@ -420,22 +581,26 @@ int main(int argc, char** argv) {
 
         for (int k = 0; k < nN; k++) {
             int N_proj = N_projs[k];
-            int correct[N_RESOLVERS], pure_top1, ceiling_at_K;
+            int correct[N_RESOLVERS];
+            int conf_3_8[N_RESOLVERS], conf_3_5[N_RESOLVERS], conf_6_8[N_RESOLVERS];
+            int pure_top1, ceiling_at_K;
             double secs;
             int n = eval_n_proj(N_proj, x_train, n_train, y_train, x_test, n_test, y_test,
-                                correct, &pure_top1, &ceiling_at_K, &secs);
+                                correct, conf_3_8, conf_3_5, conf_6_8,
+                                &pure_top1, &ceiling_at_K, &secs);
             printf("--- N_PROJ = %d --------------------------------------\n", N_proj);
             printf("pure top-1:  %.2f%%    ceiling@%d:  %.2f%%    (%.1fs)\n",
                    100.0*pure_top1/n, K_RESOLVE, 100.0*ceiling_at_K/n, secs);
-            printf("  #   resolver                    accuracy    Delta vs H1+H2\n");
+            printf("  #   resolver                    accuracy    Delta vs H1+H2    3->8  3->5  6->8\n");
             {
                 double baseline = 100.0*correct[1]/n;
                 for (int r = 0; r < N_RESOLVERS; r++) {
                     double acc = 100.0*correct[r]/n;
                     double delta = acc - baseline;
                     char marker = (acc > baseline + 0.005) ? '+' : (acc < baseline - 0.005) ? '-' : '=';
-                    printf("  R%-2d %s   %6.2f%%    %c %+.2f%%\n",
-                           r+1, resolver_names[r], acc, marker, delta);
+                    printf("  R%-2d %s   %6.2f%%    %c %+.2f%%        %4d  %4d  %4d\n",
+                           r+1, resolver_names[r], acc, marker, delta,
+                           conf_3_8[r], conf_3_5[r], conf_6_8[r]);
                 }
             }
             printf("\n");
