@@ -103,6 +103,18 @@ Third-round red-team remediation on commit `ea0e519`. Six findings; four execute
 - **Added §18 to `m4t/docs/M4T_SUBSTRATE.md`:** "Base-3 native: emission coverage and the review gate." Single-part, behavioral, per-(primitive, input-distribution)-pair criterion. Review gate requires every new primitive to ship with enumerated output space, sanctioned input-class contract, and a coverage test.
 - **Spec history:** derived from two LMM cycles in journal/ (`base3_native_criterion_*` and `updated_model_scrutiny_*`). The first cycle produced a two-part criterion (C-sub + C-con); the scrutiny meta-cycle found the two parts collapsed structurally and converged on single-part emission coverage.
 
+### Measured (τ sweep on the fully-routed MNIST classifier)
+
+First experiment that empirically distinguishes a §18-failing deployment from §18-passing deployments on the same routing primitive. tools/mnist_routed_lattice.c now sweeps τ ∈ {0, 10K, 50K, 200K, 1M} for each N_PROJ.
+
+- **At every N_PROJ, three-state routing (τ > 0, §18-passing) loses to sign-only routing (τ = 0, §18-failing).** The gap grows with τ; at τ=1M the band swallows everything and accuracy collapses to chance (9.80% ≈ 10% random).
+- **Best-case routed accuracy is 58.37%** (τ = 0, N_PROJ = 2048) — unchanged from the prior measurement; bit-for-bit reproduction.
+- **L1-over-mantissa baseline still at 81.40%** (N_PROJ = 2048).
+- **§18 is a utilization criterion, not a quality criterion.** A primitive can be properly base-3-deployed AND produce worse downstream accuracy than a base-2-degenerate deployment, if the task's discriminative signal lives in a representation the three-way primitive throws away. MNIST's signal is in projection magnitudes; widening the band suppresses that signal.
+- **NORTH_STAR §4 confirmed empirically** ("Running routing-native on [MNIST] is a test of adapter efficiency, not the thesis"). The most §18-correct routing deployment loses to dense by ~25 points.
+
+Full writeup: `journal/tau_sweep_routed_mnist.md`.
+
 ### Measured (fully-routed MNIST classifier)
 
 - **New consumer: `tools/mnist_routed_lattice.c`.** First tool that exercises the full routing surface (`m4t_route_sign_extract` + `m4t_route_distance_batch` + `m4t_route_topk_abs`) end-to-end.

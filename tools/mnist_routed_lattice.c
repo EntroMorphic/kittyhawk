@@ -127,52 +127,65 @@ int main(int argc, char** argv) {
             for(int p=0;p<N_PROJ;p++)
                 centroids[(size_t)c*N_PROJ+p]=(m4t_mtfp_t)(class_sums[(size_t)c*N_PROJ+p]/class_counts[c]);
 
-        /* Build per-class packed-trit signatures:
-         *   sig[c][p] = sign(centroid[c][p] - mean_over_classes(centroid[*,p]))
-         * Mean-subtract normalizes out dims where every class is consistently
-         * positive or negative (they contribute zero discrimination). */
-        int Sp=M4T_TRIT_PACKED_BYTES(N_PROJ);
-        uint8_t* class_sigs=calloc((size_t)N_CLASSES*Sp,1);
-        {
-            int64_t* dim_mean=calloc((size_t)N_PROJ,sizeof(int64_t));
-            for(int c=0;c<N_CLASSES;c++)
-                for(int p=0;p<N_PROJ;p++)
-                    dim_mean[p]+=(int64_t)centroids[(size_t)c*N_PROJ+p];
-            for(int p=0;p<N_PROJ;p++) dim_mean[p]/=N_CLASSES;
+        /* ── tau sweep: emission-coverage failing (tau=0) vs passing (tau>0) ──
+         *
+         * Per M4T_SUBSTRATE §18, threshold_extract(tau=0) on MTFP projection
+         * outputs FAILS emission coverage — the zero state is measure-zero
+         * for continuous-valued projections. tau>0 introduces a magnitude
+         * band ("weak projection response → 0 trit"), which IS three-state
+         * for any tau where some projection magnitudes fall on each side.
+         *
+         * Sweep covers tau=0 (the prior failing baseline) plus four tau>0
+         * values spanning roughly two orders of magnitude — meaningful
+         * width given M4T_MTFP_SCALE=59049 and projection magnitudes that
+         * scale with INPUT_DIM=784. */
+        const int64_t TAU_VALUES[] = { 0, 10000, 50000, 200000, 1000000 };
+        const int N_TAUS = (int)(sizeof(TAU_VALUES) / sizeof(TAU_VALUES[0]));
 
+        /* Mean-subtract centroids once (shared across tau values). */
+        int Sp=M4T_TRIT_PACKED_BYTES(N_PROJ);
+        int64_t* dim_mean=calloc((size_t)N_PROJ,sizeof(int64_t));
+        for(int c=0;c<N_CLASSES;c++)
+            for(int p=0;p<N_PROJ;p++)
+                dim_mean[p]+=(int64_t)centroids[(size_t)c*N_PROJ+p];
+        for(int p=0;p<N_PROJ;p++) dim_mean[p]/=N_CLASSES;
+
+        /* For each tau, build N_CLASSES packed-trit class signatures. */
+        uint8_t* class_sigs_per_tau=calloc((size_t)N_TAUS*N_CLASSES*Sp,1);
+        {
             int64_t* diff=malloc((size_t)N_PROJ*sizeof(int64_t));
-            for(int c=0;c<N_CLASSES;c++){
-                for(int p=0;p<N_PROJ;p++)
-                    diff[p]=(int64_t)centroids[(size_t)c*N_PROJ+p]-dim_mean[p];
-                /* tau=0 here is the sign-only degenerate of threshold_extract.
-                 * The centroid - mean inputs are integer differences that can
-                 * hit exact zero, so emission coverage is borderline-sanctioned
-                 * on this deployment. Switching to tau>0 is a candidate for
-                 * follow-up experimentation. */
-                m4t_route_threshold_extract(class_sigs+(size_t)c*Sp,diff,0,N_PROJ);
+            for(int ti=0; ti<N_TAUS; ti++){
+                for(int c=0;c<N_CLASSES;c++){
+                    for(int p=0;p<N_PROJ;p++)
+                        diff[p]=(int64_t)centroids[(size_t)c*N_PROJ+p]-dim_mean[p];
+                    m4t_route_threshold_extract(
+                        class_sigs_per_tau + ((size_t)ti*N_CLASSES + c)*Sp,
+                        diff, TAU_VALUES[ti], N_PROJ);
+                }
             }
-            free(diff); free(dim_mean);
+            free(diff);
         }
+        free(dim_mean);
 
         /* Active-bit mask: all trits participate. */
         uint8_t* mask=malloc(Sp); memset(mask,0xFF,Sp);
 
-        /* ── Inference loop: L1-over-mantissa vs routed-popcount, same imgs ── */
+        /* ── Inference: L1 once + routed per-tau ──────────────────────────── */
 
         m4t_mtfp_t* test_proj_buf=malloc((size_t)N_PROJ*sizeof(m4t_mtfp_t));
         int64_t* query_i64=malloc((size_t)N_PROJ*sizeof(int64_t));
         uint8_t* query_sig=malloc(Sp);
         int32_t dists[N_CLASSES];
 
-        int correct_l1=0, correct_routed=0;
+        int correct_l1=0;
+        int* correct_routed=calloc((size_t)N_TAUS, sizeof(int));
 
-        /* Time projection step (shared) */
         clock_t t0=clock();
         for(int s=0;s<n_test;s++){
             const m4t_mtfp_t* img=x_test+(size_t)s*INPUT_DIM;
             m4t_mtfp_ternary_matmul_bt(test_proj_buf,img,proj_packed,1,INPUT_DIM,N_PROJ);
 
-            /* L1-over-mantissa classification (dense decision step). */
+            /* L1-over-mantissa (tau-independent). */
             int pred_l1=0; int64_t best_l1=INT64_MAX;
             for(int c=0;c<N_CLASSES;c++){
                 int64_t d=0;
@@ -185,44 +198,45 @@ int main(int argc, char** argv) {
             }
             if(pred_l1==y_test[s]) correct_l1++;
 
-            /* Routed classification: threshold_extract(tau=0) query → popcount
-             * distance → topk_abs picks the class with the largest affinity
-             * (= smallest distance, mapped via score = MAX - dist).
-             *
-             * Emission-coverage note: tau=0 on MTFP19 projection outputs
-             * produces a sign-only classification in practice (zero state is
-             * measure-zero for continuous-valued projections). This deployment
-             * does NOT pass emission coverage per M4T_SUBSTRATE §18; the 58%
-             * accuracy measured in journal/fully_routed_mnist.md is the
-             * resulting binary-shape limit. A tau>0 variant is the candidate
-             * follow-up experiment. */
+            /* Routed-per-tau. Project once, query-extract per tau. */
             for(int p=0;p<N_PROJ;p++) query_i64[p]=(int64_t)test_proj_buf[p];
-            m4t_route_threshold_extract(query_sig,query_i64,0,N_PROJ);
-            m4t_route_distance_batch(dists,query_sig,class_sigs,mask,N_CLASSES,N_PROJ);
-
-            /* Map distance → affinity score so topk_abs picks the minimum. */
-            int32_t scores[N_CLASSES];
             int32_t max_dist=2*N_PROJ;  /* 2 bits per trit, all may differ */
-            for(int c=0;c<N_CLASSES;c++) scores[c]=max_dist-dists[c];
+            for(int ti=0; ti<N_TAUS; ti++){
+                m4t_route_threshold_extract(query_sig,query_i64,TAU_VALUES[ti],N_PROJ);
+                m4t_route_distance_batch(
+                    dists, query_sig,
+                    class_sigs_per_tau + (size_t)ti*N_CLASSES*Sp,
+                    mask, N_CLASSES, N_PROJ);
 
-            m4t_route_decision_t decision;
-            m4t_route_topk_abs(&decision,scores,N_CLASSES,1);
-            int pred_r = decision.tile_idx;
-            if(pred_r<0) pred_r=0;  /* sentinel fallback (no nonzero score) */
-            if(pred_r==y_test[s]) correct_routed++;
+                int32_t scores[N_CLASSES];
+                for(int c=0;c<N_CLASSES;c++) scores[c]=max_dist-dists[c];
+
+                m4t_route_decision_t decision;
+                m4t_route_topk_abs(&decision,scores,N_CLASSES,1);
+                int pred_r = decision.tile_idx;
+                if(pred_r<0) pred_r=0;  /* sentinel fallback */
+                if(pred_r==y_test[s]) correct_routed[ti]++;
+            }
         }
         clock_t t1=clock();
         double total_ms=1000.0*(double)(t1-t0)/CLOCKS_PER_SEC;
 
         printf("  L1-over-mantissa (dense decision):       %d/%d = %d.%02d%%\n",
                correct_l1,n_test,correct_l1*100/n_test,(correct_l1*10000/n_test)%100);
-        printf("  Routed (threshold_extract tau=0 + VCNT): %d/%d = %d.%02d%%\n",
-               correct_routed,n_test,correct_routed*100/n_test,(correct_routed*10000/n_test)%100);
-        printf("  Inference (both paths, %d images):  %.0f ms\n\n",
-               n_test, total_ms);
+        for(int ti=0; ti<N_TAUS; ti++){
+            const char* coverage = (TAU_VALUES[ti] == 0) ? "FAIL §18" : "pass §18";
+            printf("  Routed tau=%-7lld [%s]:           %d/%d = %d.%02d%%\n",
+                   (long long)TAU_VALUES[ti], coverage,
+                   correct_routed[ti], n_test,
+                   correct_routed[ti]*100/n_test,
+                   (correct_routed[ti]*10000/n_test)%100);
+        }
+        printf("  Inference (L1 + %d tau values, %d images):  %.0f ms\n\n",
+               N_TAUS, n_test, total_ms);
 
         free(test_proj_buf); free(query_i64); free(query_sig);
-        free(class_sigs); free(mask); free(centroids); free(class_sums); free(train_proj);
+        free(class_sigs_per_tau); free(correct_routed); free(mask);
+        free(centroids); free(class_sums); free(train_proj);
         free(proj_w); free(proj_packed);
     }
 
