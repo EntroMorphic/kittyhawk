@@ -1,6 +1,6 @@
 ---
 title: Findings — Glyph / M4T Rebuild
-status: As of 2026-04-14 (post fourth-round fair-comparison remediation + inspectability demo)
+status: As of 2026-04-15 (cascade atomics + resolver-ceiling sweep)
 companion-docs: NORTH_STAR.md · docs/THESIS.md · CHANGELOG.md · m4t/docs/M4T_SUBSTRATE.md
 ---
 
@@ -16,7 +16,9 @@ Trit Lattice LSH k-NN on the rebuilt M4T substrate, deskewed MNIST, N_PROJ=2048,
 |---|---|
 | **Accuracy (N_PROJ=2048, majority k=3)** | 97.79 ± 0.05% |
 | **Accuracy (N_PROJ=2048, rank-weighted k=5)** | 97.86 ± 0.01% |
-| **Accuracy (N_PROJ=4096, rank-weighted k=5 — current best)** | **97.99 ± 0.01%** |
+| **Accuracy (N_PROJ=4096, rank-weighted k=5 — pure-signature best)** | **97.99 ± 0.01%** |
+| **Accuracy (N_PROJ=16 cascade — filter + pixel-L2 1-NN, K=50)** | **90.75% (single seed)** |
+| **Accuracy (N_PROJ=16 cascade, K=100)** | **92.72%** — 30-point lift over pure-signature majority at same N_PROJ |
 | **Accuracy scaling curve (N_PROJ=2 to 8192)** | Sigmoid in log-space; saturates at 8192 (+0.01% for 2× compute). Throughput peak at N_PROJ=64 (11 000 queries/sec, 92% accuracy). See `journal/full_scaling_curve.md`. |
 | **Speed (N_PROJ=2048)** | 7.0 s for 10K × 60K k-NN queries — 20.3× faster than NEON-vectorized dense L1 over the same projections |
 | **Inspectability** | Per-classification audit trail — structurally unavailable to dense k-NN |
@@ -125,6 +127,92 @@ Errors cluster at the quantization boundary, not at semantic opposition. The rou
 
 Dense L1 cannot surface this observation. The distance is a sum of absolute magnitudes; "kind of disagreement" isn't preserved through the sum.
 
+## Axis 4 — Cascade architecture (filter-ranker decomposition)
+
+Added 2026-04-15. The atomic probe at N_PROJ=16 exposed that the Trit Lattice signature plays two different roles with two different accuracies, and the pure-signature-k-NN benchmark had been reading only the weaker one.
+
+### The finding in one table
+
+At N_PROJ=16, deskewed MNIST, single seed:
+
+| Signature role | Accuracy |
+|---|---|
+| Classifier (pure k=7 majority) | 62.00% |
+| Filter — correct class in top-50 | **98.59%** |
+| Filter + pixel-L2 1-NN resolver (K=50) | **90.75%** |
+| Filter + pixel-L2 1-NN resolver (K=100) | **92.72%** |
+
+The 16-bit hash preserves **neighborhood membership** at 98.59% while getting top-1 correct only 55.48% of the time. Voting reads the destroyed rank information; a cascade reads the preserved set membership.
+
+### Rescue/damage at K=50
+
+| | cascade right | cascade wrong |
+|---|---|---|
+| pure-hash top-1 right | 5407 | 141 |
+| pure-hash top-1 wrong | **3668** | 784 |
+
+Rescue : damage ratio = **26 : 1** (3668 rescued vs 141 damaged).
+
+### Hash-rank distribution of cascade's correct picks
+
+| hash-rank of cascade's correct pick | fraction |
+|---|---|
+| rank 1 | 4.26% |
+| ranks 3–5 | 8.89% |
+| ranks 6–10 | 12.44% |
+| ranks 11–20 | 19.93% |
+| **ranks 21–50** | **50.72%** |
+
+Over half of cascade's correct picks live in hash-ranks 21-50. The hash places correct prototypes in the neighborhood; it does not rank them. Pixel L2 does the ranking.
+
+### Sweep across N_PROJ (crossover)
+
+Single seed, K_RESOLVE=50, density=0.33:
+
+| N_PROJ | pure maj | cascade L2 | Δ |
+|---|---|---|---|
+| 8    | 38.74% | **82.61%** | **+43.87%** |
+| 16   | 62.00% | 90.75% | +28.75% |
+| 32   | 80.75% | 95.04% | +14.29% |
+| 64   | 91.55% | 96.65% | +5.10% |
+| 128  | 95.22% | 97.28% | +2.06% |
+| 256  | 96.56% | 97.51% | +0.95% |
+| 512  | 97.06% | 97.57% | +0.51% |
+| 1024 | 97.43% | 97.58% | +0.15% |
+| **4096** | **97.65%** | **97.57%** | **−0.08%** |
+
+Cascade gain decays monotonically. Practical crossover at N_PROJ=512. First negative gain at N_PROJ=4096.
+
+### Two independent ceilings
+
+- **Filter ceiling:** correct class in top-50 saturates at 99.87-99.90% by N_PROJ=64.
+- **Resolver ceiling:** pixel-L2 1-NN accuracy saturates at **97.57%** regardless of how accurate the filter becomes. From N_PROJ=512 through 4096, cascade is effectively flat at 97.57-97.58%.
+
+Cascade accuracy factorizes cleanly as `filter_presence × conditional_resolver_rate ≈ 99.87% × 97.7% ≈ 97.6%`.
+
+### Cost-accuracy implication
+
+| Cascade at | matches pure at |
+|---|---|
+| N_PROJ=8 | ≈ N_PROJ=32 |
+| N_PROJ=16 | ≈ N_PROJ=64 |
+| N_PROJ=32 | ≈ N_PROJ=256 |
+| N_PROJ=64 | ≈ N_PROJ=2048 |
+| N_PROJ=128 | near full-cascade ceiling |
+
+Cascade buys approximately **one octave of N_PROJ** at small scales before saturating at the resolver ceiling.
+
+### Why earlier amplification failed
+
+The amplification experiment (`journal/amplification_negative_result.md`) ran pixel k-NN over the full 60 000 unfiltered prototypes and gained nothing. The reason is now visible: within a filtered top-50 pool, the correct-class prototype is on average **33% pixel-closer** than the nearest wrong-class prototype (relative margin +0.3255). That margin exists *because* the filter has removed most wrong-class mass. Pixel distance is not a classifier — it is a ranker that needs a filter to feed it.
+
+### Architectural rules (updated)
+
+1. Use cascade whenever N_PROJ ≤ 128 (gain ≥ 2 percentage points).
+2. Cascade is a wash at N_PROJ ≥ 512.
+3. To exceed the cascade ceiling (97.57% on deskewed MNIST with pixel-L2), change the **resolver**, not the filter.
+4. Benchmark a coarse hash by its **ceiling at top-K**, not by its classifier accuracy. Classifier accuracy under-reports what the hash can enable.
+
 ## What we got right, what we got wrong
 
 The path from 58% to 97.79% was not a single experiment; it was a sequence of corrections. Recording them for future sessions that might face similar hazards.
@@ -151,6 +239,7 @@ These hold on the measurements as recorded:
 - **Hardware-native throughput holds up under fair comparison.** 20.3× speedup at N_PROJ=2048 against NEON-vectorized dense L1 — not a scalar-baseline artifact.
 - **Inspectability is structural, not bolted on.** The per-trit decomposition comes free from the popcount primitive's integer sum structure. No extra work was added to the substrate to produce the audit trail.
 - **The 58% → 97.79% progression identifies three distinct error classes** (centroid architecture, asymmetric τ, single-RNG single-baseline) — each one's fix is documented and reproducible.
+- **The Trit Lattice signature is a lossy locality hash, not a classifier.** Ceiling@50 = 98.6% at N_PROJ=16; top-1 = 55.5%. Voting reads the destroyed rank information; the cascade reads the preserved set membership. Verified by rescue/damage 26:1, by hash-rank distribution of cascade's correct picks (50.7% in ranks 21-50), and by the N_PROJ crossover sweep. See `journal/cascade_atomics_mechanism.md` and `journal/cascade_sweep_crossover.md`.
 
 ## Unverified / qualified claims
 
@@ -226,6 +315,13 @@ SEEDS[N_SEEDS][4] = {
 ### For the substrate
 - `m4t/docs/M4T_SUBSTRATE.md` — canonical 18-section spec. §18 is the base-3-native criterion.
 - `m4t/README.md` — live surface inventory.
+
+### For the cascade architecture (Axis 4)
+- `journal/nproj16_atomic_mechanism.md` — atomic probe at N_PROJ=16; partition asymmetry explains vote-rule inversion.
+- `journal/nproj16_to_90_{raw,nodes,reflect,synthesize}.md` — LMM cycle on "can N_PROJ=16 reach 90%?" — the filter-ranker reframe.
+- `journal/nproj16_cascade_result.md` — cascade at N_PROJ=16 hits 92.72%.
+- `journal/cascade_atomics_mechanism.md` — decomposition of why cascade works; rescue:damage 26:1; hash-rank distribution.
+- `journal/cascade_sweep_crossover.md` — cascade across N_PROJ; crossover at 512; pixel-L2 resolver ceiling at 97.57%.
 
 ### For the detailed experimental record
 - `journal/routed_knn_mnist.md` — the k-NN wins, with "Revised after fourth red-team" section.

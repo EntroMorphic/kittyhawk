@@ -304,6 +304,95 @@ Full writeup: `journal/tau_sweep_routed_mnist.md`.
 - Reading: the routing primitives produce arithmetically-correct results; the accuracy gap is an adapter-efficiency artifact of sign-extracting 19-trit mantissas into 1-trit signatures on a task (MNIST nearest-centroid) whose signal lives in magnitudes. Consistent with NORTH_STAR §4: "Running routing-native on [MNIST] is a test of adapter efficiency, not the thesis."
 - Full writeup: `journal/fully_routed_mnist.md`.
 
+### N_PROJ=16 atomic probe — vote-rule inversion explained
+
+New consumer: `tools/mnist_probe_nproj16.c`. At N_PROJ=16 the complete scaling curve showed majority beating rank-weighted — reversing the pattern at higher N_PROJ. Probe decomposed the mechanism.
+
+- **52% of queries have an exact signature match** (min Hamming = 0). 97% have min_d ≤ 2 bits. Tied-at-top-1 set averages ~4-10 prototypes with 2.10 distinct classes.
+- **Correct-class location partition:** 75.85% tied-min, 15.62% elsewhere top-10, 8.53% nowhere.
+- **Partition asymmetry:** rank-wt wins tied-min by +0.99% and loses elsewhere by −5.89%. Weighted sum matches the observed aggregate gap exactly (−0.17%). Both vote rules are near-Bayes-optimal on their own partition; neither is globally better.
+- Predicted adaptive voting (`tied_count ≥ 2 → rank-wt, else majority`) at +0.75% aggregate gain.
+- Full writeup: `journal/nproj16_atomic_mechanism.md`.
+
+### LMM cycle — "can N_PROJ=16 reach 90%?" → filter-ranker reframe
+
+Full four-file LMM cycle on whether >90% is attainable at N_PROJ=16. Core insight: the 16-bit hash has been asked to do two jobs simultaneously — filter candidates AND classify them — and voting is the wrong primitive for the second job. Voting reads rank information the hash has destroyed; the hash preserves set membership, which a *resolver* can read directly.
+
+- Cycle files: `journal/nproj16_to_90_{raw,nodes,reflect,synthesize}.md`.
+- Synthesized prediction: cascade architecture (16-bit hash as primary filter, pixel-L2 1-NN resolver over top-K) reaches 85-91%.
+
+### Cascade at N_PROJ=16 — 92.72% on 16-bit hash
+
+New consumer: `tools/mnist_cascade_nproj16.c`. Implements the LMM's predicted cascade (E1-E5) in a single pass.
+
+**Headline (single seed, deskewed MNIST, density=0.33):**
+
+| K | pure-hash majority | cascade L1 1-NN | cascade L2 1-NN |
+|---|---|---|---|
+| 20 | 64.14% | 85.74% | 86.40% |
+| **50** | 63.31% | 90.15% | **90.75%** |
+| **100** | 63.00% | 92.27% | **92.72%** |
+
+Ceiling at top-100: 99.50%. LMM prediction of 87-91% validated; stretch goal of 90% exceeded.
+
+**Controlled variants at K=20:**
+- Pixel-L1 3-NN majority: 82.38% — voting at the resolver stage hurts.
+- Partition-aware (singleton → top-1, else L1 resolve): 78.50% — singletons are unreliable; apply resolver uniformly.
+- Secondary-hash (different seed) Hamming 1-NN: 74.84% — quantifies "more bits" vs "pixel access" contribution.
+
+Takeaway: roughly half the cascade gain comes from "more bits" (secondary hash gets to 74.84%), the other half from pixel-signal access (gets to 85.74%). To cross 90% the resolver must include pixel access.
+
+Full writeup: `journal/nproj16_cascade_result.md`.
+
+### Cascade atomic decomposition — hash is filter, not ranker
+
+New consumer: `tools/mnist_cascade_atomics.c`. Dissects *why* the cascade gained +30 percentage points.
+
+**The single explanatory fact:** at N_PROJ=16 the hash preserves neighborhood membership at 98.59% (correct class in top-50) while getting top-1 correct only 55.48% of the time. 43-point gap. The hash is a filter with destroyed ranking.
+
+**Rescue/damage at K=50:** 3668 queries rescued (pure-hash top-1 wrong → cascade right), 141 damaged (reverse). Ratio **26 : 1**.
+
+**Hash-rank distribution of cascade's correct picks:** only 4.26% come from hash-rank 1; **50.72% come from hash-ranks 21–50**. The hash places correct prototypes in the candidate pool; pixel L2 finds them wherever they sit.
+
+**Per-partition cascade accuracy:**
+- Tied-min partition: **95.96%** (was 77.65% under rank-wt — +18 points).
+- Elsewhere-in-top-10: **86.94%** (was 24.65% under majority — +62 points).
+- Nowhere-in-top-10: 54.62% (rescued because K=50 is wider than probe's top-10 window).
+
+**Pixel-distance margin within top-50:** correct class is on average **33% pixel-closer** than nearest-wrong class (relative margin +0.3255). The margin exists *because* the filter has removed most wrong-class mass — explains why earlier amplification over unfiltered 60K failed.
+
+**Class-pair confusion:** digit 0 was the hash's error sink (five of the top eight improved pairs involve class 0). Ternary popcount homogenizes blob-shaped digits; pixel L2 separates shapes. Total damage across all worst regressions: 11 queries. Asymmetric by two orders of magnitude.
+
+Full writeup: `journal/cascade_atomics_mechanism.md`.
+
+### Cascade sweep across N_PROJ — crossover at 512, resolver ceiling at 97.57%
+
+New consumer: `tools/mnist_cascade_sweep.c`. Verified the atomic prediction that cascade headroom shrinks as N_PROJ grows.
+
+| N_PROJ | pure maj | cascade | Δ |
+|---|---|---|---|
+| 8 | 38.74% | 82.61% | **+43.87%** |
+| 16 | 62.00% | 90.75% | +28.75% |
+| 32 | 80.75% | 95.04% | +14.29% |
+| 64 | 91.55% | 96.65% | +5.10% |
+| 128 | 95.22% | 97.28% | +2.06% |
+| 256 | 96.56% | 97.51% | +0.95% |
+| 512 | 97.06% | 97.57% | +0.51% |
+| 1024 | 97.43% | 97.58% | +0.15% |
+| **4096** | **97.65%** | **97.57%** | **−0.08%** |
+
+**Two new findings:**
+
+1. **Practical crossover at N_PROJ=512.** Below 512, cascade adds measurable accuracy; above 512 it adds ≤ 0.5 points. First *negative* gain appears at N_PROJ=4096 (pixel-L2 misranks a few queries the filter had placed correctly at top-1).
+
+2. **The resolver has its own ceiling — 97.57%.** Cascade accuracy plateaus at 97.57-97.58% from N_PROJ=512 through 4096, regardless of how accurate the filter becomes. The factorization `cascade = filter_presence × conditional_resolver_rate ≈ 99.87% × 97.7% ≈ 97.6%` is quantitatively exact. To push past 97.57% on deskewed MNIST, the resolver must change (richer metric, learned comparator, convolutional features); more bits in the filter won't help.
+
+**Cost-accuracy consequence:** N_PROJ=8 cascade (82.61%) beats pure N_PROJ=32 (80.75%). Cascade buys approximately one octave of N_PROJ at small scales. N_PROJ=64 cascade (96.65%) matches pure N_PROJ=2048 at 1/32 the hash cost.
+
+Architectural rule added to `docs/FINDINGS.md` Axis 4: use cascade when N_PROJ ≤ 128, wash at N_PROJ ≥ 512, change resolver to exceed 97.57%.
+
+Full writeup: `journal/cascade_sweep_crossover.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.
