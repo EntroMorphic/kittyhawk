@@ -1,12 +1,16 @@
 ---
 title: Findings — Glyph / M4T Rebuild
-status: As of 2026-04-15 (cascade atomics + resolver-ceiling sweep)
+status: As of 2026-04-15 (routed-resolver rerun completed; dense-resolver cascade kept as historical context)
 companion-docs: NORTH_STAR.md · docs/THESIS.md · CHANGELOG.md · m4t/docs/M4T_SUBSTRATE.md
 ---
 
 # Findings
 
-Consolidated results from the ground-zero rebuild through the inspectability demonstration. NORTH_STAR holds the vision; THESIS holds the falsification criteria; CHANGELOG holds the commit-by-commit trail; the `journal/` directory holds the research cycles. This file is the distilled "what did the measurements tell us" layer.
+Consolidated results from the ground-zero rebuild through the last completed MNIST rerun before the routed-resolver conversion. NORTH_STAR holds the vision; THESIS holds the falsification criteria; CHANGELOG holds the commit-by-commit trail; the `journal/` directory holds the research cycles. This file is the distilled "what did the measurements tell us" layer.
+
+The cascade architecture (Axis 4) has two layers of measurements in this document:
+- A historical section covering the dense-resolver cascade that first validated the filter-ranker reframe.
+- A routed-rerun section covering the same experiments after the sixth-round remediation converted all resolvers to routing primitives. Both are reported side by side so the mechanism story is legible without smuggling in dense signal.
 
 ## Summary (30 seconds)
 
@@ -127,9 +131,9 @@ Errors cluster at the quantization boundary, not at semantic opposition. The rou
 
 Dense L1 cannot surface this observation. The distance is a sum of absolute magnitudes; "kind of disagreement" isn't preserved through the sum.
 
-## Axis 4 — Cascade architecture (filter-ranker decomposition)
+## Axis 4 — Cascade architecture (historical filter-ranker decomposition)
 
-Added 2026-04-15. The atomic probe at N_PROJ=16 exposed that the Trit Lattice signature plays two different roles with two different accuracies, and the pure-signature-k-NN benchmark had been reading only the weaker one.
+Added 2026-04-15. Historical note: this axis summarizes the last completed dense-resolver cascade measurements before the sixth remediation round converted the live cascade architecture to routed resolvers. The atomic probe at N_PROJ=16 exposed that the Trit Lattice signature plays two different roles with two different accuracies, and the pure-signature-k-NN benchmark had been reading only the weaker one.
 
 ### The finding in one table
 
@@ -213,6 +217,94 @@ The amplification experiment (`journal/amplification_negative_result.md`) ran pi
 3. To exceed the cascade ceiling (97.57% on deskewed MNIST with pixel-L2), change the **resolver**, not the filter.
 4. Benchmark a coarse hash by its **ceiling at top-K**, not by its classifier accuracy. Classifier accuracy under-reports what the hash can enable.
 
+### Status after routed-resolver conversion
+
+The live cascade tools (`tools/mnist_cascade_nproj16.c`, `tools/mnist_cascade_sweep.c`, `tools/mnist_cascade_atomics.c`, `tools/mnist_resolver_sweep.c`) no longer use pixel-L2 or any other dense resolver. The tables above remain historically useful because they explain *why* the cascade worked; the tables below are the literal description of the current implementation.
+
+## Axis 4b — Cascade architecture (routed rerun)
+
+Added 2026-04-15 after the sixth-round dense→routed conversion. Same cascade structure, same primary 16-bit hash, but the resolver stage now uses additional routing primitives — a second 16-bit hash with an independent seed (H2), a third (H3), or dual/triple-hash fusions. No pixel or centroid access remains on the classifier path.
+
+### The finding in one table (routed cascade, deskewed MNIST, density=0.33, single seed)
+
+| Signature role | Accuracy |
+|---|---|
+| Classifier (pure k=7 majority at N_PROJ=16) | 62.00% |
+| Filter — correct class in top-50 | 98.59% |
+| Filter + routed H2 1-NN resolver (K=50) | **77.33%** |
+| Filter + routed H2 1-NN resolver (K=100) | 78.47% |
+| Filter + routed H2+H3 1-NN fusion (K=20, best small-N_PROJ resolver) | **81.35%** |
+
+Filter-ranker reframe holds. +15 points over pure-hash majority using nothing but signature operations on the 16-bit lattice. Triple-hash fusion adds another +4 points at small N_PROJ.
+
+### Routed cascade across N_PROJ (H2 1-NN baseline, K_RESOLVE=50)
+
+| N_PROJ | pure maj | routed cascade | Δ |
+|---|---|---|---|
+| 8 | 38.74% | **54.21%** | **+15.47** |
+| 16 | 62.00% | 77.33% | +15.33 |
+| 32 | 80.75% | 89.25% | +8.50 |
+| 64 | 91.55% | 93.87% | +2.32 |
+| 128 | 95.22% | 95.67% | +0.45 |
+| 256 | 96.56% | 96.44% | **−0.12** |
+| 512 | 97.06% | 96.98% | −0.08 |
+| 1024 | 97.43% | 97.08% | −0.35 |
+| 4096 | 97.65% | 97.41% | −0.24 |
+
+Practical crossover at **N_PROJ=256** — one step earlier than the dense-resolver crossover at N_PROJ=512. The routed resolver hits its own ceiling sooner.
+
+### Best routed resolver per N_PROJ (resolver sweep)
+
+| N_PROJ | pure maj | best routed resolver | accuracy |
+|---|---|---|---|
+| 16 | 62.00% | **H2+H3 1-NN (triple-hash fusion)** | **81.35%** |
+| 128 | 95.22% | H2 5-NN rank-weighted | 96.50% |
+| 1024 | 97.43% | H2 5-NN rank-weighted | 97.53% |
+
+At small N_PROJ, stacking independent routed views pays. At large N_PROJ, resolver choice barely matters — the filter is already near-perfect and all variants sit within 0.4 points.
+
+### Atomic decomposition — same mechanism, smaller margin
+
+Rerun of `mnist_cascade_atomics` on the routed cascade (N_PROJ=16, K=50):
+
+| Metric | Routed | Dense (historical) |
+|---|---|---|
+| Rescue count | 2743 | 3668 |
+| Damage count | 558 | 141 |
+| **Rescue:damage ratio** | **5 : 1** | 26 : 1 |
+| Conditional resolver rate | 78.44% | 92.05% |
+| Relative margin (wrong − correct) / (wrong + correct + 1) | **+0.2056** | +0.3255 |
+| Tied-min partition accuracy | 85.90% | 95.96% |
+| Elsewhere-in-top-10 accuracy | 64.66% | 86.94% |
+
+Same mechanism in every row; every magnitude is roughly 60-80% of the dense version. The routed resolver still discriminates correctly on average — the "correct is closer" signal has +0.21 relative margin — but the signal is thinner, so the conditional rate is ~13 points below pixel L2 and the rescue:damage ratio drops by 5×.
+
+### New failure modes: correlated hash errors
+
+The routed rerun exposes confusion pairs that were absent from the dense version:
+
+| true | pred | pure err | cascade err | Δ |
+|---|---|---|---|---|
+| 3 | 8 | 46 | 74 | −28 |
+| 3 | 5 | 43 | 67 | −24 |
+| 6 | 8 | 21 | 35 | −14 |
+
+A second random 16-bit ternary projection shares more failure modes with the first than an orthogonal modality would. Digits whose trit projections look similar under any random projection (3↔8, 3↔5) regress in the routed cascade. Pixel L2 broke these because shape differences are pixel-visible; secondary hashes do not because they cannot see shapes they didn't already fail to see.
+
+### Two ceilings still cleanly visible
+
+- **Filter ceiling** (unchanged): correct class in top-50 saturates at 99.87-99.90% by N_PROJ=64.
+- **Routed resolver ceiling:** routed cascade plateaus at ~97.5% from N_PROJ=512 upward. Specifically, `99.87% × 78.9% ≈ 78.8%` at N_PROJ=16 (where 78.9% is the conditional routed resolver rate), climbing as the filter becomes near-perfect and the conditional rate co-climbs.
+
+Full writeup: `journal/routed_cascade_rerun.md`.
+
+### Architectural rules (routed version)
+
+1. Use cascade when N_PROJ ≤ 64 (gain ≥ 2 points over pure majority).
+2. Above N_PROJ ≥ 256 the routed cascade is a wash and trends slightly negative.
+3. To exceed the routed cascade ceiling without reintroducing dense signal, stack independent routed views (H2+H3 fusion; possibly quadruple-hash; learned routed projections).
+4. The filter-ranker reframe is substrate-invariant: the hash is always a better filter than a ranker. Only the resolver's ceiling moves.
+
 ## What we got right, what we got wrong
 
 The path from 58% to 97.79% was not a single experiment; it was a sequence of corrections. Recording them for future sessions that might face similar hazards.
@@ -239,7 +331,8 @@ These hold on the measurements as recorded:
 - **Hardware-native throughput holds up under fair comparison.** 20.3× speedup at N_PROJ=2048 against NEON-vectorized dense L1 — not a scalar-baseline artifact.
 - **Inspectability is structural, not bolted on.** The per-trit decomposition comes free from the popcount primitive's integer sum structure. No extra work was added to the substrate to produce the audit trail.
 - **The 58% → 97.79% progression identifies three distinct error classes** (centroid architecture, asymmetric τ, single-RNG single-baseline) — each one's fix is documented and reproducible.
-- **The Trit Lattice signature is a lossy locality hash, not a classifier.** Ceiling@50 = 98.6% at N_PROJ=16; top-1 = 55.5%. Voting reads the destroyed rank information; the cascade reads the preserved set membership. Verified by rescue/damage 26:1, by hash-rank distribution of cascade's correct picks (50.7% in ranks 21-50), and by the N_PROJ crossover sweep. See `journal/cascade_atomics_mechanism.md` and `journal/cascade_sweep_crossover.md`.
+- **The Trit Lattice signature is a lossy locality hash, not a classifier.** Ceiling@50 = 98.6% at N_PROJ=16; top-1 = 55.5%. Voting reads the destroyed rank information; the cascade reads the preserved set membership. Verified twice: with a dense pixel resolver (rescue/damage 26:1, +30-point lift) and with a routed secondary-hash resolver (rescue/damage 5:1, +15-point lift). Same mechanism, different resolver ceilings. See `journal/cascade_atomics_mechanism.md`, `journal/cascade_sweep_crossover.md`, and `journal/routed_cascade_rerun.md`.
+- **Filter-ranker reframe is substrate-invariant.** The hash is a filter regardless of what reads it. Resolver choice sets the absolute ceiling (routed ~97.5%, pixel-L2 ~97.6% on deskewed MNIST); it does not change whether the cascade helps.
 
 ## Unverified / qualified claims
 
@@ -316,12 +409,13 @@ SEEDS[N_SEEDS][4] = {
 - `m4t/docs/M4T_SUBSTRATE.md` — canonical 18-section spec. §18 is the base-3-native criterion.
 - `m4t/README.md` — live surface inventory.
 
-### For the cascade architecture (Axis 4)
+### For the cascade architecture (Axis 4 + 4b)
 - `journal/nproj16_atomic_mechanism.md` — atomic probe at N_PROJ=16; partition asymmetry explains vote-rule inversion.
 - `journal/nproj16_to_90_{raw,nodes,reflect,synthesize}.md` — LMM cycle on "can N_PROJ=16 reach 90%?" — the filter-ranker reframe.
-- `journal/nproj16_cascade_result.md` — cascade at N_PROJ=16 hits 92.72%.
-- `journal/cascade_atomics_mechanism.md` — decomposition of why cascade works; rescue:damage 26:1; hash-rank distribution.
-- `journal/cascade_sweep_crossover.md` — cascade across N_PROJ; crossover at 512; pixel-L2 resolver ceiling at 97.57%.
+- `journal/nproj16_cascade_result.md` — historical cascade at N_PROJ=16 (dense resolver) hits 92.72%.
+- `journal/cascade_atomics_mechanism.md` — historical decomposition with pixel resolver; rescue:damage 26:1.
+- `journal/cascade_sweep_crossover.md` — historical cascade across N_PROJ with pixel resolver; crossover at 512.
+- `journal/routed_cascade_rerun.md` — routed-only cascade rerun: 77.33% at N_PROJ=16 with H2, 81.35% with H2+H3 fusion; crossover at 256; mechanism preserved.
 
 ### For the detailed experimental record
 - `journal/routed_knn_mnist.md` — the k-NN wins, with "Revised after fourth red-team" section.

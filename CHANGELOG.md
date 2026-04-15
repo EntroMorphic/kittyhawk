@@ -73,9 +73,37 @@ Triggered by a full audit that identified a collapse of Multi-Trit Floating Poin
 ### Verified
 
 - `cmake --build` green under `-Wall -Wextra -Wpedantic -Werror`.
-- `ctest`: 5/5 test binaries pass (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`).
+- `ctest`: 8/8 test binaries pass (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`, `m4t_ternary_matmul`, `glyph_wrapper`, `routed_tool_smoke`).
 - `M4T_BUILD_TOOLS=ON` builds `m4t_trit_golden` and `m4t_lut_gen` cleanly.
 - `tools/mnist_trit_lattice.c` builds via the root CMake (`GLYPH_BUILD_TOOLS=ON`, default ON).
+
+### Routed architecture completion
+
+- Converted `tools/mnist_trit_lattice.c` from projection-L1 plus pixel refine to routed class-signature classification.
+- Converted `tools/mnist_routed_amplified.c` from audit-triggered dense fallback to routed fallback over flattened per-head signature evidence.
+- Converted `tools/mnist_cascade_sweep.c`, `tools/mnist_cascade_nproj16.c`, and `tools/mnist_cascade_atomics.c` from routed-filter-plus-dense-resolver experiments to routed-filter-plus-routed-resolver experiments.
+- Replaced the dense `tools/mnist_resolver_sweep.c` with a routed resolver sweep over secondary, tertiary, and fused hash variants.
+- Added `tests/test_routed_tool_smoke.c`, which writes a tiny synthetic IDX dataset and runs `mnist_trit_lattice` end to end so a routed consumer path is now covered by `ctest` without external data.
+- Fresh MNIST rerun for the routed-only architecture now completed on `/Users/aaronjosserand-austin/Projects/trix-z/data/mnist`. Headline numbers (deskewed MNIST, density=0.33, K_RESOLVE=50, single seed):
+
+| N_PROJ | pure maj k=7 | routed cascade H2 1-NN | Δ |
+|---|---|---|---|
+| 8 | 38.74% | 54.21% | +15.47 |
+| 16 | 62.00% | **77.33%** | +15.33 |
+| 32 | 80.75% | 89.25% | +8.50 |
+| 64 | 91.55% | 93.87% | +2.32 |
+| 128 | 95.22% | 95.67% | +0.45 |
+| 256 | 96.56% | 96.44% | **−0.12** |
+| 4096 | 97.65% | 97.41% | −0.24 |
+
+  Routed crossover at N_PROJ=256 (one step earlier than the historical dense crossover at 512). Best routed resolver at N_PROJ=16 is H2+H3 triple-hash fusion at **81.35%** (+4.65 over H1+H2 dual-hash). Atomics on the routed cascade: rescue:damage 5:1, conditional resolver 78.44%, relative margin +0.2056 — mechanism identical to the historical dense run, magnitudes ~60-80%. Full writeup in `journal/routed_cascade_rerun.md`.
+
+### Audit follow-up remediation
+
+- Root `CMakeLists.txt` now applies the warning set at the repo entrypoint, so top-level tools and glyph tests honor the same `-Werror` contract as standalone `m4t` builds.
+- `tools/mnist_full_sweep.c` no longer relies on folded VLAs, removing the warnings that prevented the repo-root `-Werror` contract from being true in practice.
+- Added direct coverage for `m4t_mtfp_ternary_matmul_bt` (`m4t/tests/test_m4t_ternary_matmul.c`) including exact, NEON-width, NEON+tail, and saturation cases.
+- Rebuilt glyph wrapper coverage with `tests/test_glyph_wrapper.c`, so the public alias surface is exercised by `ctest` instead of being documented as pending.
 
 ### Measured (first light on rebuilt substrate)
 
