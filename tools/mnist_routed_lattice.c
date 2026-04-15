@@ -67,6 +67,21 @@ static uint32_t rng_next(void) {
     return result;
 }
 
+/* Percentile computation on an array of absolute values. Sorts in place
+ * (caller-owned buffer) and returns the value at the given fraction. */
+static int cmp_i64(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+static int64_t tau_for_density(int64_t* abs_values, size_t n, double density) {
+    if (n == 0 || density <= 0.0) return 0;
+    if (density >= 1.0) return abs_values[n - 1] + 1;
+    qsort(abs_values, n, sizeof(int64_t), cmp_i64);
+    size_t idx = (size_t)(density * (double)n);
+    if (idx >= n) idx = n - 1;
+    return abs_values[idx];
+}
+
 /* ── Main ─────────────────────────────────────────────────────────────── */
 
 int main(int argc, char** argv) {
@@ -127,22 +142,23 @@ int main(int argc, char** argv) {
             for(int p=0;p<N_PROJ;p++)
                 centroids[(size_t)c*N_PROJ+p]=(m4t_mtfp_t)(class_sums[(size_t)c*N_PROJ+p]/class_counts[c]);
 
-        /* ── tau sweep: emission-coverage failing (tau=0) vs passing (tau>0) ──
+        /* ── Symmetric sweep: target zero density per side ─────────────────
          *
-         * Per M4T_SUBSTRATE §18, threshold_extract(tau=0) on MTFP projection
-         * outputs FAILS emission coverage — the zero state is measure-zero
-         * for continuous-valued projections. tau>0 introduces a magnitude
-         * band ("weak projection response → 0 trit"), which IS three-state
-         * for any tau where some projection magnitudes fall on each side.
+         * Prior version used the same tau on both sides, which produces
+         * ASYMMETRIC zero densities because the two inputs have different
+         * scales (class-side centroid-diffs ~1/3 the scale of query-side
+         * projections). This version computes tau_c and tau_q separately
+         * from the actual data distributions to hit a common target zero
+         * density on each side — the architecturally symmetric deployment
+         * we should have been running all along.
          *
-         * Sweep covers tau=0 (the prior failing baseline) plus four tau>0
-         * values spanning roughly two orders of magnitude — meaningful
-         * width given M4T_MTFP_SCALE=59049 and projection magnitudes that
-         * scale with INPUT_DIM=784. */
-        const int64_t TAU_VALUES[] = { 0, 10000, 50000, 200000, 1000000 };
-        const int N_TAUS = (int)(sizeof(TAU_VALUES) / sizeof(TAU_VALUES[0]));
+         * At target=0.33 this is the balanced base-3 distribution NORTH_STAR
+         * describes: ~1/3 zero, ~1/3 +1, ~1/3 -1 on both sides of the
+         * distance comparison. */
+        const double TARGET_DENSITIES[] = { 0.00, 0.20, 0.33, 0.50, 0.67 };
+        const int N_TAUS = (int)(sizeof(TARGET_DENSITIES) / sizeof(TARGET_DENSITIES[0]));
 
-        /* Mean-subtract centroids once (shared across tau values). */
+        /* Mean-subtract centroids once (shared across all density targets). */
         int Sp=M4T_TRIT_PACKED_BYTES(N_PROJ);
         int64_t* dim_mean=calloc((size_t)N_PROJ,sizeof(int64_t));
         for(int c=0;c<N_CLASSES;c++)
@@ -150,17 +166,69 @@ int main(int argc, char** argv) {
                 dim_mean[p]+=(int64_t)centroids[(size_t)c*N_PROJ+p];
         for(int p=0;p<N_PROJ;p++) dim_mean[p]/=N_CLASSES;
 
-        /* For each tau, build N_CLASSES packed-trit class signatures. */
+        /* Compute tau_c per target density from the actual |centroid-diff|
+         * distribution. Class-side has N_CLASSES * N_PROJ total trit-
+         * positions; sort their absolute values and pick the percentile. */
+        int64_t* class_diff_abs = malloc((size_t)N_CLASSES * N_PROJ * sizeof(int64_t));
+        for(int c=0;c<N_CLASSES;c++){
+            for(int p=0;p<N_PROJ;p++){
+                int64_t d = (int64_t)centroids[(size_t)c*N_PROJ+p] - dim_mean[p];
+                class_diff_abs[(size_t)c*N_PROJ+p] = d >= 0 ? d : -d;
+            }
+        }
+        int64_t tau_c[16];  /* N_TAUS ≤ 16 */
+        {
+            int64_t* buf = malloc((size_t)N_CLASSES*N_PROJ*sizeof(int64_t));
+            for(int di=0; di<N_TAUS; di++){
+                memcpy(buf, class_diff_abs, (size_t)N_CLASSES*N_PROJ*sizeof(int64_t));
+                tau_c[di] = tau_for_density(buf, (size_t)N_CLASSES*N_PROJ, TARGET_DENSITIES[di]);
+            }
+            free(buf);
+        }
+        free(class_diff_abs);
+
+        /* Compute tau_q per target density from a sample of training-image
+         * |projection| values. Sample avoids the 60K×N_PROJ full sort
+         * (would be >100M entries at N_PROJ=2048; sample is 1000×N_PROJ). */
+        const int TAU_Q_SAMPLE = 1000;
+        int tau_q_samples = (TAU_Q_SAMPLE < n_train) ? TAU_Q_SAMPLE : n_train;
+        int64_t tau_q[16];
+        {
+            size_t total = (size_t)tau_q_samples * (size_t)N_PROJ;
+            int64_t* buf_stable = malloc(total * sizeof(int64_t));
+            for(int i=0; i<tau_q_samples; i++){
+                for(int p=0; p<N_PROJ; p++){
+                    int64_t v = train_proj[(size_t)i*N_PROJ + p];
+                    buf_stable[(size_t)i*N_PROJ + p] = v >= 0 ? v : -v;
+                }
+            }
+            int64_t* buf = malloc(total * sizeof(int64_t));
+            for(int di=0; di<N_TAUS; di++){
+                memcpy(buf, buf_stable, total * sizeof(int64_t));
+                tau_q[di] = tau_for_density(buf, total, TARGET_DENSITIES[di]);
+            }
+            free(buf);
+            free(buf_stable);
+        }
+
+        /* Build class signatures per target density using the per-side tau_c.
+         * Count actual zero-density produced (should match target closely). */
         uint8_t* class_sigs_per_tau=calloc((size_t)N_TAUS*N_CLASSES*Sp,1);
+        long class_zero_count_per_tau[16] = {0};
+        long class_total_trits_per_tau[16] = {0};
         {
             int64_t* diff=malloc((size_t)N_PROJ*sizeof(int64_t));
-            for(int ti=0; ti<N_TAUS; ti++){
+            for(int di=0; di<N_TAUS; di++){
                 for(int c=0;c<N_CLASSES;c++){
                     for(int p=0;p<N_PROJ;p++)
                         diff[p]=(int64_t)centroids[(size_t)c*N_PROJ+p]-dim_mean[p];
-                    m4t_route_threshold_extract(
-                        class_sigs_per_tau + ((size_t)ti*N_CLASSES + c)*Sp,
-                        diff, TAU_VALUES[ti], N_PROJ);
+                    uint8_t* sig = class_sigs_per_tau + ((size_t)di*N_CLASSES + c)*Sp;
+                    m4t_route_threshold_extract(sig, diff, tau_c[di], N_PROJ);
+                    for (int p = 0; p < N_PROJ; p++) {
+                        uint8_t code = (sig[p >> 2] >> ((p & 3) * 2)) & 0x3u;
+                        class_total_trits_per_tau[di]++;
+                        if (code == 0) class_zero_count_per_tau[di]++;
+                    }
                 }
             }
             free(diff);
@@ -180,6 +248,14 @@ int main(int argc, char** argv) {
         int correct_l1=0;
         int* correct_routed=calloc((size_t)N_TAUS, sizeof(int));
 
+        /* Query-side scale and zero-density (collect over ALL test images
+         * for tau=0; sample 500 images for the other tau values). */
+        int64_t query_abs_max = 0;
+        int64_t query_abs_sum = 0;
+        long query_abs_count = 0;
+        long* query_zero_per_tau = calloc((size_t)N_TAUS, sizeof(long));
+        long* query_total_per_tau = calloc((size_t)N_TAUS, sizeof(long));
+
         clock_t t0=clock();
         for(int s=0;s<n_test;s++){
             const m4t_mtfp_t* img=x_test+(size_t)s*INPUT_DIM;
@@ -198,14 +274,27 @@ int main(int argc, char** argv) {
             }
             if(pred_l1==y_test[s]) correct_l1++;
 
-            /* Routed-per-tau. Project once, query-extract per tau. */
+            /* Routed-per-density. Project once, query-extract per density. */
             for(int p=0;p<N_PROJ;p++) query_i64[p]=(int64_t)test_proj_buf[p];
-            int32_t max_dist=2*N_PROJ;  /* 2 bits per trit, all may differ */
-            for(int ti=0; ti<N_TAUS; ti++){
-                m4t_route_threshold_extract(query_sig,query_i64,TAU_VALUES[ti],N_PROJ);
+            if (s == 0) {
+                for(int p=0;p<N_PROJ;p++) {
+                    int64_t a = query_i64[p] >= 0 ? query_i64[p] : -query_i64[p];
+                    if (a > query_abs_max) query_abs_max = a;
+                    query_abs_sum += a;
+                    query_abs_count++;
+                }
+            }
+            int32_t max_dist=2*N_PROJ;
+            for(int di=0; di<N_TAUS; di++){
+                m4t_route_threshold_extract(query_sig,query_i64,tau_q[di],N_PROJ);
+                for (int p = 0; p < N_PROJ; p++) {
+                    uint8_t code = (query_sig[p >> 2] >> ((p & 3) * 2)) & 0x3u;
+                    query_total_per_tau[di]++;
+                    if (code == 0) query_zero_per_tau[di]++;
+                }
                 m4t_route_distance_batch(
                     dists, query_sig,
-                    class_sigs_per_tau + (size_t)ti*N_CLASSES*Sp,
+                    class_sigs_per_tau + (size_t)di*N_CLASSES*Sp,
                     mask, N_CLASSES, N_PROJ);
 
                 int32_t scores[N_CLASSES];
@@ -214,28 +303,38 @@ int main(int argc, char** argv) {
                 m4t_route_decision_t decision;
                 m4t_route_topk_abs(&decision,scores,N_CLASSES,1);
                 int pred_r = decision.tile_idx;
-                if(pred_r<0) pred_r=0;  /* sentinel fallback */
-                if(pred_r==y_test[s]) correct_routed[ti]++;
+                if(pred_r<0) pred_r=0;
+                if(pred_r==y_test[s]) correct_routed[di]++;
             }
         }
         clock_t t1=clock();
         double total_ms=1000.0*(double)(t1-t0)/CLOCKS_PER_SEC;
 
-        printf("  L1-over-mantissa (dense decision):       %d/%d = %d.%02d%%\n",
+        printf("  Query-side proj scale (image 0): max=%lld  mean|proj|=%lld\n",
+               (long long)query_abs_max,
+               (long long)(query_abs_count > 0 ? query_abs_sum/query_abs_count : 0));
+        printf("\n");
+        printf("  L1-over-mantissa (dense decision): %d/%d = %d.%02d%%\n",
                correct_l1,n_test,correct_l1*100/n_test,(correct_l1*10000/n_test)%100);
-        for(int ti=0; ti<N_TAUS; ti++){
-            const char* coverage = (TAU_VALUES[ti] == 0) ? "FAIL §18" : "pass §18";
-            printf("  Routed tau=%-7lld [%s]:           %d/%d = %d.%02d%%\n",
-                   (long long)TAU_VALUES[ti], coverage,
-                   correct_routed[ti], n_test,
-                   correct_routed[ti]*100/n_test,
-                   (correct_routed[ti]*10000/n_test)%100);
+        printf("  %-7s  %-10s  %-10s  %-13s  %-13s  %s\n",
+               "target", "tau_c", "tau_q", "class %zero", "query %zero", "routed acc");
+        for(int di=0; di<N_TAUS; di++){
+            int class_pct100 = (int)((100 * class_zero_count_per_tau[di] * 100) / class_total_trits_per_tau[di]);
+            int query_pct100 = (int)((100 * query_zero_per_tau[di] * 100) / query_total_per_tau[di]);
+            printf("  %.2f     %-10lld  %-10lld  %3d.%02d%%        %3d.%02d%%        %d.%02d%%\n",
+                   TARGET_DENSITIES[di],
+                   (long long)tau_c[di], (long long)tau_q[di],
+                   class_pct100/100, class_pct100%100,
+                   query_pct100/100, query_pct100%100,
+                   correct_routed[di]*100/n_test,
+                   (correct_routed[di]*10000/n_test)%100);
         }
-        printf("  Inference (L1 + %d tau values, %d images):  %.0f ms\n\n",
+        printf("  Inference (L1 + %d density targets, %d images):  %.0f ms\n\n",
                N_TAUS, n_test, total_ms);
 
         free(test_proj_buf); free(query_i64); free(query_sig);
         free(class_sigs_per_tau); free(correct_routed); free(mask);
+        free(query_zero_per_tau); free(query_total_per_tau);
         free(centroids); free(class_sums); free(train_proj);
         free(proj_w); free(proj_packed);
     }
