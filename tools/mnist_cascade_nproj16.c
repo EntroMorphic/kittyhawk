@@ -1,15 +1,17 @@
 /*
- * mnist_cascade_nproj16.c — cascade experiment at N_PROJ=16.
+ * mnist_cascade_nproj16.c — routed cascade experiment at N_PROJ=16.
  *
- * LMM synthesize output: the 16-bit hash is a FILTER, not a classifier.
- * Use it to narrow 60K → top-K, then resolve locally with a cheap signal.
+ * Sixth-round remediation removes the dense pixel resolver family from this
+ * probe. The 16-trit signature remains a FILTER, but all local resolution is
+ * now routed as well, using a secondary independent hash or dual-hash fusion.
  *
  * Variants run in a single pass:
- *   E1/E2. Pixel-L1 1-NN within top-K for K ∈ {5,10,20,50,100}.
- *   E3.    Pixel-L2 (squared) 1-NN and pixel-L1 3-NN majority, K=20 fixed.
- *   E4.    Partition-aware pixel-L1: if tied_count==1, take top-1 label;
- *          else resolve via pixel-L1 over tied set (or top-K if larger).
- *   E5.    Secondary-hash (different seed) Hamming re-rank within top-K=20.
+ *   E1.    Secondary-hash 1-NN within top-K for K in {5,10,20,50,100}.
+ *   E2.    Dual-hash score 1-NN within top-K for K in {5,10,20,50,100}.
+ *   E3.    Secondary-hash 3-NN majority, K=20 fixed.
+ *   E4.    Partition-aware secondary-hash: if tied_count==1, take top-1;
+ *          else resolve via secondary hash over tied set (or top-K if larger).
+ *   E5.    Dual-hash score 1-NN within top-K=20.
  *
  * All variants share one primary-hash pass, so cost is amortized.
  *
@@ -188,24 +190,6 @@ static void build_signatures(const m4t_mtfp_t* x_train, int n_train,
     *out_Sp         = Sp;
 }
 
-/* Pixel L1 distance between two images. */
-static int64_t pixel_l1(const m4t_mtfp_t* a, const m4t_mtfp_t* b) {
-    int64_t s=0;
-    for(int i=0;i<INPUT_DIM;i++){
-        int32_t d=(int32_t)a[i]-(int32_t)b[i];
-        s += (d<0)?-d:d;
-    }
-    return s;
-}
-static int64_t pixel_l2sq(const m4t_mtfp_t* a, const m4t_mtfp_t* b) {
-    int64_t s=0;
-    for(int i=0;i<INPUT_DIM;i++){
-        int32_t d=(int32_t)a[i]-(int32_t)b[i];
-        s += (int64_t)d*d;
-    }
-    return s;
-}
-
 /* Top-K extraction: given dists[n_train], fill indices[K] sorted by distance
  * ascending (ties broken by index order). */
 static void top_k_indices(const int32_t* dists, int n, int K,
@@ -263,13 +247,13 @@ int main(int argc, char** argv) {
 
     /* Counters per K. */
     int pure_maj_correct[5] = {0};       /* baseline: k-NN majority on primary hash */
-    int cascade_l1_correct[5] = {0};     /* E1/E2: pixel-L1 1-NN within top-K */
-    int cascade_l2_correct[5] = {0};     /* E3: pixel-L2sq 1-NN within top-K */
+    int cascade_h2_correct[5] = {0};     /* E1: secondary-hash 1-NN within top-K */
+    int cascade_dual_correct[5] = {0};   /* E2: primary+secondary score within top-K */
 
-    /* K=20 fixed variants (E3, E4, E5). */
-    int cascade_l1_3nn_correct = 0;      /* E3: pixel-L1 3-NN majority within top-20 */
+    /* K=20 fixed routed variants (E3, E4, E5). */
+    int cascade_h2_3nn_correct = 0;      /* E3: secondary-hash 3-NN majority within top-20 */
     int partition_aware_correct = 0;     /* E4: skip resolver if tied_count==1 */
-    int secondary_hash_correct = 0;      /* E5: secondary-hash Hamming 1-NN within top-20 */
+    int dual_hash_correct = 0;           /* E5: dual-hash score 1-NN within top-20 */
 
     /* Ceiling diagnostic. */
     int correct_in_topKmax = 0;
@@ -279,8 +263,6 @@ int main(int argc, char** argv) {
     clock_t t0 = clock();
     for (int s = 0; s < n_test; s++) {
         const uint8_t* q_sig_A = test_sigs_A + (size_t)s*Sp;
-        const m4t_mtfp_t* q_img = x_test + (size_t)s*INPUT_DIM;
-
         /* Primary hash distances. */
         for (int i = 0; i < n_train; i++) {
             const uint8_t* r_sig = train_sigs_A + (size_t)i*Sp;
@@ -303,7 +285,16 @@ int main(int argc, char** argv) {
         /* (Approximate: uses top-Kmax. If actual tied_count > Kmax this caps,
          * but tied-min avg was 4-6, max seen ~500 — rare. Acceptable for E4.) */
 
-        /* For each K: compute pure-hash majority, pixel-L1 1-NN, pixel-L2 1-NN. */
+        /* Secondary-hash distances over the primary top-Kmax pool. */
+        int32_t sec_d[100];
+        for (int j=0; j<Kmax; j++) {
+            const uint8_t* q_sig_B = test_sigs_B + (size_t)s*Sp;
+            const uint8_t* r_sig_B = train_sigs_B + (size_t)topi[j]*Sp;
+            sec_d[j] = m4t_popcount_dist(q_sig_B, r_sig_B, mask, Sp);
+        }
+
+        /* For each K: compute pure-hash majority, secondary-hash 1-NN,
+         * and dual-hash 1-NN. */
         for (int ki = 0; ki < nK; ki++) {
             int K = Ks[ki];
 
@@ -315,67 +306,63 @@ int main(int argc, char** argv) {
                 if (counts[c]>counts[pred]) pred=c;
             if (pred==y) pure_maj_correct[ki]++;
 
-            /* Pixel-L1 1-NN. */
-            int64_t best_l1 = INT64_MAX; int best_l1_label = -1;
-            int64_t best_l2 = INT64_MAX; int best_l2_label = -1;
+            /* Routed secondary-hash and dual-hash 1-NN. */
+            int32_t best_h2 = INT32_MAX; int best_h2_label = -1;
+            int32_t best_dual = INT32_MAX; int best_dual_label = -1;
             for (int j=0;j<K;j++) {
-                const m4t_mtfp_t* r_img = x_train + (size_t)topi[j]*INPUT_DIM;
-                int64_t l1 = pixel_l1(q_img, r_img);
-                int64_t l2 = pixel_l2sq(q_img, r_img);
-                if (l1 < best_l1) { best_l1 = l1; best_l1_label = y_train[topi[j]]; }
-                if (l2 < best_l2) { best_l2 = l2; best_l2_label = y_train[topi[j]]; }
+                int32_t dual = topd[j] + sec_d[j];
+                if (sec_d[j] < best_h2) { best_h2 = sec_d[j]; best_h2_label = y_train[topi[j]]; }
+                if (dual < best_dual) { best_dual = dual; best_dual_label = y_train[topi[j]]; }
             }
-            if (best_l1_label==y) cascade_l1_correct[ki]++;
-            if (best_l2_label==y) cascade_l2_correct[ki]++;
+            if (best_h2_label==y) cascade_h2_correct[ki]++;
+            if (best_dual_label==y) cascade_dual_correct[ki]++;
         }
 
-        /* K=20 fixed: E3 pixel-L1 3-NN majority; E4 partition-aware; E5 secondary. */
+        /* K=20 fixed routed variants: E3 secondary-hash 3-NN majority;
+         * E4 partition-aware secondary-hash; E5 dual-hash score. */
         const int K20 = 20;
 
-        /* E3: pixel-L1 within top-20, take 3 nearest, majority vote. */
-        int64_t pl1[20]; int pll[20];
+        /* E3: secondary-hash within top-20, take 3 nearest, majority vote. */
+        int32_t h2_sort[20]; int h2_lbl[20];
         for (int j=0;j<K20;j++) {
-            pl1[j] = pixel_l1(q_img, x_train + (size_t)topi[j]*INPUT_DIM);
-            pll[j] = y_train[topi[j]];
+            h2_sort[j] = sec_d[j];
+            h2_lbl[j] = y_train[topi[j]];
         }
-        /* insertion sort by pl1 ascending */
+        /* insertion sort by secondary-hash distance ascending */
         for (int a=1;a<K20;a++){
-            int64_t kd=pl1[a]; int kl=pll[a]; int b=a-1;
-            while(b>=0 && pl1[b]>kd){ pl1[b+1]=pl1[b]; pll[b+1]=pll[b]; b--; }
-            pl1[b+1]=kd; pll[b+1]=kl;
+            int32_t kd=h2_sort[a]; int kl=h2_lbl[a]; int b=a-1;
+            while(b>=0 && h2_sort[b]>kd){ h2_sort[b+1]=h2_sort[b]; h2_lbl[b+1]=h2_lbl[b]; b--; }
+            h2_sort[b+1]=kd; h2_lbl[b+1]=kl;
         }
         {
             int c3[N_CLASSES]={0};
-            for(int j=0;j<3;j++) c3[pll[j]]++;
+            for(int j=0;j<3;j++) c3[h2_lbl[j]]++;
             int p=0; for(int c=1;c<N_CLASSES;c++) if(c3[c]>c3[p]) p=c;
-            if (p==y) cascade_l1_3nn_correct++;
+            if (p==y) cascade_h2_3nn_correct++;
         }
 
         /* E4: partition-aware. If only one tied-at-top-1, use that label.
-         * Otherwise apply pixel-L1 1-NN within top-20 (or tied set). */
+         * Otherwise apply secondary-hash 1-NN within top-20 (or tied set). */
         if (tied_count == 1) {
             if (y_train[topi[0]] == y) partition_aware_correct++;
         } else {
-            int64_t best_l1 = INT64_MAX; int best_label = -1;
+            int32_t best_h2 = INT32_MAX; int best_label = -1;
             int scan = (tied_count < K20) ? K20 : tied_count;
             if (scan > Kmax) scan = Kmax;
             for (int j=0;j<scan;j++) {
-                int64_t l1 = pixel_l1(q_img, x_train + (size_t)topi[j]*INPUT_DIM);
-                if (l1 < best_l1) { best_l1 = l1; best_label = y_train[topi[j]]; }
+                if (sec_d[j] < best_h2) { best_h2 = sec_d[j]; best_label = y_train[topi[j]]; }
             }
             if (best_label==y) partition_aware_correct++;
         }
 
-        /* E5: secondary-hash Hamming re-rank within top-20. */
+        /* E5: dual-hash score within top-20. */
         {
-            const uint8_t* q_sig_B = test_sigs_B + (size_t)s*Sp;
-            int32_t best_d = INT32_MAX; int best_label = -1;
+            int32_t best_score = INT32_MAX; int best_label = -1;
             for (int j=0;j<K20;j++) {
-                const uint8_t* r_sig = train_sigs_B + (size_t)topi[j]*Sp;
-                int32_t d = m4t_popcount_dist(q_sig_B, r_sig, mask, Sp);
-                if (d < best_d) { best_d = d; best_label = y_train[topi[j]]; }
+                int32_t score = topd[j] + sec_d[j];
+                if (score < best_score) { best_score = score; best_label = y_train[topi[j]]; }
             }
-            if (best_label==y) secondary_hash_correct++;
+            if (best_label==y) dual_hash_correct++;
         }
     }
     double elapsed = (double)(clock()-t0)/CLOCKS_PER_SEC;
@@ -386,31 +373,31 @@ int main(int argc, char** argv) {
            Kmax, correct_in_topKmax, n_test, 100.0*correct_in_topKmax/n_test);
 
     printf("Per-K results:\n");
-    printf("  K    pure-hash-maj    cascade-L1-1NN    cascade-L2-1NN\n");
+    printf("  K    pure-hash-maj    cascade-H2-1NN    cascade-dual-1NN\n");
     for (int ki=0; ki<nK; ki++) {
         int K = Ks[ki];
         printf("  %3d  %6.2f%%         %6.2f%%           %6.2f%%\n",
                K,
                100.0*pure_maj_correct[ki]/n_test,
-               100.0*cascade_l1_correct[ki]/n_test,
-               100.0*cascade_l2_correct[ki]/n_test);
+               100.0*cascade_h2_correct[ki]/n_test,
+               100.0*cascade_dual_correct[ki]/n_test);
     }
     printf("\n");
 
     printf("K=20 fixed variants:\n");
-    printf("  pixel-L1 3-NN majority:     %.2f%%\n",
-           100.0*cascade_l1_3nn_correct/n_test);
-    printf("  E4 partition-aware L1:      %.2f%%\n",
+    printf("  secondary-hash 3-NN maj:    %.2f%%\n",
+           100.0*cascade_h2_3nn_correct/n_test);
+    printf("  E4 partition-aware H2:      %.2f%%\n",
            100.0*partition_aware_correct/n_test);
-    printf("  E5 secondary-hash Hamming:  %.2f%%\n",
-           100.0*secondary_hash_correct/n_test);
+    printf("  E5 dual-hash score:         %.2f%%\n",
+           100.0*dual_hash_correct/n_test);
     printf("\n");
 
     printf("Interpretation:\n");
     printf("  Pure-hash-maj is the original N_PROJ=16 baseline (~62%% at k=7).\n");
-    printf("  Cascade-L1/L2 replaces voting with pixel 1-NN on the filtered pool.\n");
-    printf("  E5 isolates the 'more bits vs pixel access' question: same\n");
-    printf("  architecture but resolver is another 16-bit hash, not pixels.\n");
+    printf("  Routed cascade replaces the pixel resolver with a second ternary hash.\n");
+    printf("  Dual-hash score asks whether two cheap routed views outperform one\n");
+    printf("  without leaving packed-trit space.\n");
 
     free(dists_A);
     free(mask);
