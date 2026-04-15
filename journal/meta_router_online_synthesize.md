@@ -2,7 +2,10 @@
 date: 2026-04-15
 scope: LMM cycle — online, inline meta-router
 phase: SYNTHESIZE
+status: CLOSED 2026-04-15 — superseded by journal/fused_filter_fix.md
 ---
+
+> **CLOSING NOTE (added 2026-04-15):** The experiment plan below was executed in part. P1 passed cleanly (tools/mnist_local_vs_global.c, 891 rescues / 331 damages, 2.7:1 ratio). The P1 atomic decomposition (tools/mnist_lvg_atomics.c, journal/lvg_atomics_decomposition.md) predicted ~88% ceiling for any observable-signal meta-router. Before building P2, a follow-up rerun with a structural fix at the local level (tools/mnist_local_v2.c, journal/fused_filter_fix.md) recovered 89% of the L→Gq gap WITHOUT any meta-routing: L200_H12 (fused H1+H2 filter) lifted local from 83.86% to 88.87%, within 0.59 points of pure global Gq. The meta-router was a proposal to route around a deficient filter; the correct answer turned out to be to deepen the filter. **P2 is not worth building** — the oracle ceiling on top of L200_H12 is 91.75%, leaving only ~2.88 points of theoretical headroom even for a perfect router, and rescues/damages remain observationally indistinguishable. The LMM cycle still produced its value: the P1 gate forced the atomic measurement, the atomic measurement exposed the filter-ranking structure of the gap, and the fused-filter fix became visible. See `journal/fused_filter_fix.md` for the result that replaces this experiment plan.
 
 # SYNTHESIZE: the meta-router experiment
 

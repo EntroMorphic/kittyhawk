@@ -1,6 +1,6 @@
 ---
 title: Findings — Glyph / M4T Rebuild
-status: As of 2026-04-15 (routed-resolver rerun completed; dense-resolver cascade kept as historical context)
+status: As of 2026-04-15 (fused-filter fix recovered 82% of L→Gq gap; meta-router architecture deprecated; dense-resolver cascade kept as historical context)
 companion-docs: NORTH_STAR.md · docs/THESIS.md · CHANGELOG.md · m4t/docs/M4T_SUBSTRATE.md
 ---
 
@@ -21,8 +21,11 @@ Trit Lattice LSH k-NN on the rebuilt M4T substrate, deskewed MNIST, N_PROJ=2048,
 | **Accuracy (N_PROJ=2048, majority k=3)** | 97.79 ± 0.05% |
 | **Accuracy (N_PROJ=2048, rank-weighted k=5)** | 97.86 ± 0.01% |
 | **Accuracy (N_PROJ=4096, rank-weighted k=5 — pure-signature best)** | **97.99 ± 0.01%** |
-| **Accuracy (N_PROJ=16 cascade — filter + pixel-L2 1-NN, K=50)** | **90.75% (single seed)** |
-| **Accuracy (N_PROJ=16 cascade, K=100)** | **92.72%** — 30-point lift over pure-signature majority at same N_PROJ |
+| **Accuracy (N_PROJ=16 cascade — filter + pixel-L2 1-NN, K=50) — HISTORICAL dense resolver** | 90.75% (single seed) |
+| **Accuracy (N_PROJ=16 cascade, K=100) — HISTORICAL dense resolver** | 92.72% |
+| **Accuracy (N_PROJ=16 routed quadruple: H1 filter + H2+H3+H4 fusion)** | 83.86% |
+| **Accuracy (N_PROJ=16 routed, fused filter H1+H2 + H2+H3+H4 baseline L50_H1 → L50_H12 lift)** | 83.86% → **88.44%** (+4.58 from a single architectural move) |
+| **Accuracy (N_PROJ=16 routed, L200_H12 — fused filter + widened K, current routed best at N_PROJ=16)** | **88.87%** (single seed), within 0.59 of global Gq at ~50% of Gq's cost |
 | **Accuracy scaling curve (N_PROJ=2 to 8192)** | Sigmoid in log-space; saturates at 8192 (+0.01% for 2× compute). Throughput peak at N_PROJ=64 (11 000 queries/sec, 92% accuracy). See `journal/full_scaling_curve.md`. |
 | **Speed (N_PROJ=2048)** | 7.0 s for 10K × 60K k-NN queries — 20.3× faster than NEON-vectorized dense L1 over the same projections |
 | **Inspectability** | Per-classification audit trail — structurally unavailable to dense k-NN |
@@ -386,6 +389,129 @@ Reading the atomics, closing the gap requires structural changes, not a better m
 3. **Per-class policy.** Use local's predicted class as a routing-context feature — skip escalation on predicted class 3 since global damages ≈ global rescues in that region.
 4. **More independent hashes.** Pentuple-hash fusion (H2+H3+H4+H5) continues the +2.5/+1.5-point gain trajectory at small N_PROJ.
 
+Of the four, **fix #2 was tested next and the result reshapes the whole cascade line.** See Axis 4d.
+
+## Axis 4d — Fused filter: the fix that deprecated the meta-router
+
+Added 2026-04-15. The Axis 4c atomic decomposition identified two structural failures in the local architecture and suggested four possible fixes. `tools/mnist_local_v2.c` composes Fix #1 (widen K_RESOLVE) and Fix #2 (fused filter) on independent axes and reruns the P1 gate against the same Gq reference. The measurement falsified the meta-router architecture and established a new architectural rule about information leverage in a cascade.
+
+### The fix axes
+
+- **Fix A — widen K_RESOLVE.** Motivated by the 7.4% of rescues whose correct class sits outside H1's top-50 pool entirely (from Axis 4c table D). Test K ∈ {50, 100, 200}. Cost scales linearly in the resolver stage, which is cheap relative to the filter.
+- **Fix B — fused filter.** Motivated by H1's 55.5% top-1 rank accuracy (vs 98.59% neighborhood ceiling at K=50): a single 16-trit hash destroys ranking information *inside* its preserved neighborhood. The fused filter takes top-K by `(H1 + H2)` summed distance instead of `H1` alone, then resolves locally with H3+H4 (or H2+H3+H4 when H2 is still available). H2 moves from "one of three resolvers" to "half of the filter" — same four hashes, same arithmetic, different cascade position.
+
+The two fixes are independent axes and compose into a 2×3 grid. All six variants are compared against the same Gq reference (global H1+H2+H3+H4 summed over all 60K prototypes, 89.46% accuracy at N_PROJ=16).
+
+### Full result table (N_PROJ=16, density=0.33, single seed 42, deskewed MNIST, 10K test queries)
+
+| variant | filter stage | resolver stage | K_RESOLVE | accuracy | Δ vs L50_H1 baseline | Δ vs Gq |
+|---|---|---|---|---|---|---|
+| **L50_H1** (original baseline) | H1 alone over 60K | H2+H3+H4 over top-50 | 50 | 83.86% | — | −5.60 |
+| L100_H1 | H1 alone over 60K | H2+H3+H4 over top-100 | 100 | 85.59% | +1.73 | −3.87 |
+| L200_H1 | H1 alone over 60K | H2+H3+H4 over top-200 | 200 | 86.79% | +2.93 | −2.67 |
+| **L50_H12** | (H1+H2) over 60K | H3+H4 over top-50 | 50 | **88.44%** | **+4.58** | **−1.02** |
+| L100_H12 | (H1+H2) over 60K | H3+H4 over top-100 | 100 | 88.73% | +4.87 | −0.73 |
+| **L200_H12** | (H1+H2) over 60K | H3+H4 over top-200 | 200 | **88.87%** | **+5.01** | **−0.59** |
+| Gq (reference) | — | (H1+H2+H3+H4) over all 60K | — | 89.46% | +5.60 | — |
+
+**Fused filter (Fix B) alone — holding K constant at 50 — lifts accuracy by +4.58 points.** Widening K alone (Fix A) lifts by +2.93 points at its maximum (K=50 → K=200). Fix B provides more than 1.5× the accuracy gain of Fix A from a single change at the filter stage. Composing both fixes (L200_H12) lands at 88.87% — **closing 89% of the original L→Gq gap**.
+
+### Filter ceiling comparison
+
+The filter ceiling is the fraction of test queries whose correct class is present *anywhere* in the filter's top-K output — the upper bound that any resolver reading only the filtered pool can reach.
+
+| K | H1 alone filter | (H1+H2) fused filter | lift |
+|---|---|---|---|
+| 50 | 98.59% | 99.55% | +0.96% |
+| 100 | 99.50% | 99.85% | +0.35% |
+| 200 | 99.86% | 99.94% | +0.08% |
+
+The fused filter at K=50 drops the filter-miss rate from 1.41% to 0.45% — roughly a 3× reduction. But note that the ceiling lift at K=50 is 0.96 points while the accuracy lift (L50_H1 → L50_H12) is 4.58 points. **Most of the fused filter's benefit is NOT about adding correct-class prototypes to the pool.** It's about improving the *ranking* of prototypes already in the pool. The fused filter pulls correct-class prototypes from deep ranks (6+) to shallow ranks (1-10) *before* the hard K-cut, so the resolver sees a cleaner starting distribution.
+
+### Contingency against Gq (full 2×2 for each variant)
+
+| variant | LR_GR (both right) | LR_GW (damage) | LW_GR (rescue) | LW_GW (both wrong) | net (rescue−damage) | oracle ceiling |
+|---|---|---|---|---|---|---|
+| L50_H1 (original P1) | 8055 | 331 | **891** | 723 | **+560** | 92.77% |
+| L100_H1 | 8265 | 294 | 681 | 760 | +387 | 92.40% |
+| L200_H1 | 8432 | 247 | 514 | 807 | +267 | 91.93% |
+| **L50_H12** | 8651 | 193 | **295** | 861 | **+102** | 91.39% |
+| L100_H12 | 8681 | 192 | 265 | 862 | +73 | 91.38% |
+| **L200_H12** | 8658 | 229 | **288** | 825 | **+59** | 91.75% |
+
+Three observations in this table:
+
+1. **Rescues collapse from 891 to 265-295.** The fused filter removes 67-70% of the queries that global fusion was previously rescuing. Those queries are now handled correctly by local directly.
+2. **Damages also drop, from 331 to ~192-229.** The fused filter doesn't just rescue new queries; it also makes local more reliable on queries global previously got wrong.
+3. **Oracle ceiling shrinks from 92.77% to 91.38-91.75%.** As local gets stronger, the total room for any meta-router to add value on top shrinks. An oracle meta-router on L200_H12 could reach at most 91.75% — only 2.88 points above L200_H12 itself, compared to 8.91 points of headroom above L50_H1.
+
+### Cost accounting
+
+Cost is dominated by the global passes in each stage. Counting popcount distance operations per query (one popcount over 60K prototypes is 60K ops):
+
+| architecture | global passes | resolver work | total distance ops | relative cost | accuracy |
+|---|---|---|---|---|---|
+| L50_H1 (baseline) | 1 × 60K (H1) | 50 × 3 (H2+H3+H4) | 60K + 150 ≈ 60K | 1.00× | 83.86% |
+| L200_H1 | 1 × 60K (H1) | 200 × 3 | 60K + 600 ≈ 60.6K | 1.01× | 86.79% |
+| **L50_H12** | 2 × 60K (H1, H2) | 50 × 2 (H3+H4) | 120K + 100 ≈ 120K | 2.00× | 88.44% |
+| **L200_H12** | 2 × 60K (H1, H2) | 200 × 2 (H3+H4) | 120K + 400 ≈ 120K | 2.01× | 88.87% |
+| Gq (global reference) | 4 × 60K (H1+H2+H3+H4) | — | 240K | 4.00× | 89.46% |
+
+**L200_H12 at 2× baseline cost captures 99.3% of Gq's accuracy gain over baseline at 50% of Gq's cost.** Resolver-stage cost (widening K from 50 to 200) is negligible — the filter dominates completely because each global pass is 60K operations versus the resolver's 100-400 ops.
+
+### Why the fused filter works — the information-leverage principle
+
+Both L50_H1 and L50_H12 use the exact same four hashes (H1, H2, H3, H4). Same RNG seeds, same density, same prototype set, same Hamming kernel. The only difference is **which stage applies H2**.
+
+- In L50_H1, H2 is one of three resolvers. The filter decides which 50 prototypes survive via H1 alone; H2 contributes ranking information only *after* that commitment.
+- In L50_H12, H2 is half of the filter. The filter decides which 50 prototypes survive via (H1+H2); H2 contributes set-membership information *before* the commitment.
+
+Moving H2 across this boundary buys **+4.58 points** of accuracy without adding any new information to the system.
+
+The mechanism: the filter stage is a hard commitment — only top-K candidates reach the resolver. Correct-class prototypes that the filter ranks below position K are gone forever regardless of what the resolver would have said about them. The atomic decomposition showed that 48% of the original rescues lived at H1 ranks 6+ (`rank 6-10`: 15.04%, `11-20`: 14.48%, `21-50`: 11.45%, `>50`: 7.41%), and H1 alone was failing to pull them forward.
+
+The fused filter uses H2's second opinion at the filter stage to *rescue these prototypes before they get cut*. Once correct-class prototypes sit in shallow positions of top-K, the resolver's job becomes easier — even a narrower resolver (H3+H4 instead of H2+H3+H4) is enough to discriminate them from wrong-class neighbors.
+
+Stated as an architectural rule:
+
+> **Information leverage rule:** in a cascade, information applied at the filter stage constrains set membership; information applied at the resolver stage only re-orders an already-committed pool. When the filter is imperfect, spend marginal routing information on the filter first. Information has higher leverage earlier in the cascade.
+
+This is the **dual of the filter-ranker reframe** from Axis 4:
+- Axis 4 said: "The hash is a filter, not a classifier — use it as a filter."
+- Axis 4d says: "And when you have more than one hash available, put them *all* at the filter stage until the filter saturates. Only spend remaining hashes at the resolver."
+
+Together the two rules give a concrete ordering for how to allocate signature budget in a multi-hash cascade.
+
+### Why meta-routing is now obsolete
+
+The Axis 4c LMM cycle proposed an online, inline meta-router to close the L→Gq gap by routing hard queries to global on a per-query basis. The atomic decomposition predicted a ceiling of ~88% for any meta-router built on inference-available signals. The fused-filter fix produces the same ~88% accuracy without any routing at all — and crucially, it lowers the oracle ceiling from 92.77% to 91.75%, leaving only 2.88 points of theoretical headroom for *any* meta-router to add on top.
+
+A meta-router on L200_H12 would have to:
+1. Find 288 rescuable queries among ~1342 imperfect queries (rescue:damage ratio 1.26:1, barely above chance)
+2. Without any clean observable separator (rescues and damages remain observationally indistinguishable)
+3. Add perhaps +0.2-0.4 points of realistic aggregate accuracy
+4. At ~50% additional cost (partial Gq escalation on ~30% of queries)
+
+The cost/benefit does not justify building the routing-context k-NN bank. The meta-router LMM cycle is therefore **closed with a negative architectural verdict on its proposed primary artifact but a positive research verdict on its secondary discovery.** The cycle's P1 gate forced the atomic decomposition; the atomic decomposition exposed the filter-ranking structure of the gap; the fused-filter fix became obvious from that exposure and recovers almost all of the predicted meta-router gain through a simpler architectural change.
+
+Stated plainly: **the meta-router was a proposal to route around a deficient filter. The correct answer is to deepen the filter.**
+
+### Architectural rules (updated with Axis 4d)
+
+1. **Use cascade when N_PROJ ≤ 64.** Gain ≥ 2 points over pure majority on deskewed MNIST.
+2. **Above N_PROJ ≥ 256 the routed cascade is a wash.** The filter's own ranking is already near-ceiling and cascade adds little.
+3. **To exceed the routed cascade ceiling without reintroducing dense signal, spend information at the filter stage first.** Fused filter (H1+H2) beats adding the same hash as a resolver by ~4.5 points at N_PROJ=16. Triple-filter may continue the trend; this is an open measurement.
+4. **The filter-ranker reframe is substrate-invariant.** The hash is always a better filter than a ranker. Only the resolver's ceiling moves.
+5. **Information leverage is filter-stage-first.** When allocating multiple independent hashes across a cascade, put them at the filter stage until the filter saturates, *then* use remaining hashes as resolvers.
+6. **Meta-routing has an observability ceiling at small N_PROJ.** Rescue and damage share distributions on all inference-available signals; observable-feature meta-routers cannot separate them beyond a ~88% ceiling at N_PROJ=16 given the observability data. This bounds any cycle that proposes query-time escalation based on signature-space features.
+
+### Follow-ups opened by this result
+
+1. **Fused filter across N_PROJ.** Does the +4.58-point lift at N_PROJ=16 hold at N_PROJ=8, 32, 64, 128? Predicted shape: largest gain at small N_PROJ where H1's ranking is weakest; diminishing gain as N_PROJ grows and H1 alone becomes a good ranker.
+2. **Triple-filter (H1+H2+H3).** With one hash held back at the resolver stage, does a three-hash filter beat a two-hash filter + one-hash resolver? Per the information-leverage rule, yes — but the effect size depends on marginal returns and may be small if L200_H12 is already close to ceiling.
+3. **Quadruple-filter = Gq.** Applying all four hashes at the filter stage with an empty resolver is literally Gq. So the space of routed-cascade architectures is bounded between "one hash at filter" (L50_H1 baseline) and "all hashes at filter" (pure global). L200_H12 sits at (2 filter, 2 resolver) and captures most of the gap. The question is whether (3 filter, 1 resolver) sits meaningfully between (2,2) and (4,0).
+4. **Retire the meta-router cycle.** Add a closing synthesize note to `journal/meta_router_online_synthesize.md` acknowledging the deprecation. Reference `journal/fused_filter_fix.md` as the resolution.
+
 ## What we got right, what we got wrong
 
 The path from 58% to 97.79% was not a single experiment; it was a sequence of corrections. Recording them for future sessions that might face similar hazards.
@@ -415,6 +541,7 @@ These hold on the measurements as recorded:
 - **The Trit Lattice signature is a lossy locality hash, not a classifier.** Ceiling@50 = 98.6% at N_PROJ=16; top-1 = 55.5%. Voting reads the destroyed rank information; the cascade reads the preserved set membership. Verified twice: with a dense pixel resolver (rescue/damage 26:1, +30-point lift) and with a routed secondary-hash resolver (rescue/damage 5:1, +15-point lift). Same mechanism, different resolver ceilings. See `journal/cascade_atomics_mechanism.md`, `journal/cascade_sweep_crossover.md`, and `journal/routed_cascade_rerun.md`.
 - **Filter-ranker reframe is substrate-invariant.** The hash is a filter regardless of what reads it. Resolver choice sets the absolute ceiling (routed ~97.5%, pixel-L2 ~97.6% on deskewed MNIST); it does not change whether the cascade helps.
 - **Observability ceiling at N_PROJ=16.** The local-vs-global contingency at N_PROJ=16 has a 92.77% oracle ceiling, but rescues and damages share distributions on every inference-available signal we measured. Meta-routing based on disagreement/margin/tied-count is bounded at ~88% — ~1.5 below pure global, ~4.8 below the oracle. The gap is not a design problem; it's a structural information limit at this N_PROJ. See `journal/lvg_atomics_decomposition.md`.
+- **Information leverage is filter-stage-first.** At N_PROJ=16 on deskewed MNIST, moving H2 from a resolver to half of the filter lifts accuracy from 83.86% to 88.44% — a +4.58 point gain from reallocating *existing* information to the filter stage. No new hashes, no new primitives, same arithmetic. The filter-ranker reframe has a dual: once you're spending information routing-style, allocate it earliest. L200_H12 (fused filter + widened K) reaches 88.87% at 2× baseline cost and within 0.59 points of pure global Gq (89.46%) at 50% of Gq's cost. See `journal/fused_filter_fix.md`. This also deprecates the meta-router cycle as a practical architecture: the fix the LMM cycle was supposed to enable is unnecessary because the filter-stage fix closes 89% of the gap directly.
 
 ## Unverified / qualified claims
 
@@ -501,6 +628,7 @@ SEEDS[N_SEEDS][4] = {
 - `journal/routed_quadruple_decorrelation.md` — H2+H3+H4 quadruple fusion hits 83.86% at N_PROJ=16; density decorrelation partial.
 - `journal/meta_router_online_{raw,nodes,reflect,synthesize}.md` — LMM cycle on an online, inline meta-router as k-NN over routing-context signatures.
 - `journal/lvg_atomics_decomposition.md` — atomic decomposition of L vs Gq contingency; observability ceiling at ~88% identified.
+- `journal/fused_filter_fix.md` — fused-filter fix rerun: L50_H1 (83.86%) → L50_H12 (88.44%) from moving H2 to filter stage; L200_H12 reaches 88.87% within 0.59 of Gq; meta-router deprecated.
 
 ### For the detailed experimental record
 - `journal/routed_knn_mnist.md` — the k-NN wins, with "Revised after fourth red-team" section.

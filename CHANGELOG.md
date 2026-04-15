@@ -489,6 +489,62 @@ Meta-router's natural ceiling is ~88% at ~30% escalation rate and ~50% of pure-G
 
 Full writeup: `journal/lvg_atomics_decomposition.md`.
 
+### Fused filter fix — information leverage rule, meta-router obsolete
+
+`tools/mnist_local_v2.c` reruns the P1 gate after applying the two composable fixes the Axis 4c atomics suggested:
+
+- **Fix A — widen K_RESOLVE** from 50 to 100 / 200. Targets the 7.4% of rescues whose correct class sits outside H1's top-50 pool entirely.
+- **Fix B — fused filter.** Replace the H1-alone filter with an `(H1+H2)` summed-distance filter, then resolve locally with H3+H4. Moves H2 from "one of three resolvers" to "half of the filter" — same four hashes, same arithmetic, different cascade position.
+
+The two fixes are independent axes and compose into a 2×3 grid. All variants compared against the same Gq reference at N_PROJ=16, density=0.33, single seed, deskewed MNIST, 10K test queries.
+
+**Result grid:**
+
+    variant       filter          resolver          K    accuracy   Δ baseline   Δ Gq
+    L50_H1        H1 alone        H2+H3+H4          50   83.86%     —            -5.60
+    L100_H1       H1 alone        H2+H3+H4         100   85.59%     +1.73        -3.87
+    L200_H1       H1 alone        H2+H3+H4         200   86.79%     +2.93        -2.67
+    L50_H12       (H1+H2)         H3+H4             50   88.44%     +4.58        -1.02
+    L100_H12      (H1+H2)         H3+H4            100   88.73%     +4.87        -0.73
+    L200_H12      (H1+H2)         H3+H4            200   88.87%     +5.01        -0.59
+    Gq reference  H1+H2+H3+H4 over all 60K              89.46%     +5.60        —
+
+**Headline: fused filter alone — without widening K — lifts accuracy by +4.58 points.** Widening K alone tops out at +2.93. Composed fixes land at 88.87%, closing 89% of the original L→Gq gap (5.60 → 0.59).
+
+**Filter ceilings** at K=50: H1 alone = 98.59%, (H1+H2) fused = 99.55% (filter-miss rate 1.41% → 0.45%, a 3× reduction). At K=200: H1 = 99.86%, (H1+H2) = 99.94%. But the ceiling lift is small (0.96 points at K=50) relative to the accuracy lift (4.58 points) — most of the fused filter's benefit comes from *ranking improvement* inside the preserved pool, not from adding new correct-class prototypes.
+
+**Contingency vs Gq:**
+
+    variant       LR_GR   LR_GW   LW_GR (rescue)   LW_GW   net   oracle
+    L50_H1 P1     8055     331         891          723   +560   92.77%
+    L200_H1       8432     247         514          807   +267   91.93%
+    L50_H12       8651     193         295          861   +102   91.39%
+    L200_H12      8658     229         288          825    +59   91.75%
+
+Rescues collapse from 891 to 265-295 as the fused filter absorbs most of global's previously-unique recoveries into local's own answers. Damages also drop (331 → 192-229). The oracle ceiling (L right ∪ Gq right) falls from 92.77% to 91.38-91.75%, leaving only ~2.88 points of theoretical headroom for any meta-router to add on top.
+
+**Cost accounting** (popcount distance operations per query):
+
+    L50_H1 baseline   60K (H1)   +  150 (H2+H3+H4)  ≈  60K   1.00×   83.86%
+    L200_H12         120K (H1+H2) +  400 (H3+H4)    ≈ 120K   2.01×   88.87%
+    Gq               240K (H1+H2+H3+H4)                     4.00×   89.46%
+
+L200_H12 captures 99.3% of Gq's accuracy gain at 50% of Gq's cost. The resolver-stage widening from K=50 to K=200 is a rounding error because the filter dominates; each 60K global pass is ~600× the cost of a 50-candidate resolver pass.
+
+**Mechanism.** Both L50_H1 and L50_H12 use the exact same four hashes with the exact same seeds and the exact same Hamming kernel. Only the cascade position of H2 differs. In L50_H1, H2 contributes ranking *after* H1 has already hard-committed the top-50 pool. In L50_H12, H2 contributes set-membership *before* the hard commitment. Moving H2 across this boundary buys +4.58 points. The atomic decomposition of the Axis 4c probe showed that 48% of the original rescues had correct class at H1-ranks 6 or deeper — prototypes H1 alone was failing to pull into the shallow positions of top-K. The fused filter uses H2's second opinion to rescue those prototypes before the K-cut.
+
+**The information leverage rule.** Stated as a new architectural principle:
+
+> In a cascade, information applied at the filter stage constrains set membership; information applied at the resolver stage only re-orders an already-committed pool. When the filter is imperfect, spend marginal routing information on the filter first. Information has higher leverage earlier in the cascade.
+
+This is the dual of the filter-ranker reframe from the `journal/cascade_atomics_mechanism.md` era. The original reframe said "the hash is a filter, not a ranker — use it as a filter." The information-leverage rule extends it: "and when you have more than one hash available, put them *all* at the filter stage until the filter saturates. Only spend remaining hashes at the resolver." Together the two rules give a concrete allocation policy for multi-hash cascades.
+
+**Meta-router deprecation.** The meta-router LMM cycle (`journal/meta_router_online_{raw,nodes,reflect,synthesize}.md`) proposed an online, inline k-NN-bank architecture to close the L→Gq gap by routing hard queries to global on a per-query basis. The Axis 4c atomic decomposition predicted a ceiling of ~88% for any meta-router built on inference-available signals. The fused-filter fix produces the same ~88% accuracy *without any routing at all*, and it lowers the oracle ceiling to 91.75% — leaving only 2.88 points of theoretical headroom. Even an oracle meta-router on L200_H12 with perfect rescue/damage separation could add at most 2.88 points, and realistic meta-routers with observable-signal features would capture only a fraction of that at substantial extra cost (~50% of pure Gq).
+
+Verdict: **the meta-router was a proposal to route around a deficient filter; the correct fix is to deepen the filter.** The cycle is closed with a negative verdict on its proposed primary artifact but a positive verdict on its research process — the P1 gate forced the atomic decomposition, the atomic decomposition exposed the filter-ranking structure of the gap, and the fused-filter fix became visible as a direct consequence.
+
+Full writeup: `journal/fused_filter_fix.md`.
+
 ### Deferred (tracked in `docs/REMEDIATION_PLAN.md`)
 
 - Block-aware tensor type carrying an exponent array (M2). Lands with the first consumer that needs cross-block exponent tracking.
