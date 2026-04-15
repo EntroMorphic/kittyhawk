@@ -1,23 +1,24 @@
 /*
  * mnist_cascade_atomics.c — atomic decomposition of WHY the N_PROJ=16
- * cascade worked.
+ * routed cascade works.
  *
- * Cascade achieved 90.75% at K=50 (L2), up from 62% pure-hash baseline.
+ * Sixth-round remediation removes the dense pixel resolver from this probe.
+ * The cascade variant studied is now: primary-hash top-K filter followed by
+ * secondary-hash 1-NN within top-K.
+ *
  * This probe dissects the mechanism:
  *
  *   A. Ceiling-in-top-K curve (K = 1..200). How much does widening help?
- *   B. Conditional resolver accuracy: GIVEN correct is in top-K, does
- *      pixel L2 pick it?
- *   C. Rescue/damage matrix at K=50: 2×2 of {pure-hash-top1 right/wrong}
- *      × {cascade right/wrong}.
+ *   B. Conditional resolver accuracy: GIVEN correct is in top-K, does the
+ *      secondary routed hash pick it?
+ *   C. Rescue/damage matrix at K=50: 2x2 of {pure-hash-top1 right/wrong}
+ *      x {cascade right/wrong}.
  *   D. Hash-rank distribution of cascade's correct picks.
  *   E. Per-partition (tied-min / elsewhere-top-10 / nowhere-top-10)
  *      cascade accuracy.
  *   F. Class-pair confusion delta (pure-hash vs cascade).
- *   G. Pixel-distance margin: correct-class pixel vs nearest-wrong-class
- *      pixel within top-K, averaged.
- *
- * Cascade variant studied: pixel-L2sq 1-NN within top-K (the K=50 winner).
+ *   G. Secondary-hash margin: correct-class routed distance vs nearest
+ *      wrong-class routed distance within top-K, averaged.
  *
  * Usage: ./mnist_cascade_atomics <mnist_dir>
  */
@@ -127,15 +128,6 @@ static int64_t tau_for_density(int64_t* v, size_t n, double d) {
     if (idx >= n) idx = n-1;
     return v[idx];
 }
-static int64_t pixel_l2sq(const m4t_mtfp_t* a, const m4t_mtfp_t* b) {
-    int64_t s=0;
-    for(int i=0;i<INPUT_DIM;i++){
-        int32_t d=(int32_t)a[i]-(int32_t)b[i];
-        s += (int64_t)d*d;
-    }
-    return s;
-}
-
 int main(int argc, char** argv) {
     if(argc<2){fprintf(stderr,"Usage: %s <mnist_dir>\n",argv[0]);return 1;}
 
@@ -152,59 +144,79 @@ int main(int argc, char** argv) {
     deskew_all(x_train, n_train);
     deskew_all(x_test, n_test);
 
-    /* Build primary-hash signatures (seed 42 to match cascade/probe tools). */
-    rng_s[0]=42; rng_s[1]=123; rng_s[2]=456; rng_s[3]=789;
-    m4t_trit_t* proj_w=malloc((size_t)N_PROJ*INPUT_DIM);
-    for(int i=0;i<N_PROJ*INPUT_DIM;i++){
-        uint32_t r=rng_next()%3;
-        proj_w[i]=(r==0)?-1:(r==1)?0:1;
-    }
-    int proj_Dp=M4T_TRIT_PACKED_BYTES(INPUT_DIM);
-    uint8_t* proj_packed=malloc((size_t)N_PROJ*proj_Dp);
-    m4t_pack_trits_rowmajor(proj_packed,proj_w,N_PROJ,INPUT_DIM);
-    free(proj_w);
-
-    m4t_mtfp_t* train_proj=malloc((size_t)n_train*N_PROJ*sizeof(m4t_mtfp_t));
-    m4t_mtfp_t* test_proj =malloc((size_t)n_test *N_PROJ*sizeof(m4t_mtfp_t));
-    for(int i=0;i<n_train;i++)
-        m4t_mtfp_ternary_matmul_bt(train_proj+(size_t)i*N_PROJ,
-                                    x_train+(size_t)i*INPUT_DIM,
-                                    proj_packed,1,INPUT_DIM,N_PROJ);
-    for(int i=0;i<n_test;i++)
-        m4t_mtfp_ternary_matmul_bt(test_proj+(size_t)i*N_PROJ,
-                                    x_test+(size_t)i*INPUT_DIM,
-                                    proj_packed,1,INPUT_DIM,N_PROJ);
-
-    int64_t tau_q;
-    {
-        size_t total=(size_t)1000*N_PROJ;
-        int64_t* buf=malloc(total*sizeof(int64_t));
-        for(int i=0;i<1000;i++)
-            for(int p=0;p<N_PROJ;p++){
-                int64_t v=train_proj[(size_t)i*N_PROJ+p];
-                buf[(size_t)i*N_PROJ+p]=(v>=0)?v:-v;
-            }
-        tau_q=tau_for_density(buf,total,DENSITY);
-        free(buf);
-    }
-
     int Sp=M4T_TRIT_PACKED_BYTES(N_PROJ);
-    uint8_t* train_sigs=calloc((size_t)n_train*Sp,1);
-    uint8_t* test_sigs =calloc((size_t)n_test *Sp,1);
-    int64_t* tmp=malloc((size_t)N_PROJ*sizeof(int64_t));
-    for(int i=0;i<n_train;i++){
-        for(int p=0;p<N_PROJ;p++) tmp[p]=(int64_t)train_proj[(size_t)i*N_PROJ+p];
-        m4t_route_threshold_extract(train_sigs+(size_t)i*Sp,tmp,tau_q,N_PROJ);
+    uint8_t *train_sigs_A, *test_sigs_A, *train_sigs_B, *test_sigs_B;
+    {
+        const uint32_t seeds[2][4] = {
+            {42, 123, 456, 789},
+            {1337, 2718, 3141, 5923}
+        };
+        uint8_t** train_sets[2] = {&train_sigs_A, &train_sigs_B};
+        uint8_t** test_sets[2] = {&test_sigs_A, &test_sigs_B};
+
+        for (int pass = 0; pass < 2; pass++) {
+            rng_s[0]=seeds[pass][0]; rng_s[1]=seeds[pass][1];
+            rng_s[2]=seeds[pass][2]; rng_s[3]=seeds[pass][3];
+            {
+                m4t_trit_t* proj_w=malloc((size_t)N_PROJ*INPUT_DIM);
+                int proj_Dp=M4T_TRIT_PACKED_BYTES(INPUT_DIM);
+                uint8_t* proj_packed=malloc((size_t)N_PROJ*proj_Dp);
+                m4t_mtfp_t* train_proj=malloc((size_t)n_train*N_PROJ*sizeof(m4t_mtfp_t));
+                m4t_mtfp_t* test_proj =malloc((size_t)n_test *N_PROJ*sizeof(m4t_mtfp_t));
+                int64_t tau_q;
+                int64_t* tmp;
+
+                for(int i=0;i<N_PROJ*INPUT_DIM;i++){
+                    uint32_t r=rng_next()%3;
+                    proj_w[i]=(r==0)?-1:(r==1)?0:1;
+                }
+                m4t_pack_trits_rowmajor(proj_packed,proj_w,N_PROJ,INPUT_DIM);
+                free(proj_w);
+
+                for(int i=0;i<n_train;i++)
+                    m4t_mtfp_ternary_matmul_bt(train_proj+(size_t)i*N_PROJ,
+                                               x_train+(size_t)i*INPUT_DIM,
+                                               proj_packed,1,INPUT_DIM,N_PROJ);
+                for(int i=0;i<n_test;i++)
+                    m4t_mtfp_ternary_matmul_bt(test_proj+(size_t)i*N_PROJ,
+                                               x_test+(size_t)i*INPUT_DIM,
+                                               proj_packed,1,INPUT_DIM,N_PROJ);
+
+                {
+                    size_t total=(size_t)1000*N_PROJ;
+                    int64_t* buf=malloc(total*sizeof(int64_t));
+                    for(int i=0;i<1000;i++)
+                        for(int p=0;p<N_PROJ;p++){
+                            int64_t v=train_proj[(size_t)i*N_PROJ+p];
+                            buf[(size_t)i*N_PROJ+p]=(v>=0)?v:-v;
+                        }
+                    tau_q=tau_for_density(buf,total,DENSITY);
+                    free(buf);
+                }
+
+                *train_sets[pass]=calloc((size_t)n_train*Sp,1);
+                *test_sets[pass] =calloc((size_t)n_test *Sp,1);
+                tmp=malloc((size_t)N_PROJ*sizeof(int64_t));
+                for(int i=0;i<n_train;i++){
+                    for(int p=0;p<N_PROJ;p++) tmp[p]=(int64_t)train_proj[(size_t)i*N_PROJ+p];
+                    m4t_route_threshold_extract((*train_sets[pass])+(size_t)i*Sp,tmp,tau_q,N_PROJ);
+                }
+                for(int i=0;i<n_test;i++){
+                    for(int p=0;p<N_PROJ;p++) tmp[p]=(int64_t)test_proj[(size_t)i*N_PROJ+p];
+                    m4t_route_threshold_extract((*test_sets[pass])+(size_t)i*Sp,tmp,tau_q,N_PROJ);
+                }
+
+                free(tmp);
+                free(train_proj);
+                free(test_proj);
+                free(proj_packed);
+            }
+        }
     }
-    for(int i=0;i<n_test;i++){
-        for(int p=0;p<N_PROJ;p++) tmp[p]=(int64_t)test_proj[(size_t)i*N_PROJ+p];
-        m4t_route_threshold_extract(test_sigs+(size_t)i*Sp,tmp,tau_q,N_PROJ);
-    }
-    free(tmp); free(train_proj); free(test_proj); free(proj_packed);
 
     uint8_t* mask=malloc(Sp); memset(mask,0xFF,Sp);
 
-    printf("N_PROJ=%d cascade atomics — deskewed MNIST, density=%.2f, seed=42\n\n",
+    printf("N_PROJ=%d routed-cascade atomics — deskewed MNIST, density=%.2f, seeds=(42,1337)\n\n",
            N_PROJ, DENSITY);
 
     /* ── Counters ────────────────────────────────────────────────────── */
@@ -228,7 +240,7 @@ int main(int argc, char** argv) {
     int conf_hash[N_CLASSES][N_CLASSES] = {0};
     int conf_cascade[N_CLASSES][N_CLASSES] = {0};
 
-    /* Pixel-distance margin diagnostics. */
+    /* Secondary-hash margin diagnostics. */
     double margin_sum = 0.0;
     int margin_n = 0;
 
@@ -236,14 +248,14 @@ int main(int argc, char** argv) {
 
     clock_t t0 = clock();
     for (int s = 0; s < n_test; s++) {
-        const uint8_t* q_sig = test_sigs + (size_t)s*Sp;
-        const m4t_mtfp_t* q_img = x_test + (size_t)s*INPUT_DIM;
+        const uint8_t* q_sig_A = test_sigs_A + (size_t)s*Sp;
+        const uint8_t* q_sig_B = test_sigs_B + (size_t)s*Sp;
         int y = y_test[s];
 
         /* All 60K hash distances. */
         for (int i = 0; i < n_train; i++) {
-            const uint8_t* r_sig = train_sigs + (size_t)i*Sp;
-            dists[i] = m4t_popcount_dist(q_sig, r_sig, mask, Sp);
+            const uint8_t* r_sig_A = train_sigs_A + (size_t)i*Sp;
+            dists[i] = m4t_popcount_dist(q_sig_A, r_sig_A, mask, Sp);
         }
 
         /* Top-K_CEILING by hash distance (partial insertion sort). */
@@ -274,17 +286,19 @@ int main(int argc, char** argv) {
                 ceiling_at_K[k+1]++;
         }
 
-        /* Precompute pixel L2 distances for top-K_CEILING. */
-        int64_t pixel_d[K_CEILING];
-        for (int j = 0; j < K_CEILING; j++)
-            pixel_d[j] = pixel_l2sq(q_img, x_train + (size_t)topi[j]*INPUT_DIM);
+        /* Precompute secondary-hash distances for top-K_CEILING. */
+        int32_t resolver_d[K_CEILING];
+        for (int j = 0; j < K_CEILING; j++) {
+            const uint8_t* r_sig_B = train_sigs_B + (size_t)topi[j]*Sp;
+            resolver_d[j] = m4t_popcount_dist(q_sig_B, r_sig_B, mask, Sp);
+        }
 
-        /* Conditional resolver: for each K, does pixel-L2 1-NN within top-K
+        /* Conditional resolver: for each K, does secondary-hash 1-NN within top-K
          * pick the correct class? We tally only queries where correct is in top-K. */
-        int64_t best_d = INT64_MAX; int best_j = -1;
+        int32_t best_d = INT32_MAX; int best_j = -1;
         for (int k = 0; k < K_CEILING; k++) {
-            if (pixel_d[k] < best_d) { best_d = pixel_d[k]; best_j = k; }
-            /* best_j is the pixel-L2 1-NN within top-(k+1). */
+            if (resolver_d[k] < best_d) { best_d = resolver_d[k]; best_j = k; }
+            /* best_j is the secondary-hash 1-NN within top-(k+1). */
             if (correct_first_rank >= 0 && correct_first_rank <= k) {
                 if (y_train[topi[best_j]] == y)
                     conditional_resolver_at_K[k+1]++;
@@ -293,10 +307,10 @@ int main(int argc, char** argv) {
 
         /* Rescue/damage matrix at K=50. */
         int pure_top1_right = (y_train[topi[0]] == y);
-        /* cascade @ K=50 = pixel-L2 1-NN within top-50. */
-        int64_t c_best_d = INT64_MAX; int c_best_j = -1;
+        /* cascade @ K=50 = secondary-hash 1-NN within top-50. */
+        int32_t c_best_d = INT32_MAX; int c_best_j = -1;
         for (int j = 0; j < K_FIXED; j++)
-            if (pixel_d[j] < c_best_d) { c_best_d = pixel_d[j]; c_best_j = j; }
+            if (resolver_d[j] < c_best_d) { c_best_d = resolver_d[j]; c_best_j = j; }
         int cascade_label = y_train[topi[c_best_j]];
         int cascade_right = (cascade_label == y);
 
@@ -337,23 +351,20 @@ int main(int argc, char** argv) {
         conf_hash[y][pure_pred]++;
         conf_cascade[y][cascade_label]++;
 
-        /* Margin: within top-K_FIXED, pixel-L2 of nearest correct-class prototype
-         * minus pixel-L2 of nearest wrong-class prototype. Positive margin means
-         * wrong is closer in pixels (bad for resolver); negative means correct
-         * is closer in pixels (good for resolver). */
-        int64_t best_correct = INT64_MAX, best_wrong = INT64_MAX;
+        /* Margin: within top-K_FIXED, secondary-hash distance of nearest correct
+         * vs nearest wrong candidate. Positive means correct is routed-closer. */
+        int32_t best_correct = INT32_MAX, best_wrong = INT32_MAX;
         for (int j = 0; j < K_FIXED; j++) {
             if (y_train[topi[j]] == y) {
-                if (pixel_d[j] < best_correct) best_correct = pixel_d[j];
+                if (resolver_d[j] < best_correct) best_correct = resolver_d[j];
             } else {
-                if (pixel_d[j] < best_wrong) best_wrong = pixel_d[j];
+                if (resolver_d[j] < best_wrong) best_wrong = resolver_d[j];
             }
         }
-        if (best_correct < INT64_MAX && best_wrong < INT64_MAX) {
-            /* normalize by sqrt to be a pixel-scale margin */
+        if (best_correct < INT32_MAX && best_wrong < INT32_MAX) {
             double mc = (double)best_correct;
             double mw = (double)best_wrong;
-            /* Record (wrong - correct) / scale; positive = correct is pixel-closer = resolver wins. */
+            /* Positive = correct is routed-closer than nearest wrong candidate. */
             double rel = (mw - mc) / (mw + mc + 1.0);
             margin_sum += rel;
             margin_n++;
@@ -380,7 +391,7 @@ int main(int argc, char** argv) {
 
     /* ── B. Conditional resolver accuracy ─────────────────────────────── */
 
-    printf("B. Conditional resolver: P(pixel-L2 1-NN picks correct | correct in top-K).\n");
+    printf("B. Conditional resolver: P(secondary-hash 1-NN picks correct | correct in top-K).\n");
     printf("     K    conditional_correct   ceiling   conditional_rate\n");
     for (size_t z = 0; z < sizeof(check_ks)/sizeof(check_ks[0]); z++) {
         int K = check_ks[z];
@@ -396,7 +407,7 @@ int main(int argc, char** argv) {
 
     /* ── C. Rescue/damage matrix at K=50 ──────────────────────────────── */
 
-    printf("C. Rescue/damage matrix at K=%d (pixel-L2 1-NN cascade).\n", K_FIXED);
+    printf("C. Rescue/damage matrix at K=%d (secondary-hash 1-NN cascade).\n", K_FIXED);
     printf("   Rows: pure-hash top-1.  Cols: cascade prediction.\n");
     printf("                  cascade_right    cascade_wrong\n");
     printf("   pure_right     %-14d   %-14d   (pure-top-1 correct: %d)\n",
@@ -451,7 +462,7 @@ int main(int argc, char** argv) {
 
     /* ── F. Class-pair confusion delta ────────────────────────────────── */
 
-    printf("F. Class-pair errors: pure-hash k=7 majority vs cascade K=%d L2.\n", K_FIXED);
+    printf("F. Class-pair errors: pure-hash k=7 majority vs routed cascade K=%d.\n", K_FIXED);
     printf("   Top off-diagonal deltas (positive = cascade improves).\n");
     printf("   true  pred   hash_err   cascade_err   Δ\n");
     /* Collect all pairs where t != p and sort by improvement. */
@@ -472,9 +483,9 @@ int main(int argc, char** argv) {
         int d = pairs[i].h - pairs[i].c;
         int j = i;
         while (j>0 && (pairs[j-1].h - pairs[j-1].c) < d) {
-            pair_t tmp = pairs[j-1];
+            pair_t swap_pair = pairs[j-1];
             pairs[j-1] = pairs[j];
-            pairs[j] = tmp;
+            pairs[j] = swap_pair;
             j--;
         }
     }
@@ -499,29 +510,30 @@ int main(int argc, char** argv) {
     if (shown == 0) printf("   (no regressions — cascade does not introduce any new confusion pairs)\n");
     printf("\n");
 
-    /* ── G. Pixel-distance margin ─────────────────────────────────────── */
+    /* ── G. Routed margin ─────────────────────────────────────────────── */
 
     double avg_margin = margin_n ? margin_sum / margin_n : 0.0;
-    printf("G. Pixel-distance margin in top-%d (correct vs nearest-wrong).\n", K_FIXED);
+    printf("G. Secondary-hash margin in top-%d (correct vs nearest-wrong).\n", K_FIXED);
     printf("   Average relative margin (wrong - correct) / (wrong + correct + 1) = %+.4f\n",
            avg_margin);
     printf("   Sample size: %d queries with both correct and wrong class present in top-%d.\n",
            margin_n, K_FIXED);
-    printf("   (Positive = correct class is on average pixel-closer than nearest wrong.)\n");
+    printf("   (Positive = correct class is on average routed-closer than nearest wrong.)\n");
     printf("\n");
 
     printf("Summary of mechanism:\n");
     printf("  A shows how much widening K buys at the filter stage.\n");
-    printf("  B shows how reliably the pixel resolver picks correct when available.\n");
+    printf("  B shows how reliably the routed secondary resolver picks correct when available.\n");
     printf("  C quantifies rescue vs damage over pure-hash-top-1.\n");
     printf("  D shows where in the hash ranking cascade's correct picks live.\n");
     printf("  E isolates cascade's gains by partition.\n");
     printf("  F shows which digit confusions cascade fixes (and any it creates).\n");
-    printf("  G shows why pixel L2 discriminates at all — the margin.\n");
+    printf("  G shows why the routed secondary hash discriminates at all — the margin.\n");
 
     free(dists);
     free(mask);
-    free(train_sigs); free(test_sigs);
+    free(train_sigs_A); free(test_sigs_A);
+    free(train_sigs_B); free(test_sigs_B);
     free(x_train); free(y_train); free(x_test); free(y_test);
     return 0;
 }
