@@ -42,6 +42,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->no_deskew   = 0;
     cfg->resolver_sum = "scalar";
     cfg->radius_lambda = 8;
+    cfg->density_schedule = "fixed";
 }
 
 void glyph_config_print_usage(const char* progname) {
@@ -85,6 +86,13 @@ void glyph_config_print_usage(const char* progname) {
         "  --radius_lambda <int>   radius penalty coefficient for --resolver_sum radiusaware\n"
         "                          (default 8; 0 reduces to scalar SUM; higher values\n"
         "                           shrink toward strict radius-0 preference)\n"
+        "  --density_schedule <s>  'fixed' (default) — every table uses --density.\n"
+        "                          'mixed' — round-robin over {0.20, 0.33, 0.50}\n"
+        "                          across the M tables. Each family calibrates tau\n"
+        "                          on its own density so the three projections encode\n"
+        "                          different lattice faces. Targets the Fashion-MNIST\n"
+        "                          upper-body tied-gap problem; see journal/\n"
+        "                          fashion_mnist_atomics.md.\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -196,6 +204,7 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
         else if (strcmp(arg, "--radius_lambda") == 0) {
             if (parse_int(arg, val, &cfg->radius_lambda)) return 1;
         }
+        else if (strcmp(arg, "--density_schedule") == 0) cfg->density_schedule = val;
         else if (strcmp(arg, "--base_seed")  == 0) {
             if (parse_seed_quad(val, cfg->base_seed) != 0) {
                 fprintf(stderr, "glyph_config: --base_seed expects 'a,b,c,d'\n");
@@ -257,6 +266,12 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
     }
     if (cfg->radius_lambda < 0) {
         fprintf(stderr, "glyph_config: --radius_lambda must be non-negative\n");
+        return 1;
+    }
+    if (strcmp(cfg->density_schedule, "fixed") != 0 &&
+        strcmp(cfg->density_schedule, "mixed") != 0) {
+        fprintf(stderr,
+            "glyph_config: --density_schedule must be 'fixed' or 'mixed'\n");
         return 1;
     }
     return 0;

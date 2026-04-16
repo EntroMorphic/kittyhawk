@@ -153,9 +153,10 @@ int main(int argc, char** argv) {
     printf("  data_dir=%s\n", cfg.data_dir);
     printf("  n_proj=%d  density=%.2f  m_max=%d  max_radius=%d  min_cands=%d  max_union=%d\n",
            cfg.n_proj, cfg.density, cfg.m_max, cfg.max_radius, cfg.min_cands, cfg.max_union);
-    printf("  base_seed=%u,%u,%u,%u  mode=%s  deskew=%s  resolver_sum=%s\n",
+    printf("  base_seed=%u,%u,%u,%u  mode=%s  deskew=%s  resolver_sum=%s  density_schedule=%s\n",
            cfg.base_seed[0], cfg.base_seed[1], cfg.base_seed[2], cfg.base_seed[3],
-           cfg.mode, cfg.no_deskew ? "off" : "on", cfg.resolver_sum);
+           cfg.mode, cfg.no_deskew ? "off" : "on", cfg.resolver_sum,
+           cfg.density_schedule);
     printf("  n_train=%d  n_test=%d  input_dim=%d\n\n",
            ds.n_train, ds.n_test, ds.input_dim);
 
@@ -177,11 +178,21 @@ int main(int argc, char** argv) {
     uint8_t** test_sigs  = calloc((size_t)cfg.m_max, sizeof(uint8_t*));
     glyph_bucket_table_t* tables = calloc((size_t)cfg.m_max, sizeof(glyph_bucket_table_t));
 
+    /* Density schedule. In "fixed" mode every table uses cfg.density
+     * (byte-exact Phase 3 default). In "mixed" mode table m takes
+     * densities[m % 3], round-robin across {0.20, 0.33, 0.50}, so
+     * every M ≥ 3 checkpoint carries a balanced family mix instead
+     * of "first K tables are family A". The three families calibrate
+     * tau independently inside glyph_sig_builder_init. */
+    const double mixed_densities[3] = {0.25, 0.33, 0.40};
+    const int mixed_mode = (strcmp(cfg.density_schedule, "mixed") == 0);
+
     clock_t t_build = clock();
     for (int m = 0; m < cfg.m_max; m++) {
         uint32_t seeds[4];
         derive_seed((uint32_t)m, cfg.base_seed, seeds);
-        if (glyph_sig_builder_init(&builders[m], cfg.n_proj, ds.input_dim, cfg.density,
+        double table_density = mixed_mode ? mixed_densities[m % 3] : cfg.density;
+        if (glyph_sig_builder_init(&builders[m], cfg.n_proj, ds.input_dim, table_density,
                                     seeds[0], seeds[1], seeds[2], seeds[3],
                                     ds.x_train, n_calib) != 0) {
             fprintf(stderr, "sig builder init failed for table %d\n", m);
