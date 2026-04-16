@@ -55,23 +55,15 @@ typedef struct {
     int         radius_lambda;
 
     /* Density schedule across the M multi-tables.
-     *   "fixed" (default) — every table uses --density (Phase 3
-     *                       default reproduces byte-for-byte).
-     *   "mixed"           — round-robin over three density
-     *                       families {0.20, 0.33, 0.50} so every
-     *                       M≥3 checkpoint carries a balanced mix
-     *                       of projection geometries. Each
-     *                       builder calibrates tau on its own
-     *                       density so the three families encode
-     *                       different lattice faces.
-     *
-     * Motivation: the Fashion-MNIST atomics (journal/fashion_
-     * mnist_atomics.md) show that at density=0.33 the per-table
-     * min-Hamming gap between upper-body classes is essentially
-     * zero (65% tied, mean gap -0.036 bits). Mixing densities is
-     * the direct attack on that tied-gap rate.
+     *   "fixed" (default) — every table uses --density.
+     *   "mixed"           — round-robin over --density_triple.
      */
     const char* density_schedule;
+
+    /* Density triple for --density_schedule mixed. Table m uses
+     * density_triple[m % 3]. Default {0.25, 0.33, 0.40}. Only
+     * consulted when density_schedule == "mixed". */
+    double      density_triple[3];
 } glyph_config_t;
 
 /* Fill with project defaults (matches the values from Phase 3 run). */

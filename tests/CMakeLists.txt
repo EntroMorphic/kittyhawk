@@ -11,3 +11,6 @@ add_test(NAME glyph_libglyph COMMAND test_glyph_libglyph)
 
 add_executable(test_routed_tool_smoke test_routed_tool_smoke.c)
 add_test(NAME routed_tool_smoke COMMAND $<TARGET_FILE:test_routed_tool_smoke> $<TARGET_FILE:mnist_trit_lattice>)
+
+add_executable(test_multi_smoke test_multi_smoke.c)
+add_test(NAME multi_smoke COMMAND $<TARGET_FILE:test_multi_smoke> $<TARGET_FILE:mnist_routed_bucket_multi>)

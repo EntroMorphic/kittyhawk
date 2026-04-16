@@ -43,6 +43,9 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->resolver_sum = "scalar";
     cfg->radius_lambda = 8;
     cfg->density_schedule = "fixed";
+    cfg->density_triple[0] = 0.25;
+    cfg->density_triple[1] = 0.33;
+    cfg->density_triple[2] = 0.40;
 }
 
 void glyph_config_print_usage(const char* progname) {
@@ -87,12 +90,10 @@ void glyph_config_print_usage(const char* progname) {
         "                          (default 8; 0 reduces to scalar SUM; higher values\n"
         "                           shrink toward strict radius-0 preference)\n"
         "  --density_schedule <s>  'fixed' (default) — every table uses --density.\n"
-        "                          'mixed' — round-robin over {0.20, 0.33, 0.50}\n"
-        "                          across the M tables. Each family calibrates tau\n"
-        "                          on its own density so the three projections encode\n"
-        "                          different lattice faces. Targets the Fashion-MNIST\n"
-        "                          upper-body tied-gap problem; see journal/\n"
-        "                          fashion_mnist_atomics.md.\n"
+        "                          'mixed' — round-robin over --density_triple.\n"
+        "  --density_triple <a,b,c> density triple for mixed schedule [0.25,0.33,0.40]\n"
+        "                          Each value must be in (0, 1). Table m uses\n"
+        "                          density_triple[m %% 3].\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -205,6 +206,16 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
             if (parse_int(arg, val, &cfg->radius_lambda)) return 1;
         }
         else if (strcmp(arg, "--density_schedule") == 0) cfg->density_schedule = val;
+        else if (strcmp(arg, "--density_triple") == 0) {
+            if (sscanf(val, "%lf,%lf,%lf",
+                       &cfg->density_triple[0],
+                       &cfg->density_triple[1],
+                       &cfg->density_triple[2]) != 3) {
+                fprintf(stderr,
+                    "glyph_config: --density_triple expects 'a,b,c' (e.g. 0.25,0.33,0.40)\n");
+                return 1;
+            }
+        }
         else if (strcmp(arg, "--base_seed")  == 0) {
             if (parse_seed_quad(val, cfg->base_seed) != 0) {
                 fprintf(stderr, "glyph_config: --base_seed expects 'a,b,c,d'\n");
@@ -273,6 +284,13 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
         fprintf(stderr,
             "glyph_config: --density_schedule must be 'fixed' or 'mixed'\n");
         return 1;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (cfg->density_triple[i] <= 0.0 || cfg->density_triple[i] >= 1.0) {
+            fprintf(stderr,
+                "glyph_config: --density_triple values must be in (0, 1)\n");
+            return 1;
+        }
     }
     return 0;
 }

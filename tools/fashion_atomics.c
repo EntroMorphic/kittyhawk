@@ -154,10 +154,18 @@ int main(int argc, char** argv) {
     }
     if (!cfg.no_deskew) glyph_dataset_deskew(&ds);
 
+    const int mixed_mode = (strcmp(cfg.density_schedule, "mixed") == 0);
+
     printf("fashion_atomics (libglyph diagnostic)\n");
     printf("  data_dir=%s  deskew=%s\n", cfg.data_dir, cfg.no_deskew ? "off" : "on");
     printf("  n_proj=%d  density=%.2f  M=%d  max_radius=%d  min_cands=%d  max_union=%d\n",
            cfg.n_proj, cfg.density, cfg.m_max, cfg.max_radius, cfg.min_cands, cfg.max_union);
+    if (mixed_mode) {
+        printf("  density_schedule=mixed  density_triple=%.2f,%.2f,%.2f\n",
+               cfg.density_triple[0], cfg.density_triple[1], cfg.density_triple[2]);
+    } else {
+        printf("  density_schedule=fixed\n");
+    }
     printf("  n_train=%d  n_test=%d\n\n", ds.n_train, ds.n_test);
 
     int sig_bytes = M4T_TRIT_PACKED_BYTES(cfg.n_proj);
@@ -173,7 +181,8 @@ int main(int argc, char** argv) {
     for (int m = 0; m < M; m++) {
         uint32_t seeds[4];
         derive_seed((uint32_t)m, cfg.base_seed, seeds);
-        if (glyph_sig_builder_init(&builders[m], cfg.n_proj, ds.input_dim, cfg.density,
+        double table_density = mixed_mode ? cfg.density_triple[m % 3] : cfg.density;
+        if (glyph_sig_builder_init(&builders[m], cfg.n_proj, ds.input_dim, table_density,
                                     seeds[0], seeds[1], seeds[2], seeds[3],
                                     ds.x_train, n_calib) != 0) return 1;
         train_sigs[m] = calloc((size_t)ds.n_train * sig_bytes, 1);
