@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
 
     /* Load dataset. */
     glyph_dataset_t ds;
-    if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) {
+    if (glyph_dataset_load_auto(&ds, cfg.data_dir) != 0) {
         fprintf(stderr, "failed to load MNIST-format dataset from %s\n", cfg.data_dir);
         return 1;
     }
@@ -205,8 +205,37 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    /* Re-rank pass: build M wider signature encoders at N_PROJ=32.
+     * These are used only for re-scoring the Stage-1 union — no
+     * bucket index, no probing. Only built in full mode. */
+    const int rr_n_proj = 32;
+    const int rr_sig_bytes = M4T_TRIT_PACKED_BYTES(rr_n_proj);  /* 8 */
+    const int M_rr = cfg.m_max;
+    glyph_sig_builder_t* rr_builders = NULL;
+    uint8_t** rr_train_sigs = NULL;
+
+    if (full_mode) {
+        rr_builders = calloc((size_t)M_rr, sizeof(glyph_sig_builder_t));
+        rr_train_sigs = calloc((size_t)M_rr, sizeof(uint8_t*));
+        for (int m = 0; m < M_rr; m++) {
+            uint32_t seeds[4];
+            derive_seed((uint32_t)m, cfg.base_seed, seeds);
+            double td = mixed_mode ? cfg.density_triple[m % 3] : cfg.density;
+            if (glyph_sig_builder_init(&rr_builders[m], rr_n_proj, ds.input_dim, td,
+                                        seeds[0], seeds[1], seeds[2], seeds[3],
+                                        ds.x_train, n_calib) != 0) {
+                fprintf(stderr, "re-rank builder init failed for table %d\n", m);
+                return 1;
+            }
+            rr_train_sigs[m] = calloc((size_t)ds.n_train * rr_sig_bytes, 1);
+            glyph_sig_encode_batch(&rr_builders[m], ds.x_train, ds.n_train, rr_train_sigs[m]);
+        }
+    }
+
     double t_build_sec = (double)(clock() - t_build) / CLOCKS_PER_SEC;
-    printf("Built %d tables in %.2fs.\n", cfg.m_max, t_build_sec);
+    printf("Built %d tables", cfg.m_max);
+    if (full_mode) printf(" + %d re-rank encoders (N_PROJ=%d)", M_rr, rr_n_proj);
+    printf(" in %.2fs.\n", t_build_sec);
 
     /* Sanity: distinct buckets on table 0 (matches 37906 for canonical seed). */
     if (cfg.verbose) {
@@ -255,6 +284,7 @@ int main(int argc, char** argv) {
     int* oracle_correct = calloc((size_t)n_M, sizeof(int));
     int* vote_correct   = calloc((size_t)n_M, sizeof(int));
     int* sum_correct    = calloc((size_t)n_M, sizeof(int));
+    int* rr_correct     = calloc((size_t)n_M, sizeof(int));
     int* ptm_correct    = calloc((size_t)n_M, sizeof(int));
     long* total_union   = calloc((size_t)n_M, sizeof(long));
     long* total_probes  = calloc((size_t)n_M, sizeof(long));
@@ -273,6 +303,21 @@ int main(int argc, char** argv) {
      * itself is already a uint8_t**, so we pass it directly to the
      * resolvers — no redundant parallel copy. */
     const uint8_t** q_sigs_p = calloc((size_t)cfg.m_max, sizeof(uint8_t*));
+
+    /* Re-rank query-sig scratch: encode one query at N_PROJ=32 on the fly. */
+    uint8_t** rr_q_bufs = NULL;
+    const uint8_t** rr_q_ptrs = NULL;
+    uint8_t* rr_mask = NULL;
+    if (full_mode) {
+        rr_q_bufs = calloc((size_t)M_rr, sizeof(uint8_t*));
+        rr_q_ptrs = calloc((size_t)M_rr, sizeof(const uint8_t*));
+        for (int m = 0; m < M_rr; m++) {
+            rr_q_bufs[m] = malloc(rr_sig_bytes);
+            rr_q_ptrs[m] = rr_q_bufs[m];
+        }
+        rr_mask = malloc(rr_sig_bytes);
+        memset(rr_mask, 0xFF, rr_sig_bytes);
+    }
 
     glyph_union_t u = {0};
     u.y_train = ds.y_train;
@@ -331,6 +376,17 @@ int main(int argc, char** argv) {
                 }
                 if (pred_s == y) sum_correct[mi]++;
 
+                /* Re-rank: re-score the Stage-1 union at N_PROJ=32. */
+                {
+                    const m4t_mtfp_t* qvec = ds.x_test + (size_t)s * ds.input_dim;
+                    for (int m = 0; m < M_rr; m++)
+                        glyph_sig_encode(&rr_builders[m], qvec, rr_q_bufs[m]);
+                    int pred_rr = glyph_resolver_sum(
+                        &u, M_rr, rr_sig_bytes,
+                        rr_train_sigs, rr_q_ptrs, rr_mask);
+                    if (pred_rr == y) rr_correct[mi]++;
+                }
+
                 /* Record per-class and confusion at the last M value.
                  * Guards match the per_class_total bounds check. */
                 if (M_target == final_M && y >= 0 && y < N_CLASSES) {
@@ -366,12 +422,13 @@ int main(int argc, char** argv) {
 
     if (full_mode) {
         printf("Resolver sweep:\n");
-        printf("   M      VOTE      SUM       PTM      oracle\n");
+        printf("   M      VOTE    SUM_16   SUM_32_RR    PTM      oracle\n");
         for (int mi = 0; mi < n_M; mi++) {
-            printf("  %3d   %6.2f%%  %6.2f%%  %6.2f%%   %6.2f%%\n",
+            printf("  %3d   %6.2f%%  %6.2f%%   %6.2f%%  %6.2f%%   %6.2f%%\n",
                    m_values[mi],
                    100.0 * vote_correct[mi] / ds.n_test,
                    100.0 * sum_correct[mi]  / ds.n_test,
+                   100.0 * rr_correct[mi]   / ds.n_test,
                    100.0 * ptm_correct[mi]  / ds.n_test,
                    100.0 * oracle_correct[mi] / ds.n_test);
         }
@@ -427,9 +484,22 @@ int main(int argc, char** argv) {
     /* Cleanup. */
     free(mask);
     free(st.votes); free(st.min_radius); free(st.hit_list);
-    free(oracle_correct); free(vote_correct); free(sum_correct); free(ptm_correct);
+    free(oracle_correct); free(vote_correct); free(sum_correct);
+    free(rr_correct); free(ptm_correct);
     free(total_union); free(total_probes);
     free(q_sigs_p);
+
+    if (rr_q_bufs) {
+        for (int m = 0; m < M_rr; m++) free(rr_q_bufs[m]);
+        free(rr_q_bufs); free(rr_q_ptrs); free(rr_mask);
+    }
+    if (rr_builders) {
+        for (int m = 0; m < M_rr; m++) {
+            glyph_sig_builder_free(&rr_builders[m]);
+            free(rr_train_sigs[m]);
+        }
+        free(rr_builders); free(rr_train_sigs);
+    }
 
     for (int m = 0; m < cfg.m_max; m++) {
         glyph_sig_builder_free(&builders[m]);

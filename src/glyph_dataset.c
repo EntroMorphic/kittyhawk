@@ -198,6 +198,140 @@ static void deskew_all(m4t_mtfp_t* images, int n, int img_w, int img_h, int inpu
     free(buf);
 }
 
+/* ----------------------------------------------------------------
+ * CIFAR-10 binary loader
+ * ----------------------------------------------------------------
+ * Reads raw float32/int32 dumps exported from the Python pipeline.
+ * Float→MTFP conversion happens once at load time.
+ * ---------------------------------------------------------------- */
+
+static long file_size(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fclose(f);
+    return sz;
+}
+
+static m4t_mtfp_t* load_float32_images(const char* path, int dim, int* n_out) {
+    long sz = file_size(path);
+    if (sz < 0) {
+        fprintf(stderr, "glyph_dataset: cannot open %s\n", path);
+        return NULL;
+    }
+    size_t expected_per = (size_t)dim * sizeof(float);
+    if (sz == 0 || (size_t)sz % expected_per != 0) {
+        fprintf(stderr, "glyph_dataset: %s size %ld not divisible by %zu\n",
+                path, sz, expected_per);
+        return NULL;
+    }
+    int n = (int)((size_t)sz / expected_per);
+    *n_out = n;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    size_t total = (size_t)n * dim;
+    float* raw = malloc(total * sizeof(float));
+    if (!raw) { fclose(f); return NULL; }
+    if (fread(raw, sizeof(float), total, f) != total) {
+        fprintf(stderr, "glyph_dataset: %s short read\n", path);
+        free(raw); fclose(f); return NULL;
+    }
+    fclose(f);
+
+    m4t_mtfp_t* data = malloc(total * sizeof(m4t_mtfp_t));
+    if (!data) { free(raw); return NULL; }
+    for (size_t i = 0; i < total; i++) {
+        float v = raw[i];
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        data[i] = (m4t_mtfp_t)(v * (float)M4T_MTFP_SCALE);
+    }
+    free(raw);
+    return data;
+}
+
+static int* load_int32_labels(const char* path, int* n_out) {
+    long sz = file_size(path);
+    if (sz < 0) {
+        fprintf(stderr, "glyph_dataset: cannot open %s\n", path);
+        return NULL;
+    }
+    if (sz == 0 || (size_t)sz % sizeof(int32_t) != 0) {
+        fprintf(stderr, "glyph_dataset: %s size %ld not divisible by 4\n", path, sz);
+        return NULL;
+    }
+    int n = (int)((size_t)sz / sizeof(int32_t));
+    *n_out = n;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    int32_t* raw = malloc((size_t)n * sizeof(int32_t));
+    if (!raw) { fclose(f); return NULL; }
+    if (fread(raw, sizeof(int32_t), (size_t)n, f) != (size_t)n) {
+        free(raw); fclose(f); return NULL;
+    }
+    fclose(f);
+
+    int* labels = malloc((size_t)n * sizeof(int));
+    if (!labels) { free(raw); return NULL; }
+    for (int i = 0; i < n; i++) labels[i] = (int)raw[i];
+    free(raw);
+    return labels;
+}
+
+int glyph_dataset_load_cifar10(glyph_dataset_t* ds, const char* dir) {
+    memset(ds, 0, sizeof(*ds));
+    const int dim = 3072;  /* 32 × 32 × 3 */
+    char path[1024];
+
+    snprintf(path, sizeof(path), "%s/train_images.bin", dir);
+    ds->x_train = load_float32_images(path, dim, &ds->n_train);
+    if (!ds->x_train) return 1;
+
+    snprintf(path, sizeof(path), "%s/train_labels.bin", dir);
+    {
+        int n_labels = 0;
+        ds->y_train = load_int32_labels(path, &n_labels);
+        if (!ds->y_train || n_labels != ds->n_train) return 1;
+    }
+
+    snprintf(path, sizeof(path), "%s/test_images.bin", dir);
+    ds->x_test = load_float32_images(path, dim, &ds->n_test);
+    if (!ds->x_test) return 1;
+
+    snprintf(path, sizeof(path), "%s/test_labels.bin", dir);
+    {
+        int n_labels = 0;
+        ds->y_test = load_int32_labels(path, &n_labels);
+        if (!ds->y_test || n_labels != ds->n_test) return 1;
+    }
+
+    ds->img_h = 32;
+    ds->img_w = 32;
+    ds->input_dim = dim;
+    return 0;
+}
+
+int glyph_dataset_load_auto(glyph_dataset_t* ds, const char* dir) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/train-images-idx3-ubyte", dir);
+    FILE* f = fopen(path, "rb");
+    if (f) {
+        fclose(f);
+        return glyph_dataset_load_mnist(ds, dir);
+    }
+    snprintf(path, sizeof(path), "%s/train_images.bin", dir);
+    f = fopen(path, "rb");
+    if (f) {
+        fclose(f);
+        return glyph_dataset_load_cifar10(ds, dir);
+    }
+    fprintf(stderr, "glyph_dataset: no recognized dataset format in %s\n", dir);
+    return 1;
+}
+
 void glyph_dataset_deskew(glyph_dataset_t* ds) {
     deskew_all(ds->x_train, ds->n_train, ds->img_w, ds->img_h, ds->input_dim);
     deskew_all(ds->x_test,  ds->n_test,  ds->img_w, ds->img_h, ds->input_dim);

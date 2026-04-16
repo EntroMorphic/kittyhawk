@@ -110,6 +110,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(fashion_atomics tools/fashion_atomics.c)
     target_link_libraries(fashion_atomics PRIVATE glyph)
+
+    add_executable(cifar_seed_overlap tools/cifar_seed_overlap.c)
+    target_link_libraries(cifar_seed_overlap PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed

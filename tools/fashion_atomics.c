@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
     cfg.mode = "full";  /* atomics tool always runs full pipeline */
 
     glyph_dataset_t ds;
-    if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) {
+    if (glyph_dataset_load_auto(&ds, cfg.data_dir) != 0) {
         fprintf(stderr, "failed to load dataset from %s\n", cfg.data_dir);
         return 1;
     }

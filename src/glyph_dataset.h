@@ -43,6 +43,24 @@ typedef struct {
  */
 int glyph_dataset_load_mnist(glyph_dataset_t* ds, const char* dir);
 
+/* Load CIFAR-10 from raw binary files:
+ *   <dir>/train_images.bin   (N_train × 3072 float32, [0,1]-scaled)
+ *   <dir>/train_labels.bin   (N_train × int32)
+ *   <dir>/test_images.bin    (N_test  × 3072 float32, [0,1]-scaled)
+ *   <dir>/test_labels.bin    (N_test  × int32)
+ *
+ * File sizes are self-describing: N = file_size / (3072 × 4) for images,
+ * N = file_size / 4 for labels. Pixel float32 values are converted to
+ * MTFP via (m4t_mtfp_t)(pixel × M4T_MTFP_SCALE).
+ */
+int glyph_dataset_load_cifar10(glyph_dataset_t* ds, const char* dir);
+
+/* Auto-detect dataset format and load:
+ *   - If <dir>/train-images-idx3-ubyte exists → MNIST IDX
+ *   - If <dir>/train_images.bin exists → CIFAR-10 binary
+ * Returns 0 on success. */
+int glyph_dataset_load_auto(glyph_dataset_t* ds, const char* dir);
+
 /* Apply integer-moment deskew to every image in x_train and x_test.
  * Computes per-image shear from the image's own second moments (int64)
  * and applies it via pixel shifts per row. Zero float. Idempotent — a
