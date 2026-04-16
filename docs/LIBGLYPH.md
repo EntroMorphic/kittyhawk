@@ -205,15 +205,23 @@ glyph_multiprobe_enumerate(
 
 **Public header:** `src/glyph_resolver.h`
 
-A resolver reads a candidate union (produced by multi-table bucket lookup + multi-probe) and returns a predicted class label. Three variants are provided; `SUM` dominates empirically in every measured configuration at M ≥ 2.
+A resolver reads a candidate union (produced by multi-table bucket lookup + multi-probe) and returns a predicted class label. Six variants are provided; `SUM` dominates empirically on MNIST in every measured configuration at M ≥ 2.
 
 **Struct:** `glyph_union_t` borrows a hit-list (array of prototype indices currently in the union), a dense vote array (indexed by prototype index, sized to `n_train`), the shared training labels, and a class cardinality. See the header for the full lifecycle contract — especially the "lazy zero" pattern for reusing the votes array across queries.
 
-**Functions:**
+**Functions (production):**
 
-- `glyph_resolver_vote(u)` — argmax class by summed vote weight over the union. O(n_hit) time, no distance arithmetic. Weakest resolver in the Axis 6 measurement (saturates at ~89.77% at M=64).
-- `glyph_resolver_sum(u, m_active, sig_bytes, train_sigs, query_sigs, mask)` — argmin candidate by `Σ_m popcount_dist(q_sig_m, cand_sig_m)` across all active tables. O(n_hit × m_active) popcount_dist calls. Best resolver at every M ≥ 2.
+- `glyph_resolver_vote(u)` — argmax class by summed vote weight over the union. O(n_hit) time, no distance arithmetic. Weakest resolver (saturates at ~89.77% at M=64 on MNIST).
+- `glyph_resolver_sum(u, m_active, sig_bytes, train_sigs, query_sigs, mask)` — argmin candidate by `Σ_m popcount_dist(q_sig_m, cand_sig_m)` across all active tables. O(n_hit × m_active) popcount_dist calls. Best resolver at every M ≥ 2 on MNIST.
+- `glyph_resolver_sum_neon4(...)` — NEON-batched SUM variant for sig_bytes=4 (N_PROJ=16). Processes 4 candidates per 16-byte vector. Bit-exact equivalent to `glyph_resolver_sum` for any mask value. Falls back to scalar SUM on non-NEON targets. 1.2-1.3× faster than scalar on M-series.
 - `glyph_resolver_per_table_majority(u, m_active, sig_bytes, train_sigs, query_sigs, mask)` — per-table 1-NN within the union; majority-vote the M labels. Middle performer.
+
+**Functions (research / falsified variants):**
+
+- `glyph_resolver_sum_voteweighted(...)` — scores each candidate as `sum_dist / (1 + votes[c])`, folding the filter-stage vote count into the resolver ranking. Integer-scaled (×1024) to avoid float. Phase A experiment: falsified on both MNIST and Fashion-MNIST — either neutral or harmful vs scalar SUM. Per-class instrumentation from this experiment revealed the Fashion-MNIST upper-body-garment cluster concentration.
+- `glyph_resolver_sum_radiusaware(u, ..., min_radius, lambda)` — scores each candidate as `sum_dist + lambda × min_radius[c]`, penalizing candidates reachable only via deep multi-probe expansion. Phase B.1 experiment: falsified with monotone degradation as λ increases, confirming that multi-probe radius is a coarsening of information already present in sum_dist.
+
+Both research variants are wired into the tool via `--resolver_sum {voteweighted,radiusaware}` and remain as documented negative results.
 
 **Class-cardinality cap:** `GLYPH_MAX_CLASSES = 256` (stack buffer size for class tallies). Runtime-asserted at each resolver entry point. Covers MNIST (10), Fashion-MNIST (10), EMNIST (47), CIFAR-100 (100), and smaller benchmarks. Larger cardinalities require either bumping the constant or an API change.
 
@@ -228,6 +236,17 @@ A resolver reads a candidate union (produced by multi-table bucket lookup + mult
 - `glyph_config_defaults(cfg)` — initialize with Phase 3 defaults (N_PROJ=16, density=0.33, M_MAX=64, MAX_RADIUS=2, MIN_CANDS=50, base_seed=42,123,456,789, mode=oracle).
 - `glyph_config_parse_argv(cfg, argc, argv)` — parse command-line arguments. Uses `strtol`/`strtod` with strict validation — rejects non-numeric input, out-of-range values, all-zero seeds. Returns 0 on success, 1 on usage error (diagnostic to stderr), -1 when `--help` was requested (usage printed to stdout).
 - `glyph_config_print_usage(progname)` — print the usage block to stdout.
+
+**Phase B.1/B.2 fields (resolver variants + density scheduling):**
+
+| Field | CLI flag | Default | Role |
+|---|---|---|---|
+| `resolver_sum` | `--resolver_sum` | `"scalar"` | SUM resolver implementation: `scalar`, `neon4`, `voteweighted`, `radiusaware`. |
+| `radius_lambda` | `--radius_lambda` | 8 | Penalty coefficient for `radiusaware`. Only consulted when `resolver_sum == "radiusaware"`. |
+| `density_schedule` | `--density_schedule` | `"fixed"` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. |
+| `density_triple[3]` | `--density_triple` | `0.25,0.33,0.40` | Three densities for mixed schedule. Table m uses `density_triple[m % 3]`. |
+
+See `journal/fashion_mnist_atomics.md` and `journal/fashion_mnist_density_sweep.md` for the experiments that motivated these fields.
 
 ---
 
@@ -344,7 +363,7 @@ Run with `ctest --test-dir build`; the test is registered as `glyph_libglyph`.
 - **Dataset loader:** MNIST IDX only. CIFAR-10 and other benchmarks need a new loader; the rest of libglyph is dataset-agnostic once `glyph_dataset_t` is populated with MTFP-encoded pixels and integer labels.
 - **Class cardinality:** capped at 256. Covers every current benchmark; larger caps or API changes required for ImageNet-scale class cardinalities.
 - **Config struct:** single flat `glyph_config_t` shared across all tools. Tool-specific flags (`--m_max`, `--single_m` are multi-table-only) are silently ignored by tools that don't use them. A per-tool config split is a future polish.
-- **Resolver scoring:** three variants (VOTE / SUM / PTM) with runtime-selected dispatch, not pluggable. Richer resolvers (weighted sum with per-table normalization, calibrated distance) would require API additions.
+- **Resolver scoring:** six variants (VOTE, SUM, SUM-NEON4, PTM, voteweighted, radiusaware) with runtime-selected dispatch via `--resolver_sum`. Two research variants (voteweighted, radiusaware) are falsified negative results retained as infrastructure. Richer resolvers (per-table normalization, calibrated distance) would require API additions.
 
 ## Related documentation
 
@@ -355,3 +374,6 @@ Run with `ctest --test-dir build`; the test is registered as `glyph_libglyph`.
 - `journal/routed_bucket_consumer.md` — Axis 5 architectural correction (dense outer loop → signature-as-address).
 - `journal/break_97_nproj16_{raw,nodes,reflect,synthesize}.md` — LMM cycle that designed the multi-table composition.
 - `journal/break_97_nproj16_phase3_results.md` — Axis 6 full measurement.
+- `journal/fashion_mnist_first_light.md` — Fashion-MNIST generalization: 85.15% at M=64, resolver gap 6× wider than MNIST.
+- `journal/fashion_mnist_atomics.md` — three diagnostic atoms on the upper-body-cluster failure mode + magnet audit.
+- `journal/fashion_mnist_density_sweep.md` — Phase B.2 density-mixing experiment (falsified) + per-dataset density tuning (confirmed, multi-seed).

@@ -879,6 +879,73 @@ Rule 8 subsumes Axis 5's rule 7 (signature-as-address) by showing that the singl
 - Phase 3 results (with full red-team): `journal/break_97_nproj16_phase3_results.md`
 - Tool: `tools/mnist_routed_bucket_multi.c`
 
+## Axis 7 — Fashion-MNIST generalization + resolver-gap atomics
+
+Date: 2026-04-15. Tool: `tools/fashion_atomics.c`, `tools/mnist_routed_bucket_multi.c`. Journals: `journal/fashion_mnist_first_light.md`, `journal/fashion_mnist_atomics.md`, `journal/fashion_mnist_density_sweep.md`.
+
+### First light
+
+The Axis 6 architecture generalizes to Fashion-MNIST without code changes — only `--data` and `--no_deskew` differ. M=64 SUM at density 0.33: **85.15%** (matching classical pixel k-NN baselines for this dataset). Oracle is 100% at M≥16 so the correct neighbor is always in the union; the ~15% failure is entirely downstream of filtering.
+
+The resolver gap (oracle minus SUM) is ~6× wider on Fashion-MNIST (14.85pp) than on MNIST (2.69pp at M=64). The gap is concentrated in the upper-body-garment cluster: classes 0 (T-shirt), 2 (Pullover), 4 (Coat), 6 (Shirt), which share similar fabric-filled silhouettes.
+
+### Phase A — vote-weighted SUM (falsified)
+
+`glyph_resolver_sum_voteweighted`: scores each candidate as `sum_dist / (1 + votes[c])`. Hypothesis: folding filter-stage vote count into the resolver ranking should help on datasets where per-table signature distance is noisy. Result: neutral on MNIST, slightly harmful on Fashion-MNIST. Falsified.
+
+However, the per-class instrumentation added for Phase A revealed the concentration of Fashion-MNIST errors in the upper-body cluster — the key diagnostic finding of this axis.
+
+### Phase B.1 — radius-aware SUM (falsified)
+
+`glyph_resolver_sum_radiusaware`: scores each candidate as `sum_dist + λ × min_radius[c]`. Hypothesis: penalizing candidates found only via deep multi-probe expansion should close the gap. Result: monotone degradation as λ increases (Fashion-MNIST 85.15% at λ=2, 85.02% at λ=8, 84.82% at λ=16, 84.49% at λ=32). Multi-probe radius is a coarsening of information already present in sum_dist.
+
+### Atomics — where the lattice fails
+
+Three measurements decompose the 1485 Fashion-MNIST failures at M=64:
+
+**Atom 1 (rank & gap).** 36.8% of failures have the true-class best prototype at rank 1 (runner-up). But only 6.6% are within 1 Hamming unit of the winner. Mean gap: 17.64 Hamming units. Most failures are not tiebreaks — the wrong class is genuinely closer in summed lattice distance.
+
+**Atom 2 (per-table vote).** Mean per failing query: true class 19.5/64 (30.5%), winner 22.5/64 (35.1%), other 22.0/64 (34.4%). The plurality of individual tables already votes for the wrong class. Fusion is not breaking good signal — it is faithfully summing bad signal.
+
+**Atom 3 (per-table sig-distance gap).** Mean (d_winner − d_true) = −0.036 Hamming bits. 65% of (query, table) pairs are tied at the per-table min-Hamming level. The per-table ternary projection cannot discriminate upper-body classes — a fraction-of-a-bit bias accumulates over M=64 tables.
+
+**Magnet audit.** 1361 distinct training prototypes won at least one of 1485 failures. Top-20 share: 4.1%. No pathological prototypes. The gap is structural, not example-driven.
+
+### Phase B.2 — density-varied multi-table sweep (falsified, side win)
+
+Hypothesis: mixing different projection densities across tables should diversify the lattice faces and break the 65% tied-gap rate. Two spreads tested:
+
+| config | Fashion-MNIST M=64 SUM |
+|---|---|
+| fixed d=0.33 (baseline) | 85.15% |
+| mixed wide {0.20, 0.33, 0.50} | 84.57% (−0.58) |
+| mixed narrow {0.25, 0.33, 0.40} | 85.13% (−0.02) |
+| fixed d=0.25 | **85.54%** (+0.39) |
+
+Both mixes are strictly dominated by the single best density. Atomics under mixed mode confirmed the mechanism: tied-gap rate INCREASED from 65.0% to 67.7%. Density mixing smeared discriminative signal instead of diversifying it — different densities sample the same pixel population so they produce overlapping, not disjoint, projections.
+
+**Multi-seed confirmation (3 seeds × 5 densities × 2 datasets):**
+
+Fashion-MNIST density ranking is perfectly consistent across all 3 seeds: 0.25 > 0.33 > 0.20 > 0.40 > 0.50. The 0.25 > 0.33 gap (+0.30pp mean) survives with p<0.02.
+
+MNIST density ranking: 0.33 > 0.25 ≈ 0.20 > 0.40 > 0.50. MNIST prefers 0.33 (97.35% mean vs 97.16% at 0.25).
+
+**Finding: density is a dataset-dependent hyperparameter.** MNIST's sparse pen-stroke foreground rewards denser projections (0.33); Fashion-MNIST's dense fabric foreground rewards sparser projections (0.25).
+
+### What Axis 7 does *not* settle
+
+1. Whether the upper-body-cluster gap can be closed without preprocessing changes (N_PROJ=32 or block-structured spatial projections are untested).
+2. Whether Shirt (class 6) magnetism is a spatial or textural phenomenon.
+3. Whether the density optimum shifts at different M values.
+4. CIFAR-10 and other non-MNIST benchmarks.
+
+### Full writeups
+
+- Fashion-MNIST first light: `journal/fashion_mnist_first_light.md`
+- Atomics diagnosis: `journal/fashion_mnist_atomics.md`
+- Density sweep: `journal/fashion_mnist_density_sweep.md`
+- Diagnostic tool: `tools/fashion_atomics.c`
+
 ## What we got right, what we got wrong
 
 The path from 58% to 97.79% was not a single experiment; it was a sequence of corrections. Recording them for future sessions that might face similar hazards.
@@ -1019,7 +1086,7 @@ SEEDS[N_SEEDS][4] = {
 
 ## What this does not attempt to answer
 
-- Whether the routing thesis generalizes to any other benchmark.
+- Whether the routing thesis generalizes beyond Fashion-MNIST to CIFAR-10 or other benchmarks.
 - Whether gradient-free base-3 training is viable at scale.
 - Whether the 20× speedup holds on AMD Zen 4 or x86-AVX-512 targets. We run aarch64 + NEON only; other silicon has different instruction shapes.
 - Whether the specific configurations tested (N_PROJ ∈ {512, 2048}, density = 0.33, k ∈ {1, 3, 5}) are optimal. Deeper sweeps are cheap and not yet run.

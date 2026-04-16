@@ -10,6 +10,20 @@ The first entry below marks the ground-zero rebuild that restructured the substr
 
 Triggered by a full audit that identified a collapse of Multi-Trit Floating Point into a fixed-point reading with a shared global scale, and a substrate drifting toward dense computation over base-3 hardware. The rebuild restores MTFP as base-3 floating point (mantissa cells + per-block exponent) and puts routing primitives first.
 
+### Fashion-MNIST generalization + resolver-gap diagnosis (2026-04-15)
+
+- Architecture generalizes to Fashion-MNIST at 85.15% (M=64, density=0.33, SUM) — matching classical pixel k-NN baselines. Resolver gap is ~6× wider than MNIST, concentrated in upper-body-garment cluster.
+- Fix 1: `m4t_popcount_dist` builtin popcount fast paths (2-3× speedup, bit-exact).
+- Fix 2: `glyph_resolver_sum_neon4` — NEON-batched SUM resolver, 4 candidates per 16-byte vector (1.2-1.3× additional speedup, bit-exact).
+- Phase A: `glyph_resolver_sum_voteweighted` — vote-weighted SUM resolver. Falsified on both datasets. Per-class instrumentation revealed Fashion-MNIST gap concentrated in classes {0, 2, 4, 6}.
+- Phase B.1: `glyph_resolver_sum_radiusaware` — radius-aware SUM resolver. Falsified (monotone degradation with λ).
+- `tools/fashion_atomics.c` — diagnostic tool measuring 3 atoms per failing query: rank/gap, per-table vote agreement, per-table sig-distance gap. Found: 65% of per-table pairs are tied, −0.036 bit mean gap. Magnet audit: no pathological prototypes, gap is structural.
+- Phase B.2: `--density_schedule {fixed,mixed}` + `--density_triple a,b,c` CLI flags. Density mixing falsified (tied-gap rate increased from 65% to 67.7%). Per-dataset density tuning confirmed (multi-seed, p<0.02): Fashion-MNIST peaks at 0.25, MNIST at 0.33.
+- `--no_deskew` flag for datasets without a canonical shear axis.
+- `--resolver_sum {scalar,neon4,voteweighted,radiusaware}` and `--radius_lambda` CLI flags.
+- `tests/test_multi_smoke.c` — smoke test covering fixed, wide-mixed, and narrow-mixed density schedules. 11/11 ctest green.
+- FINDINGS.md Axis 7, LIBGLYPH.md resolver/config sections, HYPERPARAMETERS.md flag table, README.md headline results — all updated.
+
 ### Added
 
 **Documents.**

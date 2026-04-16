@@ -25,7 +25,7 @@ Every flag below is consumed by both `mnist_routed_bucket` (single-table Axis 5)
 |---|---|---|---|
 | `--data <path>` | `./data/mnist` | MNIST IDX directory | `glyph_config_parse_argv` |
 | `--n_proj <int>` | 16 | Signature dimension in trits per table. At N_PROJ=16 the signature is 4 bytes (packed 2-bit trits), which is currently the only supported width for the bucket index. | `glyph_sig_builder_init` |
-| `--density <float>` | 0.33 | τ calibration density (percentile of \|projection\|). Balanced base-3 is 0.33; density variation (0.20, 0.50) is a future knob for breaking density-sensitive confusion pairs. | `glyph_sig_builder_init` |
+| `--density <float>` | 0.33 | τ calibration density (percentile of \|projection\|). Balanced base-3 is 0.33. **Dataset-dependent optimum:** MNIST peaks at 0.33 (97.35% mean over 3 seeds); Fashion-MNIST peaks at 0.25 (85.43% mean over 3 seeds). See Phase B.2 journal for the multi-seed sweep. | `glyph_sig_builder_init` |
 | `--max_radius <int>` | 2 | Ternary multi-probe budget per table. 0 = exact-match only. 1 = exact + cost-1 neighbors (~27 probes at density 0.33). 2 = exact + cost-1 + cost-2 (~340 probes at density 0.33). | `glyph_multiprobe_enumerate` |
 | `--min_cands <int>` | 50 | Per-table candidate early-stop threshold. Once a table's neighborhood yields this many hits, multi-probe stops expanding for that table. | per-tool probe loop |
 | `--max_union <int>` | 16384 | Cap on the cross-table candidate union size. Prevents pathological fan-out on degenerate buckets (e.g., the all-zero signature region). | per-tool probe state |
@@ -41,6 +41,11 @@ Consumed by `mnist_routed_bucket_multi`; silently ignored by `mnist_routed_bucke
 |---|---|---|
 | `--m_max <int>` | 64 | Number of independent bucket tables to build at startup. Table 0 uses `--base_seed`; tables m ≥ 1 use a fixed derivation from m. |
 | `--single_m <int>` | 0 | If > 0, restrict the M sweep to a single value. The default 0 runs the full sweep over `M ∈ {1, 2, 4, 8, 16, 32, 64}` (clamped to `--m_max`). |
+| `--resolver_sum <str>` | `scalar` | SUM resolver implementation. `scalar` = general-purpose reference; `neon4` = NEON-batched bit-exact variant for sig_bytes=4; `voteweighted` = Phase A research variant (falsified); `radiusaware` = Phase B.1 research variant (falsified). |
+| `--radius_lambda <int>` | 8 | Radius penalty for `--resolver_sum radiusaware`. Higher = stronger preference for r=0 candidates. |
+| `--density_schedule <str>` | `fixed` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. Phase B.2 showed mixing is strictly dominated by the single best density. |
+| `--density_triple <a,b,c>` | `0.25,0.33,0.40` | Three densities for `--density_schedule mixed`. Table m uses `density_triple[m % 3]`. |
+| `--no_deskew` | off | Skip integer-moment deskew. Recommended for Fashion-MNIST and other non-digit datasets. |
 
 ### Axis 6 headline configuration (breaks 97% at N_PROJ=16)
 
@@ -72,11 +77,14 @@ Produces a 3×4 sweep (MAX_RADIUS ∈ {0,1,2} × MIN_CANDS ∈ {1,20,100,400}); 
 
 ### Resolver implementations (multi-table)
 
-| Resolver | Scoring | Best at | Location |
-|---|---|---|---|
-| VOTE | argmax class by summed vote weight over the union | Never (saturates ~89.77% at M=64) | `glyph_resolver_vote` |
-| **SUM** | argmin candidate by `Σ_m popcount_dist(q_sig_m, cand_sig_m)` across all M tables | Always (wins at every M ≥ 2) | `glyph_resolver_sum` |
-| PTM | Per-table 1-NN, majority-vote the M labels | Middle (95.36% at M=64) | `glyph_resolver_per_table_majority` |
+| Resolver | `--resolver_sum` | Scoring | Status | Location |
+|---|---|---|---|---|
+| VOTE | — | argmax class by summed vote weight over the union | Production (weakest; saturates ~89.77% at M=64) | `glyph_resolver_vote` |
+| **SUM** | `scalar` | argmin candidate by `Σ_m popcount_dist` across all M tables | **Production (best at every M ≥ 2)** | `glyph_resolver_sum` |
+| SUM-NEON4 | `neon4` | NEON-batched SUM; 4 candidates per vector. Bit-exact. | Production (speed; 1.2-1.3× faster than scalar) | `glyph_resolver_sum_neon4` |
+| PTM | — | Per-table 1-NN, majority-vote the M labels | Production (middle performer) | `glyph_resolver_per_table_majority` |
+| Vote-weighted SUM | `voteweighted` | `sum_dist / (1 + votes[c])` | **Falsified** (Phase A; neutral/harmful on both datasets) | `glyph_resolver_sum_voteweighted` |
+| Radius-aware SUM | `radiusaware` | `sum_dist + λ × min_radius[c]` | **Falsified** (Phase B.1; monotone degradation with λ) | `glyph_resolver_sum_radiusaware` |
 
 ### Signature-as-address semantics (all production tools)
 
@@ -260,7 +268,7 @@ From the 81-cell × 3-seed sweep in `journal/full_matrix_sweep.md`:
 
 ```bash
 cmake -S . -B build && cmake --build build -j
-ctest --test-dir build        # 9/9 tests should pass
+ctest --test-dir build        # 11/11 tests should pass
 ```
 
 ### Production consumers (Axis 5 / 6 headlines)

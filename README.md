@@ -19,7 +19,7 @@ Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation c
   - `mnist_routed_bucket_multi` — multi-table bucket-indexed LSH with cross-table union-merge and summed-distance resolver (Axis 6); **breaks 97% at N_PROJ=16**
 - **Architecture discipline:** every active routed consumer is zero-dense-scan at the application level; cascade tools are retained as research scaffolding.
 - **Red-team:** six rounds plus a full libglyph refactor red-team complete. See [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) and recent `CHANGELOG.md` entries.
-- **Tests:** 9/9 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`).
+- **Tests:** 11/11 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
 
 ## Architecture
 
@@ -35,11 +35,12 @@ src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infra
   glyph_sig.{h,c}       random ternary projection + density-calibrated τ + signature encoder
   glyph_bucket.{h,c}    sorted bucket index keyed on packed-trit signatures
   glyph_multiprobe.{h,c} ternary Hamming neighbor enumeration (radius 0, 1, 2)
-  glyph_resolver.{h,c}  VOTE / SUM / PTM resolver variants over a candidate union
+  glyph_resolver.{h,c}  6 resolver variants: VOTE, SUM, SUM-NEON4, PTM, voteweighted, radiusaware
   glyph_config.{h,c}    hyperparameter struct + CLI long-option parser
   glyph_*.h             thin wrapper headers that alias m4t_* into glyph_* namespace
 tools/                — CLI consumer tools built on libglyph.
                          Production: mnist_routed_bucket, mnist_routed_bucket_multi
+                         Diagnostic: fashion_atomics (resolver-gap atomics on Fashion-MNIST)
                          Research scaffolding: mnist_cascade_*, mnist_routed_knn, mnist_full_sweep,
                            mnist_resolver_sweep, mnist_local_*, mnist_lvg_*, mnist_probe_nproj16,
                            mnist_trit_lattice, mnist_routed_lattice, mnist_routed_weighted,
@@ -115,7 +116,7 @@ Default run reproduces the Axis 5 measurement: **82.58% at 9.9 μs/query** (MAX_
 ctest --test-dir build
 ```
 
-All 9 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 2 integration tests (`routed_tool_smoke`, `m4t_ternary_matmul`).
+All 11 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 4 integration tests (`m4t_ternary_matmul`, `m4t_trit_pack`, `routed_tool_smoke`, `multi_smoke`).
 
 ## Documentation map
 
@@ -131,6 +132,7 @@ All 9 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alias
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes since the ground-zero rebuild. |
 | [`m4t/README.md`](m4t/README.md) | Substrate-layer build and surface. |
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
+| `journal/fashion_mnist_*.md` | Fashion-MNIST generalization, atomics diagnosis, density-sweep experiments. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
 
 ## Headline results (deskewed MNIST, single seed unless noted)
@@ -147,6 +149,15 @@ The architecture went through several phases. Numbers below reflect the current 
 | `mnist_routed_bucket_multi` | N_PROJ=16, M=64, SUM | **97.31%** | ~4.13 | Diminishing returns regime. |
 
 Multi-table routed bucket at M=32 (512 total signature trits) matches or slightly beats the pure-signature scaling curve at equivalent total bits (pure N_PROJ=512 is 97.06%; M=32 SUM is +0.18 points). Wall-time cost is ~2× faster than an equivalent dense N_PROJ=512 scan. Zero dense scans anywhere in the pipeline.
+
+### Fashion-MNIST generalization (same architecture, no deskew)
+
+| Consumer | Config | Accuracy | Notes |
+|---|---|---|---|
+| `mnist_routed_bucket_multi` | N_PROJ=16, M=64, d=0.33, SUM | **85.15%** | Baseline at balanced base-3 density |
+| `mnist_routed_bucket_multi` | N_PROJ=16, M=64, d=0.25, SUM | **85.54%** | Dataset-optimal density (multi-seed confirmed, p<0.02) |
+
+The architecture generalizes without code changes. Resolver gap is ~6× wider than MNIST, concentrated in the upper-body-garment cluster (classes 0/2/4/6: T-shirt, Pullover, Coat, Shirt). Atomics diagnosis (`tools/fashion_atomics.c`) shows the per-table min-Hamming gap is −0.036 bits with 65% of (query, table) pairs tied — the projection layer cannot discriminate these classes at per-table resolution. See `journal/fashion_mnist_atomics.md`.
 
 ### Historical reference (research scaffolding — O(N) dense outer loop with routed kernels)
 
