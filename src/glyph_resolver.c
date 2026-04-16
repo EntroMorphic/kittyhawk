@@ -211,6 +211,37 @@ int glyph_resolver_sum_neon4(
 #endif
 }
 
+int glyph_resolver_sum_radiusaware(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask,
+    const uint8_t*       min_radius,
+    int                  lambda)
+{
+    assert(min_radius != NULL);
+    int32_t best_score = INT32_MAX;
+    int     best_label = -1;
+    for (int j = 0; j < u->n_hit; j++) {
+        int idx = u->hit_list[j];
+        int32_t sum_dist = 0;
+        for (int m = 0; m < m_active; m++) {
+            sum_dist += m4t_popcount_dist(
+                query_sigs[m],
+                table_train_sigs[m] + (size_t)idx * sig_bytes,
+                mask, sig_bytes);
+        }
+        int32_t score = sum_dist + lambda * (int32_t)min_radius[idx];
+        if (score < best_score) {
+            best_score = score;
+            best_label = u->y_train[idx];
+        }
+    }
+    return best_label;
+}
+
 int glyph_resolver_sum_voteweighted(
     const glyph_union_t* u,
     int                  m_active,

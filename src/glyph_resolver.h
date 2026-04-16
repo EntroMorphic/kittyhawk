@@ -130,6 +130,49 @@ int glyph_resolver_sum_neon4(
     const uint8_t* const* query_sigs,
     const uint8_t*       mask);
 
+/* RADIUS-AWARE SUM resolver — filter-to-resolver rerouting variant.
+ *
+ * Score each candidate as:
+ *
+ *     score(c) = sum_dist(c) + lambda × min_radius[c]
+ *
+ * where min_radius[c] is the smallest multi-probe ternary Hamming
+ * radius at which ANY table placed c in the query's neighborhood.
+ * Candidates found at radius 0 (exact-match bucket hit in at least
+ * one table) get no penalty; candidates only reachable via r=1 get
+ * lambda added to their score; r=2 adds 2*lambda.
+ *
+ * Rationale: a candidate found via exact-bucket-match in some table
+ * is structurally closer to the query than one only reachable via
+ * multi-probe expansion. The current SUM resolver collapses this
+ * distinction — it sees only the summed signature distance, not
+ * how the candidate entered the union. This variant reads filter-
+ * stage geometry that scalar SUM discards.
+ *
+ * The caller passes min_radius as a dense array of length n_train,
+ * indexed by prototype index (same lifecycle pattern as votes):
+ * caller tracks per-query min_radius during the probe pass, then
+ * lazy-zeros the touched entries via hit_list at query end.
+ *
+ * lambda is caller-chosen. A starting value of 8 corresponds to
+ * "one radius step is worth one byte of Hamming distance" at
+ * N_PROJ=16 (sig_bytes=4, max per-table distance 32). Lower
+ * lambda shrinks toward scalar SUM; higher lambda shrinks toward
+ * "strict radius-0 preference."
+ *
+ * Not bit-exact equivalent to glyph_resolver_sum — this is a
+ * different algorithm producing a different ranking.
+ */
+int glyph_resolver_sum_radiusaware(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask,
+    const uint8_t*       min_radius,
+    int                  lambda);
+
 /* VOTE-WEIGHTED SUM resolver — filter-to-resolver rerouting variant.
  *
  * Same O(n_hit × m_active) popcount_dist calls as glyph_resolver_sum,

@@ -107,6 +107,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(mnist_routed_bucket_multi tools/mnist_routed_bucket_multi.c)
     target_link_libraries(mnist_routed_bucket_multi PRIVATE glyph)
+
+    add_executable(fashion_atomics tools/fashion_atomics.c)
+    target_link_libraries(fashion_atomics PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed

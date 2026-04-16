@@ -38,15 +38,21 @@ typedef struct {
      * items in Fashion-MNIST). */
     int         no_deskew;
 
-    /* SUM resolver implementation selector. Default "scalar" uses
-     * glyph_resolver_sum (one popcount_dist call per candidate per
-     * table, with the Fix-1 builtin-popcount fast path for 4-byte
-     * sigs). "neon4" uses glyph_resolver_sum_neon4 which batches
-     * 4 candidates per NEON vector via scalar-gather. Only valid
-     * with N_PROJ=16 (sig_bytes=4); asserted at tool entry. Kept
-     * as a selector so the scalar path remains the portable fallback
-     * and both paths can be benchmarked side by side. */
+    /* SUM resolver implementation selector. Options:
+     *   "scalar"       — general-purpose post-Fix-1 scalar path
+     *   "neon4"        — NEON-batched variant for sig_bytes=4
+     *   "voteweighted" — score = sum_dist / (1 + votes)
+     *   "radiusaware"  — score = sum_dist + lambda × min_radius
+     */
     const char* resolver_sum;
+
+    /* Radius-aware SUM penalty coefficient. Only consulted when
+     * resolver_sum == "radiusaware". Default 8 (one radius step
+     * costs 8 Hamming-distance units, roughly equivalent to a
+     * single-byte popcount mismatch). Larger values shrink the
+     * ranking toward strict radius-0 preference; smaller values
+     * reduce toward scalar SUM. */
+    int         radius_lambda;
 } glyph_config_t;
 
 /* Fill with project defaults (matches the values from Phase 3 run). */

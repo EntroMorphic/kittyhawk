@@ -41,6 +41,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->single_m    = 0;
     cfg->no_deskew   = 0;
     cfg->resolver_sum = "scalar";
+    cfg->radius_lambda = 8;
 }
 
 void glyph_config_print_usage(const char* progname) {
@@ -77,6 +78,13 @@ void glyph_config_print_usage(const char* progname) {
         "                                intended to recover the Fashion-MNIST resolver\n"
         "                                gap by preferring candidates that more tables\n"
         "                                agreed on.\n"
+        "                            'radiusaware' — scores each candidate as\n"
+        "                                sum_dist + lambda*min_radius[c], penalizing\n"
+        "                                candidates only reachable via deep multi-probe\n"
+        "                                expansion. lambda is --radius_lambda.\n"
+        "  --radius_lambda <int>   radius penalty coefficient for --resolver_sum radiusaware\n"
+        "                          (default 8; 0 reduces to scalar SUM; higher values\n"
+        "                           shrink toward strict radius-0 preference)\n"
         "  --verbose               print extra diagnostic information\n"
         "  --help                  print this message and exit\n"
         "\n"
@@ -185,6 +193,9 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
         else if (strcmp(arg, "--single_m")   == 0) {
             if (parse_int(arg, val, &cfg->single_m)) return 1;
         }
+        else if (strcmp(arg, "--radius_lambda") == 0) {
+            if (parse_int(arg, val, &cfg->radius_lambda)) return 1;
+        }
         else if (strcmp(arg, "--base_seed")  == 0) {
             if (parse_seed_quad(val, cfg->base_seed) != 0) {
                 fprintf(stderr, "glyph_config: --base_seed expects 'a,b,c,d'\n");
@@ -237,10 +248,15 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
     }
     if (strcmp(cfg->resolver_sum, "scalar")       != 0 &&
         strcmp(cfg->resolver_sum, "neon4")        != 0 &&
-        strcmp(cfg->resolver_sum, "voteweighted") != 0) {
+        strcmp(cfg->resolver_sum, "voteweighted") != 0 &&
+        strcmp(cfg->resolver_sum, "radiusaware")  != 0) {
         fprintf(stderr,
-            "glyph_config: --resolver_sum must be 'scalar', 'neon4', or "
-            "'voteweighted'\n");
+            "glyph_config: --resolver_sum must be 'scalar', 'neon4', "
+            "'voteweighted', or 'radiusaware'\n");
+        return 1;
+    }
+    if (cfg->radius_lambda < 0) {
+        fprintf(stderr, "glyph_config: --radius_lambda must be non-negative\n");
         return 1;
     }
     return 0;
