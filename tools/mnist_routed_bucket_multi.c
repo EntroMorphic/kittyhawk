@@ -370,6 +370,10 @@ int main(int argc, char** argv) {
                     pred_s = glyph_resolver_sum_radiusaware(&u, M_target, sig_bytes,
                                                              train_sigs, q_sigs_p, mask,
                                                              st.min_radius, cfg.radius_lambda);
+                } else if (strcmp(cfg.resolver_sum, "knn") == 0) {
+                    pred_s = glyph_resolver_sum_knn(&u, M_target, sig_bytes,
+                                                     train_sigs, q_sigs_p, mask,
+                                                     cfg.knn_k);
                 } else {
                     pred_s = glyph_resolver_sum(&u, M_target, sig_bytes,
                                                 train_sigs, q_sigs_p, mask);
@@ -381,9 +385,16 @@ int main(int argc, char** argv) {
                     const m4t_mtfp_t* qvec = ds.x_test + (size_t)s * ds.input_dim;
                     for (int m = 0; m < M_rr; m++)
                         glyph_sig_encode(&rr_builders[m], qvec, rr_q_bufs[m]);
-                    int pred_rr = glyph_resolver_sum(
-                        &u, M_rr, rr_sig_bytes,
-                        rr_train_sigs, rr_q_ptrs, rr_mask);
+                    int pred_rr;
+                    if (strcmp(cfg.resolver_sum, "knn") == 0) {
+                        pred_rr = glyph_resolver_sum_knn(
+                            &u, M_rr, rr_sig_bytes,
+                            rr_train_sigs, rr_q_ptrs, rr_mask, cfg.knn_k);
+                    } else {
+                        pred_rr = glyph_resolver_sum(
+                            &u, M_rr, rr_sig_bytes,
+                            rr_train_sigs, rr_q_ptrs, rr_mask);
+                    }
                     if (pred_rr == y) rr_correct[mi]++;
                 }
 

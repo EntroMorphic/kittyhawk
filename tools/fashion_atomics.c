@@ -233,6 +233,13 @@ int main(int argc, char** argv) {
     int64_t pair_table_gap[N_CLASSES][N_CLASSES] = {{0}}; /* sum of per-table d_winner-d_true */
     int64_t pair_table_gap_ct[N_CLASSES][N_CLASSES] = {{0}};
 
+    /* Decisive-subset diagnostic: for ALL queries (not just failures),
+     * measure whether per-table 1-NN is more often correct on decisive
+     * tables (margin > 0) than on tied tables (margin = 0). */
+    long diag_decisive_correct = 0, diag_decisive_total = 0;
+    long diag_tied_correct = 0, diag_tied_total = 0;
+    long diag_all_correct = 0, diag_all_total = 0;
+
     clock_t t0 = clock();
     for (int s = 0; s < ds.n_test; s++) {
         int y_true = ds.y_test[s];
@@ -261,6 +268,32 @@ int main(int argc, char** argv) {
                 winner_sum = d;
                 winner_label = ds.y_train[idx];
                 winner_proto = idx;
+            }
+        }
+
+        /* Decisive-subset diagnostic: per-table margin and correctness
+         * for ALL queries (correct and incorrect). */
+        for (int m = 0; m < M; m++) {
+            const uint8_t* qm = q_sigs_p[m];
+            const uint8_t* tm = train_sigs[m];
+            int32_t d1 = INT32_MAX, d2 = INT32_MAX;
+            int     d1_lbl = -1;
+            for (int j = 0; j < st.n_hit; j++) {
+                int idx = st.hit_list[j];
+                int32_t d = m4t_popcount_dist(qm, tm + (size_t)idx * sig_bytes, mask, sig_bytes);
+                if (d < d1) { d2 = d1; d1_lbl = ds.y_train[idx]; d1 = d; }
+                else if (d < d2) { d2 = d; }
+            }
+            int margin = (d2 == INT32_MAX) ? 0 : (d2 - d1);
+            int correct_1nn = (d1_lbl == y_true) ? 1 : 0;
+            diag_all_total++;
+            diag_all_correct += correct_1nn;
+            if (margin > 0) {
+                diag_decisive_total++;
+                diag_decisive_correct += correct_1nn;
+            } else {
+                diag_tied_total++;
+                diag_tied_correct += correct_1nn;
             }
         }
 
@@ -382,6 +415,30 @@ int main(int argc, char** argv) {
                100.0 * table_gap_zero     / table_gap_count);
         printf("    winner closer(gap<0): %7d  %5.1f%%\n", table_gap_negative,
                100.0 * table_gap_negative / table_gap_count);
+    }
+    printf("\n");
+
+    /* Decisive-subset diagnostic (all queries, not just failures). */
+    printf("=== Decisive-subset diagnostic (go/no-go for margin-weighted resolver) ===\n");
+    printf("  all (query, table) pairs:     %ld\n", diag_all_total);
+    printf("    decisive (margin > 0):      %ld  (%.1f%%)\n",
+           diag_decisive_total, 100.0 * diag_decisive_total / (diag_all_total ? diag_all_total : 1));
+    printf("    tied     (margin = 0):      %ld  (%.1f%%)\n",
+           diag_tied_total, 100.0 * diag_tied_total / (diag_all_total ? diag_all_total : 1));
+    printf("\n  P(1-NN correct | subset):\n");
+    printf("    all tables:       %5.2f%%  (%ld / %ld)\n",
+           100.0 * diag_all_correct / (diag_all_total ? diag_all_total : 1),
+           diag_all_correct, diag_all_total);
+    printf("    decisive tables:  %5.2f%%  (%ld / %ld)\n",
+           100.0 * diag_decisive_correct / (diag_decisive_total ? diag_decisive_total : 1),
+           diag_decisive_correct, diag_decisive_total);
+    printf("    tied tables:      %5.2f%%  (%ld / %ld)\n",
+           100.0 * diag_tied_correct / (diag_tied_total ? diag_tied_total : 1),
+           diag_tied_correct, diag_tied_total);
+    if (diag_all_total > 0 && diag_decisive_total > 0) {
+        double p_all = (double)diag_all_correct / diag_all_total;
+        double p_dec = (double)diag_decisive_correct / diag_decisive_total;
+        printf("    ratio decisive/all: %.2fx\n", p_all > 0 ? p_dec / p_all : 0.0);
     }
     printf("\n");
 

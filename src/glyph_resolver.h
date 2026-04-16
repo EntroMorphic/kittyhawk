@@ -89,6 +89,31 @@ typedef struct {
 /* VOTE resolver — O(n_hit) time, no distance arithmetic. */
 int glyph_resolver_vote(const glyph_union_t* u);
 
+/* Routed k-NN SUM resolver — top-K candidates by summed Hamming
+ * distance, rank-weighted majority vote over their labels.
+ *
+ * Same O(n_hit × m_active) popcount_dist scan as glyph_resolver_sum,
+ * but instead of returning the 1-NN argmin label, finds the K
+ * candidates with the smallest sum_dist and majority-votes their
+ * labels with rank weights (weight = K - rank). Ties broken by
+ * lowest class index.
+ *
+ * k must be >= 1. If k > n_hit, all candidates participate.
+ *
+ * Inspired by SSTT's structural ranker — retrieval provides
+ * candidate breadth, k-NN ranking provides classification depth.
+ * Still routing-native: the only distance primitive is
+ * m4t_popcount_dist on packed-trit signatures.
+ */
+int glyph_resolver_sum_knn(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask,
+    int                  k);
+
 /* SUM resolver — O(n_hit × m_active) popcount_dist calls.
  *
  * This is the reference implementation. Accepts any sig_bytes value

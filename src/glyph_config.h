@@ -54,6 +54,11 @@ typedef struct {
      * reduce toward scalar SUM. */
     int         radius_lambda;
 
+    /* Routed k-NN: top-K candidates scored by summed Hamming distance,
+     * rank-weighted majority vote. Only consulted when
+     * resolver_sum == "knn". Default 5. */
+    int         knn_k;
+
     /* Density schedule across the M multi-tables.
      *   "fixed" (default) — every table uses --density.
      *   "mixed"           — round-robin over --density_triple.

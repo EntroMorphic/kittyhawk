@@ -42,6 +42,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->no_deskew   = 0;
     cfg->resolver_sum = "scalar";
     cfg->radius_lambda = 8;
+    cfg->knn_k = 5;
     cfg->density_schedule = "fixed";
     cfg->density_triple[0] = 0.25;
     cfg->density_triple[1] = 0.33;
@@ -205,6 +206,9 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
         else if (strcmp(arg, "--radius_lambda") == 0) {
             if (parse_int(arg, val, &cfg->radius_lambda)) return 1;
         }
+        else if (strcmp(arg, "--knn_k") == 0) {
+            if (parse_int(arg, val, &cfg->knn_k)) return 1;
+        }
         else if (strcmp(arg, "--density_schedule") == 0) cfg->density_schedule = val;
         else if (strcmp(arg, "--density_triple") == 0) {
             if (sscanf(val, "%lf,%lf,%lf",
@@ -269,10 +273,15 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
     if (strcmp(cfg->resolver_sum, "scalar")       != 0 &&
         strcmp(cfg->resolver_sum, "neon4")        != 0 &&
         strcmp(cfg->resolver_sum, "voteweighted") != 0 &&
-        strcmp(cfg->resolver_sum, "radiusaware")  != 0) {
+        strcmp(cfg->resolver_sum, "radiusaware")  != 0 &&
+        strcmp(cfg->resolver_sum, "knn")          != 0) {
         fprintf(stderr,
             "glyph_config: --resolver_sum must be 'scalar', 'neon4', "
-            "'voteweighted', or 'radiusaware'\n");
+            "'voteweighted', 'radiusaware', or 'knn'\n");
+        return 1;
+    }
+    if (cfg->knn_k < 1 || cfg->knn_k > 64) {
+        fprintf(stderr, "glyph_config: --knn_k must be in 1..64\n");
         return 1;
     }
     if (cfg->radius_lambda < 0) {

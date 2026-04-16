@@ -281,6 +281,68 @@ int glyph_resolver_sum_voteweighted(
     return best_label;
 }
 
+int glyph_resolver_sum_knn(
+    const glyph_union_t* u,
+    int                  m_active,
+    int                  sig_bytes,
+    uint8_t* const*      table_train_sigs,
+    const uint8_t* const* query_sigs,
+    const uint8_t*       mask,
+    int                  k)
+{
+    assert(k >= 1);
+    if (k > u->n_hit) k = u->n_hit;
+    if (k == 0) return -1;
+
+    /* Top-k buffer: (score, label) pairs, maintained sorted by score
+     * ascending. k is small (≤ 20 typically), so insertion sort. */
+    typedef struct { int32_t score; int label; } topk_t;
+    topk_t topk[64];
+    assert(k <= 64);
+    int n_topk = 0;
+
+    for (int j = 0; j < u->n_hit; j++) {
+        int idx = u->hit_list[j];
+        int32_t score = 0;
+        for (int m = 0; m < m_active; m++) {
+            score += m4t_popcount_dist(
+                query_sigs[m],
+                table_train_sigs[m] + (size_t)idx * sig_bytes,
+                mask, sig_bytes);
+        }
+        if (n_topk < k) {
+            int pos = n_topk;
+            while (pos > 0 && topk[pos - 1].score > score) {
+                topk[pos] = topk[pos - 1]; pos--;
+            }
+            topk[pos].score = score;
+            topk[pos].label = u->y_train[idx];
+            n_topk++;
+        } else if (score < topk[k - 1].score) {
+            int pos = k - 1;
+            while (pos > 0 && topk[pos - 1].score > score) {
+                topk[pos] = topk[pos - 1]; pos--;
+            }
+            topk[pos].score = score;
+            topk[pos].label = u->y_train[idx];
+        }
+    }
+
+    /* Rank-weighted majority vote: weight = k - rank. */
+    assert(u->n_classes <= GLYPH_MAX_CLASSES);
+    int class_votes[GLYPH_MAX_CLASSES];
+    memset(class_votes, 0, (size_t)u->n_classes * sizeof(int));
+    for (int i = 0; i < n_topk; i++) {
+        int lbl = topk[i].label;
+        assert(lbl >= 0 && lbl < u->n_classes);
+        class_votes[lbl] += (k - i);
+    }
+    int pred = 0;
+    for (int c = 1; c < u->n_classes; c++)
+        if (class_votes[c] > class_votes[pred]) pred = c;
+    return pred;
+}
+
 int glyph_resolver_per_table_majority(
     const glyph_union_t* u,
     int                  m_active,
