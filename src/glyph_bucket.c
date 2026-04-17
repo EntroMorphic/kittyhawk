@@ -26,7 +26,7 @@ int glyph_bucket_build(glyph_bucket_table_t* bt,
                        int sig_bytes)
 {
     memset(bt, 0, sizeof(*bt));
-    if (sig_bytes != 4) return 1;          /* only 4-byte sigs for now */
+    if (sig_bytes < 4) return 1;
 
     bt->entries = malloc((size_t)n_entries * sizeof(glyph_bucket_entry_t));
     if (!bt->entries) return 1;

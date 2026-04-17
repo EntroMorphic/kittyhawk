@@ -150,11 +150,16 @@ static void test_bucket_collisions_form_runs(void) {
 }
 
 static void test_bucket_rejects_wrong_sig_bytes(void) {
-    uint8_t sigs[8] = {0};
+    uint8_t sigs3[3] = {0};
     glyph_bucket_table_t bt = {0};
-    TEST_ASSERT(glyph_bucket_build(&bt, sigs, 1, 8) != 0, "reject 8-byte");
+    TEST_ASSERT(glyph_bucket_build(&bt, sigs3, 1, 3) != 0, "reject 3-byte");
     TEST_ASSERT_EQ(bt.n_entries, 0, "n_entries unchanged");
-    /* No need to free — build failure left entries NULL. */
+    /* sig_bytes >= 4 should be accepted (keyed on first 4 bytes). */
+    uint8_t sigs8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    glyph_bucket_table_t bt8 = {0};
+    TEST_ASSERT(glyph_bucket_build(&bt8, sigs8, 1, 8) == 0, "accept 8-byte");
+    TEST_ASSERT_EQ(bt8.n_entries, 1, "8-byte entry count");
+    glyph_bucket_table_free(&bt8);
 }
 
 static void test_bucket_lower_bound_gap(void) {

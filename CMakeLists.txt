@@ -122,6 +122,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(bruteforce_nproj tools/bruteforce_nproj.c)
     target_link_libraries(bruteforce_nproj PRIVATE glyph)
+
+    add_executable(layered_lsh tools/layered_lsh.c)
+    target_link_libraries(layered_lsh PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
