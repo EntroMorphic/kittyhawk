@@ -119,6 +119,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(subsetted_multi tools/subsetted_multi.c)
     target_link_libraries(subsetted_multi PRIVATE glyph)
+
+    add_executable(bruteforce_nproj tools/bruteforce_nproj.c)
+    target_link_libraries(bruteforce_nproj PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
