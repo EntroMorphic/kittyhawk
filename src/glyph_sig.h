@@ -1,13 +1,24 @@
 /*
- * glyph_sig.h — ternary signature builder.
+ * glyph_sig.h — ternary signature builders.
  *
- * A signature builder bundles the random ternary projection matrix,
- * the density-calibrated threshold, and the packed-trit encode path
- * that turns an MTFP vector into a routing signature.
+ * Two signature paths:
  *
- * Under the hood it uses m4t_route_threshold_extract + m4t_ternary_matmul_bt.
- * The abstraction exists so consumers don't re-do the projection +
- * calibration dance in every tool.
+ *   DIRECT QUANTIZATION (preferred for image classification):
+ *     glyph_sig_quantize / glyph_sig_quantize_batch — quantize each
+ *     input dimension to a trit via per-value thresholding. Each trit
+ *     represents a SPECIFIC input value (pixel, gradient), not a
+ *     random mixture. Preserves spatial identity. Use this for image
+ *     data after normalization.
+ *
+ *   RANDOM PROJECTION (legacy, retained for non-image domains):
+ *     glyph_sig_builder_init — generates a random ternary projection
+ *     matrix and calibrates τ. Each trit is a random linear combination
+ *     of ~D/3 input dimensions. DESTROYS spatial structure. Do NOT use
+ *     for image classification — direct quantization is strictly
+ *     superior on every measured dataset (MNIST, Fashion-MNIST, CIFAR-10).
+ *
+ * Under the hood both paths produce packed-trit signatures compatible
+ * with glyph_bucket, glyph_multiprobe, and all resolver variants.
  *
  * Typical use (init → encode → free):
  *
@@ -86,6 +97,44 @@ void glyph_sig_encode_batch(const glyph_sig_builder_t* sb,
                             uint8_t* out_sigs);
 
 void glyph_sig_builder_free(glyph_sig_builder_t* sb);
+
+/* ================================================================
+ * Direct ternary quantization (preferred for image classification).
+ *
+ * Quantize each input dimension to a trit:
+ *   value >  +tau → +1
+ *   value <  -tau → -1
+ *   |value| <= tau →  0  (structural zero: "this dimension is uninformative")
+ *
+ * The structural zero filters noise. On normalized images, small
+ * values near the mean map to zero (genuinely uninformative). Strong
+ * deviations map to ±1 (class-discriminative signal).
+ *
+ * The output is a packed-trit signature of n_dims trits, compatible
+ * with glyph_bucket, glyph_multiprobe, and all resolver variants.
+ *
+ * DO NOT use glyph_sig_builder_init for image classification.
+ * Direct quantization preserves spatial identity (each trit = one
+ * pixel or gradient). Random projection destroys it (each trit =
+ * random mixture of ~D/3 pixels).
+ * ================================================================ */
+
+/* Quantize a single MTFP vector of length n_dims into a packed-trit
+ * signature. out_sig must be at least M4T_TRIT_PACKED_BYTES(n_dims)
+ * bytes, zeroed by caller. */
+void glyph_sig_quantize(const m4t_mtfp_t* x, int n_dims,
+                        int64_t tau, uint8_t* out_sig);
+
+/* Quantize n vectors stored contiguously; writes
+ * n × M4T_TRIT_PACKED_BYTES(n_dims) bytes to out_sigs. */
+void glyph_sig_quantize_batch(const m4t_mtfp_t* x_batch, int n,
+                              int n_dims, int64_t tau, uint8_t* out_sigs);
+
+/* Compute tau for direct quantization from a calibration sample.
+ * Returns the density-th percentile of |x| across all dimensions
+ * in the sample. At density=0.60, ~60% of values map to zero. */
+int64_t glyph_sig_quantize_tau(const m4t_mtfp_t* x_sample,
+                               int n_sample, int n_dims, double density);
 
 #ifdef __cplusplus
 }

@@ -352,15 +352,17 @@ static void normalize_images(m4t_mtfp_t* images, int n, int dim) {
         /* Step 2: subtract mean. */
         for (int d = 0; d < dim; d++) img[d] -= (m4t_mtfp_t)mean;
 
-        /* Step 3: compute variance. */
-        int64_t var_sum = 0;
+        /* Step 3: compute variance = sum(v²) / dim.
+         * Sum first, divide once — avoids per-term truncation. */
+        int64_t sq_sum = 0;
         for (int d = 0; d < dim; d++) {
             int64_t v = (int64_t)img[d];
-            var_sum += v * v / dim;
+            sq_sum += v * v;
         }
+        int64_t variance = sq_sum / dim;
 
         /* Step 4: integer stddev. */
-        int64_t stddev = isqrt64(var_sum);
+        int64_t stddev = isqrt64(variance);
         if (stddev == 0) continue;
 
         /* Step 5: rescale to target range.

@@ -1,12 +1,18 @@
 /*
- * glyph_sig.c — ternary signature builder implementation.
+ * glyph_sig.c — ternary signature implementation.
  *
- * Centralizes the "random ternary projection + density-calibrated τ +
- * threshold_extract" pipeline previously duplicated across tools.
+ * Two paths:
+ *   1. Direct quantization (glyph_sig_quantize) — preferred for image
+ *      classification. Each trit = one input dimension. Preserves
+ *      spatial identity.
+ *   2. Random projection (glyph_sig_builder_init) — legacy. Each
+ *      trit = random mixture of ~D/3 inputs. Destroys spatial
+ *      structure. Do NOT use for image data.
  */
 
 #include "glyph_sig.h"
 #include "glyph_rng.h"
+#include "glyph_multiprobe.h"
 #include "m4t_trit_pack.h"
 #include "m4t_ternary_matmul.h"
 #include "m4t_route.h"
@@ -147,4 +153,44 @@ void glyph_sig_builder_free(glyph_sig_builder_t* sb) {
     if (!sb) return;
     free(sb->proj_packed);
     memset(sb, 0, sizeof(*sb));
+}
+
+/* ================================================================
+ * Direct ternary quantization — preferred for image classification.
+ * ================================================================ */
+
+void glyph_sig_quantize(const m4t_mtfp_t* x, int n_dims,
+                        int64_t tau, uint8_t* out_sig) {
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(n_dims);
+    memset(out_sig, 0, sig_bytes);
+    for (int d = 0; d < n_dims; d++) {
+        int64_t v = (int64_t)x[d];
+        int8_t trit = 0;
+        if (v > tau) trit = +1;
+        else if (v < -tau) trit = -1;
+        glyph_write_trit(out_sig, d, trit);
+    }
+}
+
+void glyph_sig_quantize_batch(const m4t_mtfp_t* x_batch, int n,
+                              int n_dims, int64_t tau, uint8_t* out_sigs) {
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(n_dims);
+    memset(out_sigs, 0, (size_t)n * sig_bytes);
+    for (int i = 0; i < n; i++)
+        glyph_sig_quantize(x_batch + (size_t)i * n_dims, n_dims, tau,
+                           out_sigs + (size_t)i * sig_bytes);
+}
+
+int64_t glyph_sig_quantize_tau(const m4t_mtfp_t* x_sample,
+                               int n_sample, int n_dims, double density) {
+    size_t total = (size_t)n_sample * n_dims;
+    int64_t* abs_vals = malloc(total * sizeof(int64_t));
+    if (!abs_vals) return 0;
+    for (size_t i = 0; i < total; i++) {
+        int64_t v = (int64_t)x_sample[i];
+        abs_vals[i] = (v >= 0) ? v : -v;
+    }
+    int64_t tau = tau_for_density(abs_vals, total, density);
+    free(abs_vals);
+    return tau;
 }

@@ -97,35 +97,44 @@ Small, fast, deterministic RNG used to generate random ternary projection matric
 - `glyph_rng_seed(r, a, b, c, d)` — seed the generator with a four-element state. Asserts non-zero.
 - `glyph_rng_next(r)` — draw the next 32-bit value. Deterministic given the same seed quadruple.
 
-### `glyph_sig` — signature builder
+### `glyph_sig` — ternary signatures
 
 **Public header:** `src/glyph_sig.h`
 
-A signature builder (`glyph_sig_builder_t`) bundles a random ternary projection matrix, its density-calibrated τ threshold, and the encode path that turns an MTFP vector into a packed-trit signature.
+Two signature paths:
 
-**Functions:**
+**Direct quantization (preferred for image classification):**
 
-- `glyph_sig_builder_init(sb, n_proj, input_dim, density, seed_quad, calibration_set, n_calib)` — generates a random ternary projection matrix from the seed, then calibrates τ on the provided calibration subset (typically the first 1000 training vectors). Returns 0 on success. Uses goto-cleanup for robust OOM handling.
-- `glyph_sig_encode(sb, x, out_sig)` — encode a single MTFP vector into a packed-trit signature (`sig_bytes` bytes output).
-- `glyph_sig_encode_batch(sb, x_batch, n, out_sigs)` — encode n vectors; writes `n × sig_bytes` bytes to `out_sigs`.
-- `glyph_sig_builder_free(sb)` — release all heap state.
+- `glyph_sig_quantize(x, n_dims, tau, out_sig)` — quantize each input dimension to a trit via per-value thresholding. Each trit represents a SPECIFIC input value. Preserves spatial identity.
+- `glyph_sig_quantize_batch(x_batch, n, n_dims, tau, out_sigs)` — quantize n vectors.
+- `glyph_sig_quantize_tau(x_sample, n_sample, n_dims, density)` — compute τ from a calibration sample at the given density.
 
-**Typical use:**
+**Random projection (legacy, non-image domains only):**
+
+- `glyph_sig_builder_init(...)` — generates a random ternary projection matrix. Each trit is a random mixture of ~D/3 input dimensions. **DESTROYS spatial structure. Do NOT use for image classification.** Empirically proven inferior on MNIST, Fashion-MNIST, and CIFAR-10.
+- `glyph_sig_encode(sb, x, out_sig)` — encode via random projection.
+- `glyph_sig_encode_batch(sb, x_batch, n, out_sigs)` — batch encode.
+- `glyph_sig_builder_free(sb)` — release heap state.
+
+**Typical use (image classification — direct quantization):**
 
 ```c
-glyph_sig_builder_t sb;
-glyph_sig_builder_init(
-    &sb, /*n_proj=*/16, ds.input_dim, /*density=*/0.33,
-    42, 123, 456, 789,
-    ds.x_train, /*n_calib=*/1000);
+/* Normalize the dataset first. */
+glyph_dataset_normalize(&ds);
 
-uint8_t* train_sigs = calloc((size_t)ds.n_train * sb.sig_bytes, 1);
-glyph_sig_encode_batch(&sb, ds.x_train, ds.n_train, train_sigs);
+/* Compute tau from the normalized training data. */
+int64_t tau = glyph_sig_quantize_tau(ds.x_train, 1000,
+                                      ds.input_dim, 0.60);
 
-/* ... use train_sigs ... */
+/* Quantize all training and test images. */
+int sig_bytes = M4T_TRIT_PACKED_BYTES(ds.input_dim);
+uint8_t* train_sigs = calloc((size_t)ds.n_train * sig_bytes, 1);
+glyph_sig_quantize_batch(ds.x_train, ds.n_train,
+                          ds.input_dim, tau, train_sigs);
 
+/* ... use train_sigs with glyph_bucket, glyph_multiprobe,
+ *     glyph_resolver as usual ... */
 free(train_sigs);
-glyph_sig_builder_free(&sb);
 ```
 
 ### `glyph_bucket` — sorted bucket index
@@ -273,22 +282,27 @@ int main(int argc, char** argv) {
     if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) return 1;
     glyph_dataset_deskew(&ds);
 
-    /* 3. Build signature builder(s) — one per hash in a multi-table setup. */
-    glyph_sig_builder_t sb;
-    glyph_sig_builder_init(
-        &sb, cfg.n_proj, ds.input_dim, cfg.density,
-        cfg.base_seed[0], cfg.base_seed[1], cfg.base_seed[2], cfg.base_seed[3],
-        ds.x_train, /*n_calib=*/(ds.n_train < 1000 ? ds.n_train : 1000));
+    /* 3. Normalize (required for CIFAR-10; neutral on MNIST). */
+    if (cfg.normalize) glyph_dataset_normalize(&ds);
 
-    /* 4. Encode train + test signatures. */
-    uint8_t* train_sigs = calloc((size_t)ds.n_train * sb.sig_bytes, 1);
-    uint8_t* test_sigs  = calloc((size_t)ds.n_test  * sb.sig_bytes, 1);
-    glyph_sig_encode_batch(&sb, ds.x_train, ds.n_train, train_sigs);
-    glyph_sig_encode_batch(&sb, ds.x_test,  ds.n_test,  test_sigs);
+    /* 4. Direct ternary quantization — each trit = one input dimension.
+     * Do NOT use glyph_sig_builder_init for image classification;
+     * random projections destroy spatial structure and are strictly
+     * inferior on every measured image dataset. */
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(ds.input_dim);
+    int64_t tau = glyph_sig_quantize_tau(
+        ds.x_train, (ds.n_train < 1000 ? ds.n_train : 1000),
+        ds.input_dim, cfg.density);
+    uint8_t* train_sigs = calloc((size_t)ds.n_train * sig_bytes, 1);
+    uint8_t* test_sigs  = calloc((size_t)ds.n_test  * sig_bytes, 1);
+    glyph_sig_quantize_batch(ds.x_train, ds.n_train,
+                              ds.input_dim, tau, train_sigs);
+    glyph_sig_quantize_batch(ds.x_test, ds.n_test,
+                              ds.input_dim, tau, test_sigs);
 
     /* 5. Build bucket index on train signatures. */
     glyph_bucket_table_t bt = {0};
-    glyph_bucket_build(&bt, train_sigs, ds.n_train, sb.sig_bytes);
+    glyph_bucket_build(&bt, train_sigs, ds.n_train, sig_bytes);
 
     /* 6. Per-query probe state (votes + hit_list). Reused across queries. */
     uint16_t* votes    = calloc((size_t)ds.n_train, sizeof(uint16_t));

@@ -134,6 +134,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(centroid_routed tools/centroid_routed.c)
     target_link_libraries(centroid_routed PRIVATE glyph)
+
+    add_executable(conv_lsh tools/conv_lsh.c)
+    target_link_libraries(conv_lsh PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
