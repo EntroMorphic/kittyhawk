@@ -31,6 +31,11 @@ typedef struct {
     /* Optional: restrict the M sweep to a single value. 0 = full sweep. */
     int         single_m;
 
+    /* Set via --normalize. Per-image contrast normalization
+     * (zero-mean, unit-variance). Restores §18 emission coverage
+     * on variable-contrast datasets like CIFAR-10. */
+    int         normalize;
+
     /* Set via --no_deskew. Default 0 = apply integer-moment shear
      * deskewing after loading the dataset. The deskew pass is optimal
      * for MNIST digits (aligns the vertical stroke axis) but may

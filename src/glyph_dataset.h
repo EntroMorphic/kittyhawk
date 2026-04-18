@@ -61,6 +61,16 @@ int glyph_dataset_load_cifar10(glyph_dataset_t* ds, const char* dir);
  * Returns 0 on success. */
 int glyph_dataset_load_auto(glyph_dataset_t* ds, const char* dir);
 
+/* Per-image contrast normalization (zero-mean, unit-variance).
+ * Restores §18 emission coverage on natural images: without
+ * normalization, low-contrast images produce degenerate all-zero
+ * trit signatures because projection values fall below τ. After
+ * normalization, every image enters the lattice with equal signal
+ * strength and the structural zero is populated by genuine
+ * uninformativeness, not by contrast deficiency. Integer arithmetic
+ * throughout (int64 sums, Newton's-method isqrt). */
+void glyph_dataset_normalize(glyph_dataset_t* ds);
+
 /* Apply integer-moment deskew to every image in x_train and x_test.
  * Computes per-image shear from the image's own second moments (int64)
  * and applies it via pixel shifts per row. Zero float. Idempotent — a

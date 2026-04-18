@@ -39,6 +39,7 @@ void glyph_config_defaults(glyph_config_t* cfg) {
     cfg->mode        = "oracle";
     cfg->verbose     = 0;
     cfg->single_m    = 0;
+    cfg->normalize   = 0;
     cfg->no_deskew   = 0;
     cfg->resolver_sum = "scalar";
     cfg->radius_lambda = 8;
@@ -169,8 +170,9 @@ int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv) {
             glyph_config_print_usage(argv[0]);
             return -1;
         }
-        if (strcmp(arg, "--verbose") == 0)   { cfg->verbose = 1;   continue; }
-        if (strcmp(arg, "--no_deskew") == 0) { cfg->no_deskew = 1; continue; }
+        if (strcmp(arg, "--verbose") == 0)    { cfg->verbose = 1;    continue; }
+        if (strcmp(arg, "--no_deskew") == 0)  { cfg->no_deskew = 1;  continue; }
+        if (strcmp(arg, "--normalize") == 0)  { cfg->normalize = 1;  continue; }
 
         /* All other options take a value in argv[i+1]. */
         if (i + 1 >= argc) {

@@ -148,6 +148,9 @@ int main(int argc, char** argv) {
     if (!cfg.no_deskew) {
         glyph_dataset_deskew(&ds);
     }
+    if (cfg.normalize) {
+        glyph_dataset_normalize(&ds);
+    }
 
     const int mixed_mode = (strcmp(cfg.density_schedule, "mixed") == 0);
 

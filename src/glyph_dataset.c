@@ -332,6 +332,55 @@ int glyph_dataset_load_auto(glyph_dataset_t* ds, const char* dir) {
     return 1;
 }
 
+static int64_t isqrt64(int64_t n) {
+    if (n <= 0) return 0;
+    int64_t x = n;
+    int64_t y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + n / x) / 2; }
+    return x;
+}
+
+static void normalize_images(m4t_mtfp_t* images, int n, int dim) {
+    for (int i = 0; i < n; i++) {
+        m4t_mtfp_t* img = images + (size_t)i * dim;
+
+        /* Step 1: compute mean. */
+        int64_t sum = 0;
+        for (int d = 0; d < dim; d++) sum += (int64_t)img[d];
+        int64_t mean = sum / dim;
+
+        /* Step 2: subtract mean. */
+        for (int d = 0; d < dim; d++) img[d] -= (m4t_mtfp_t)mean;
+
+        /* Step 3: compute variance. */
+        int64_t var_sum = 0;
+        for (int d = 0; d < dim; d++) {
+            int64_t v = (int64_t)img[d];
+            var_sum += v * v / dim;
+        }
+
+        /* Step 4: integer stddev. */
+        int64_t stddev = isqrt64(var_sum);
+        if (stddev == 0) continue;
+
+        /* Step 5: rescale to target range.
+         * Map ±1σ to ±MTFP_SCALE. Clip at ±3σ to stay in int32. */
+        for (int d = 0; d < dim; d++) {
+            int64_t scaled = (int64_t)img[d] * M4T_MTFP_SCALE / stddev;
+            if (scaled > 3 * (int64_t)M4T_MTFP_SCALE)
+                scaled = 3 * (int64_t)M4T_MTFP_SCALE;
+            if (scaled < -3 * (int64_t)M4T_MTFP_SCALE)
+                scaled = -3 * (int64_t)M4T_MTFP_SCALE;
+            img[d] = (m4t_mtfp_t)scaled;
+        }
+    }
+}
+
+void glyph_dataset_normalize(glyph_dataset_t* ds) {
+    normalize_images(ds->x_train, ds->n_train, ds->input_dim);
+    normalize_images(ds->x_test,  ds->n_test,  ds->input_dim);
+}
+
 void glyph_dataset_deskew(glyph_dataset_t* ds) {
     deskew_all(ds->x_train, ds->n_train, ds->img_w, ds->img_h, ds->input_dim);
     deskew_all(ds->x_test,  ds->n_test,  ds->img_w, ds->img_h, ds->input_dim);

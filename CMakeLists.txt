@@ -125,6 +125,15 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(layered_lsh tools/layered_lsh.c)
     target_link_libraries(layered_lsh PRIVATE glyph)
+
+    add_executable(specialist_rerank tools/specialist_rerank.c)
+    target_link_libraries(specialist_rerank PRIVATE glyph)
+
+    add_executable(structured_lsh tools/structured_lsh.c)
+    target_link_libraries(structured_lsh PRIVATE glyph)
+
+    add_executable(centroid_routed tools/centroid_routed.c)
+    target_link_libraries(centroid_routed PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
