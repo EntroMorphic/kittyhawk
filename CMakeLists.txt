@@ -137,6 +137,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(conv_lsh tools/conv_lsh.c)
     target_link_libraries(conv_lsh PRIVATE glyph)
+
+    add_executable(direct_lsh tools/direct_lsh.c)
+    target_link_libraries(direct_lsh PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
