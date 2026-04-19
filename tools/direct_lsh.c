@@ -138,7 +138,14 @@ int main(int argc, char** argv) {
     if (use_gradients)
         printf("  hgrad_dim=%d  vgrad_dim=%d  total_dim=%d\n",
                hgrad_dim, vgrad_dim, total_dim);
-    printf("  sig_bytes=%d  density=%.2f\n", sig_bytes, cfg.density);
+    /* NOTE: --density for direct quantization means "fraction of pixel
+     * values that map to zero (structural zero)." This is different from
+     * the random-projection meaning ("fraction of projection WEIGHTS
+     * that are zero"). For normalized CIFAR-10, --density 0.395
+     * produces tau≈0.6×SCALE which matches the empirically optimal
+     * threshold. */
+    printf("  sig_bytes=%d  density=%.3f (%.1f%% of intensity trits will be zero)\n",
+           sig_bytes, cfg.density, cfg.density * 100.0);
 
     /* Multi-table: each table uses a DIFFERENT permutation of the
      * first 16 trits as its bucket key. The full signature is shared;
@@ -203,6 +210,12 @@ int main(int argc, char** argv) {
             memcpy(grad_sample + (size_t)i * grad_dim,
                    train_feat + (size_t)i * total_dim + intensity_dim,
                    (size_t)grad_dim * sizeof(m4t_mtfp_t));
+        /* Gradient density 0.10: only ~10% of gradient values map to
+         * zero. This is intentionally LOW — small gradients carry
+         * class-discriminative edge detail on natural images. Higher
+         * density (e.g. 0.40) was tested and reduced CIFAR-10 accuracy
+         * from 43.34% to 36.20%. The 10% zeros are from genuinely
+         * flat regions (no edge), not noise filtering. */
         tau_gradient = glyph_sig_quantize_tau(grad_sample, n_calib, grad_dim, 0.10);
         free(grad_sample);
     }
@@ -436,9 +449,8 @@ int main(int argc, char** argv) {
     int n_sweep = 0;
     for (int i = 0; i < 7; i++) if (m_sweep[i] <= M) n_sweep = i + 1;
 
-    int oracle_c[7]={0}, sum_c[7]={0}, knn_c[7]={0};
+    int oracle_c[7]={0}, sum_c[7]={0}, knn_c[7]={0}, maj_c[7]={0};
     long union_sum[7]={0};
-    /* Store per-query k-NN prediction at max M for per-class report. */
     int* final_pred = malloc((size_t)ds.n_test * sizeof(int));
     memset(final_pred, 0xFF, (size_t)ds.n_test * sizeof(int));
 
@@ -487,12 +499,19 @@ int main(int argc, char** argv) {
                 }
             }
             if (best_l == y) sum_c[si]++;
+            /* Rank-weighted vote. */
             int cv[N_CLASSES] = {0};
             for (int i = 0; i < ntk; i++) cv[topk[i].l] += (KNN_K - i);
             int kpred = 0;
             for (int c = 1; c < N_CLASSES; c++) if (cv[c] > cv[kpred]) kpred = c;
             if (kpred == y) knn_c[si]++;
             if (m_sweep[si] == M) final_pred[qi] = kpred;
+            /* Majority vote (for comparison with brute-force baseline). */
+            int mv[N_CLASSES] = {0};
+            for (int i = 0; i < ntk; i++) mv[topk[i].l]++;
+            int mpred = 0;
+            for (int c = 1; c < N_CLASSES; c++) if (mv[c] > mv[mpred]) mpred = c;
+            if (mpred == y) maj_c[si]++;
 
             prev = Mt;
         }
@@ -500,13 +519,14 @@ int main(int argc, char** argv) {
     double sweep_sec = (double)(clock() - t_sweep) / CLOCKS_PER_SEC;
 
     printf("Sweep: %.1fs\n\n", sweep_sec);
-    printf("   M    oracle    avg_union   1-NN      k=%d-NN\n", KNN_K);
+    printf("   M    oracle    avg_union   1-NN      k=%d-maj   k=%d-rw\n", KNN_K, KNN_K);
     for (int si = 0; si < n_sweep; si++)
-        printf("  %3d   %6.2f%%   %7.1f   %6.2f%%   %6.2f%%\n",
+        printf("  %3d   %6.2f%%   %7.1f   %6.2f%%   %6.2f%%   %6.2f%%\n",
                m_sweep[si],
                100.0 * oracle_c[si] / ds.n_test,
                (double)union_sum[si] / ds.n_test,
                100.0 * sum_c[si] / ds.n_test,
+               100.0 * maj_c[si] / ds.n_test,
                100.0 * knn_c[si] / ds.n_test);
     printf("\n");
 
