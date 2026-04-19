@@ -104,50 +104,60 @@ static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
     }
 }
 
-static inline int8_t clamp_trit(int v) { return v > 0 ? 1 : v < 0 ? -1 : 0; }
-
-/* SSTT feature extraction: RGB interleave → ternary quantize → gradients.
- * Input: raw uint8 pixels in channel-first layout [R_HW, G_HW, B_HW].
- * Output: packed trit signature of (intensity + hgrad + vgrad). */
-static void sstt_extract(const uint8_t* raw_pixels, int orig_w, int orig_h,
-                         int n_ch, uint8_t* out_sig, int total_trits) {
+/* SSTT-style feature extraction on MTFP normalized data.
+ * RGB interleave → density-calibrated quantize → gradients.
+ * Input: MTFP normalized pixels, channel-first [R_HW, G_HW, B_HW].
+ * Output: packed trit signature (intensity + hgrad + vgrad).
+ * Uses tau thresholds instead of fixed 85/170. */
+static void sstt_extract_mtfp(const m4t_mtfp_t* pixels, int orig_w, int orig_h,
+                              int n_ch, int64_t tau_i, int64_t tau_g,
+                              uint8_t* out_sig, int total_trits) {
     int flat_w = orig_w * n_ch;
     int flat_pix = orig_h * flat_w;
     int hgrad_dim = orig_h * (flat_w - 1);
     int vgrad_dim = (orig_h - 1) * flat_w;
 
-    /* Interleave RGB and quantize to ternary. */
-    int8_t* tern = calloc(flat_pix, 1);
-    for (int y = 0; y < orig_h; y++) {
-        for (int x = 0; x < orig_w; x++) {
-            for (int c = 0; c < n_ch; c++) {
-                uint8_t px = raw_pixels[c * orig_w * orig_h + y * orig_w + x];
-                int8_t t = 0;
-                if (px > SSTT_HI) t = +1;
-                else if (px < SSTT_LO) t = -1;
-                tern[y * flat_w + x * n_ch + c] = t;
-            }
-        }
-    }
+    /* Interleave RGB into a flat MTFP buffer. */
+    m4t_mtfp_t* flat = malloc((size_t)flat_pix * sizeof(m4t_mtfp_t));
+    for (int y = 0; y < orig_h; y++)
+        for (int x = 0; x < orig_w; x++)
+            for (int c = 0; c < n_ch; c++)
+                flat[y * flat_w + x * n_ch + c] =
+                    pixels[c * orig_w * orig_h + y * orig_w + x];
 
-    /* Compute gradients on the ternary image. */
-    int8_t* hg = calloc(flat_pix, 1);
-    int8_t* vg = calloc(flat_pix, 1);
+    /* Compute gradients on the MTFP interleaved image. */
+    m4t_mtfp_t* hg = calloc(flat_pix, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* vg = calloc(flat_pix, sizeof(m4t_mtfp_t));
     for (int y = 0; y < orig_h; y++)
         for (int x = 0; x < flat_w - 1; x++)
-            hg[y * flat_w + x] = clamp_trit(tern[y * flat_w + x + 1] - tern[y * flat_w + x]);
+            hg[y * flat_w + x] = flat[y * flat_w + x + 1] - flat[y * flat_w + x];
     for (int y = 0; y < orig_h - 1; y++)
         for (int x = 0; x < flat_w; x++)
-            vg[y * flat_w + x] = clamp_trit(tern[(y + 1) * flat_w + x] - tern[y * flat_w + x]);
+            vg[y * flat_w + x] = flat[(y + 1) * flat_w + x] - flat[y * flat_w + x];
 
-    /* Pack into trit signature: intensity + hgrad + vgrad. */
+    /* Quantize and pack: intensity + hgrad + vgrad. */
     memset(out_sig, 0, M4T_TRIT_PACKED_BYTES(total_trits));
     int pos = 0;
-    for (int i = 0; i < flat_pix; i++) glyph_write_trit(out_sig, pos++, tern[i]);
-    for (int i = 0; i < hgrad_dim; i++) glyph_write_trit(out_sig, pos++, hg[i]);
-    for (int i = 0; i < vgrad_dim; i++) glyph_write_trit(out_sig, pos++, vg[i]);
+    for (int i = 0; i < flat_pix; i++) {
+        int64_t v = (int64_t)flat[i];
+        if (v > tau_i) glyph_write_trit(out_sig, pos, +1);
+        else if (v < -tau_i) glyph_write_trit(out_sig, pos, -1);
+        pos++;
+    }
+    for (int i = 0; i < hgrad_dim; i++) {
+        int64_t v = (int64_t)hg[i];
+        if (v > tau_g) glyph_write_trit(out_sig, pos, +1);
+        else if (v < -tau_g) glyph_write_trit(out_sig, pos, -1);
+        pos++;
+    }
+    for (int i = 0; i < vgrad_dim; i++) {
+        int64_t v = (int64_t)vg[i];
+        if (v > tau_g) glyph_write_trit(out_sig, pos, +1);
+        else if (v < -tau_g) glyph_write_trit(out_sig, pos, -1);
+        pos++;
+    }
 
-    free(tern); free(hg); free(vg);
+    free(flat); free(hg); free(vg);
 }
 
 static void encode_gsh_sig(const int* labels, int n_tables,
@@ -207,13 +217,9 @@ int main(int argc, char** argv) {
     int img_w = ds.img_w > 0 ? ds.img_w : (n_ch == 3 ? 32 : 28);
     int img_h = ds.img_h > 0 ? ds.img_h : (n_ch == 3 ? 32 : 28);
 
-    /* Convert MTFP back to uint8 for SSTT quantization. */
-    uint8_t* raw_train = malloc((size_t)ds.n_train * ds.input_dim);
-    uint8_t* raw_test  = malloc((size_t)ds.n_test  * ds.input_dim);
-    for (int i = 0; i < ds.n_train * ds.input_dim; i++)
-        raw_train[i] = (uint8_t)((int64_t)ds.x_train[i] * 255 / M4T_MTFP_SCALE);
-    for (int i = 0; i < ds.n_test * ds.input_dim; i++)
-        raw_test[i] = (uint8_t)((int64_t)ds.x_test[i] * 255 / M4T_MTFP_SCALE);
+    /* Normalize per-image BEFORE interleaving, so the density-
+     * calibrated tau produces balanced emission. */
+    glyph_dataset_normalize(&ds);
 
     /* SSTT feature dimensions. */
     int flat_w = img_w * n_ch;
@@ -231,18 +237,48 @@ int main(int argc, char** argv) {
     const int M = cfg.m_max;
     printf("  M=%d  knn_k=%d  n_train=%d  n_test=%d\n\n", M, KNN_K, ds.n_train, ds.n_test);
 
-    /* Extract SSTT features for all images. */
+    /* Calibrate tau on the interleaved normalized training data. */
     clock_t t0 = clock();
-    printf("Extracting SSTT features...\n");
+
+    /* Build interleaved calibration sample for tau computation. */
+    int n_calib = (ds.n_train < 1000) ? ds.n_train : 1000;
+    m4t_mtfp_t* calib_flat = malloc((size_t)n_calib * flat_pix * sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* calib_grad = malloc((size_t)n_calib * (hgrad_dim + vgrad_dim) * sizeof(m4t_mtfp_t));
+    for (int i = 0; i < n_calib; i++) {
+        const m4t_mtfp_t* px = ds.x_train + (size_t)i * ds.input_dim;
+        m4t_mtfp_t* fl = calib_flat + (size_t)i * flat_pix;
+        for (int y = 0; y < img_h; y++)
+            for (int x = 0; x < img_w; x++)
+                for (int c = 0; c < n_ch; c++)
+                    fl[y * flat_w + x * n_ch + c] = px[c * img_w * img_h + y * img_w + x];
+        m4t_mtfp_t* gr = calib_grad + (size_t)i * (hgrad_dim + vgrad_dim);
+        int gi = 0;
+        for (int y = 0; y < img_h; y++)
+            for (int x = 0; x < flat_w - 1; x++)
+                gr[gi++] = fl[y * flat_w + x + 1] - fl[y * flat_w + x];
+        for (int y = 0; y < img_h - 1; y++)
+            for (int x = 0; x < flat_w; x++)
+                gr[gi++] = fl[(y + 1) * flat_w + x] - fl[y * flat_w + x];
+    }
+    int64_t tau_i = glyph_sig_quantize_tau(calib_flat, n_calib, flat_pix, 0.395);
+    int64_t tau_g = glyph_sig_quantize_tau(calib_grad, n_calib, hgrad_dim + vgrad_dim, 0.10);
+    free(calib_flat); free(calib_grad);
+    printf("  tau_intensity=%lld (%.3f×S)  tau_gradient=%lld (%.3f×S)\n",
+           (long long)tau_i, (double)tau_i / M4T_MTFP_SCALE,
+           (long long)tau_g, (double)tau_g / M4T_MTFP_SCALE);
+
+    /* Extract features for all images. */
+    printf("Extracting features...\n");
     uint8_t* train_sigs = calloc((size_t)ds.n_train * sig_bytes, 1);
     uint8_t* test_sigs  = calloc((size_t)ds.n_test  * sig_bytes, 1);
     for (int i = 0; i < ds.n_train; i++)
-        sstt_extract(raw_train + (size_t)i * ds.input_dim, img_w, img_h, n_ch,
-                     train_sigs + (size_t)i * sig_bytes, total_trits);
+        sstt_extract_mtfp(ds.x_train + (size_t)i * ds.input_dim, img_w, img_h, n_ch,
+                          tau_i, tau_g,
+                          train_sigs + (size_t)i * sig_bytes, total_trits);
     for (int i = 0; i < ds.n_test; i++)
-        sstt_extract(raw_test + (size_t)i * ds.input_dim, img_w, img_h, n_ch,
-                     test_sigs + (size_t)i * sig_bytes, total_trits);
-    free(raw_train); free(raw_test);
+        sstt_extract_mtfp(ds.x_test + (size_t)i * ds.input_dim, img_w, img_h, n_ch,
+                          tau_i, tau_g,
+                          test_sigs + (size_t)i * sig_bytes, total_trits);
     printf("  Features extracted in %.1fs.\n",
            (double)(clock() - t0) / CLOCKS_PER_SEC);
 
