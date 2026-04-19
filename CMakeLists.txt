@@ -143,6 +143,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(sstt_precog tools/sstt_precog.c)
     target_link_libraries(sstt_precog PRIVATE glyph)
+
+    add_executable(ig_scored tools/ig_scored.c)
+    target_link_libraries(ig_scored PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
