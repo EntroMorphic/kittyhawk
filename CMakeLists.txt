@@ -140,6 +140,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(direct_lsh tools/direct_lsh.c)
     target_link_libraries(direct_lsh PRIVATE glyph)
+
+    add_executable(sstt_precog tools/sstt_precog.c)
+    target_link_libraries(sstt_precog PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
