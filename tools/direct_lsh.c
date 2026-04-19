@@ -29,6 +29,24 @@
 
 #define N_CLASSES 10
 #define KNN_K 5
+#define TRITS_PER_VOTE 4
+
+static const int8_t vote_trits[10][TRITS_PER_VOTE] = {
+    {-1,-1,-1,-1}, {-1,-1,-1, 0}, {-1,-1,-1,+1}, {-1,-1, 0,-1},
+    {-1,-1, 0, 0}, {-1,-1, 0,+1}, {-1,-1,+1,-1}, {-1,-1,+1, 0},
+    {-1,-1,+1,+1}, {-1, 0,-1,-1},
+};
+
+static void encode_gsh_sig(const int* labels, int n_tables,
+                           uint8_t* out, int gsh_sb) {
+    memset(out, 0, gsh_sb);
+    for (int m = 0; m < n_tables; m++) {
+        int lbl = labels[m];
+        if (lbl < 0 || lbl >= N_CLASSES) lbl = 0;
+        for (int t = 0; t < TRITS_PER_VOTE; t++)
+            glyph_write_trit(out, m * TRITS_PER_VOTE + t, vote_trits[lbl][t]);
+    }
+}
 
 typedef struct {
     uint16_t* votes;
@@ -80,6 +98,41 @@ static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
         glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
         if (st->n_hit >= st->max_union) break;
     }
+}
+
+/* Extract top-M nearest labels from the union by full-sig Hamming
+ * distance. With direct quantization there's one signature per image,
+ * not M per-table sigs — so we take the top-M nearest by distance
+ * and use their labels as the M-dim routing pattern. */
+static void union_top_m_labels(
+    const probe_state_t* st, int M_labels, int sig_bytes,
+    const uint8_t* train_sigs, const uint8_t* q_sig,
+    const uint8_t* mask, const int* y_train,
+    int exclude_idx, int* out_labels)
+{
+    typedef struct { int32_t d; int label; } dl_t;
+    dl_t topk[256];
+    int ntk = 0;
+    int mlim = (M_labels < 256) ? M_labels : 256;
+
+    for (int j = 0; j < st->n_hit; j++) {
+        int idx = st->hit_list[j];
+        if (idx == exclude_idx) continue;
+        int32_t d = m4t_popcount_dist(
+            q_sig, train_sigs + (size_t)idx * sig_bytes, mask, sig_bytes);
+        int lbl = y_train[idx];
+        if (ntk < mlim) {
+            int pos = ntk;
+            while (pos > 0 && topk[pos-1].d > d) { topk[pos]=topk[pos-1]; pos--; }
+            topk[pos].d = d; topk[pos].label = lbl; ntk++;
+        } else if (d < topk[mlim-1].d) {
+            int pos = mlim - 1;
+            while (pos > 0 && topk[pos-1].d > d) { topk[pos]=topk[pos-1]; pos--; }
+            topk[pos].d = d; topk[pos].label = lbl;
+        }
+    }
+    for (int i = 0; i < mlim; i++)
+        out_labels[i] = (i < ntk) ? topk[i].label : 0;
 }
 
 /* Compute horizontal and vertical gradients for a multi-channel image.
@@ -424,11 +477,51 @@ int main(int argc, char** argv) {
     }
     free(perm);
 
+    printf("LSH tables built.\n");
+
+    /* ============================================================
+     * GSH: compute training routing signatures via LSH probing,
+     * encode as multi-trit vote patterns, build GSH bucket index.
+     * ============================================================ */
+    const int GSH_NTRITS = M * TRITS_PER_VOTE;
+    const int GSH_SB = M4T_TRIT_PACKED_BYTES(GSH_NTRITS);
+    printf("Building GSH (%d trits = %d bytes)...\n", GSH_NTRITS, GSH_SB);
+
+    probe_state_t gsh_build_st;
+    gsh_build_st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
+    gsh_build_st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
+    gsh_build_st.max_union = cfg.max_union; gsh_build_st.n_hit = 0;
+    int* vote_labels = malloc((size_t)M * sizeof(int));
+    uint8_t* gsh_train = calloc((size_t)ds.n_train * GSH_SB, 1);
+    uint8_t gsh_build_scratch[4];
+    uint8_t* gsh_build_mask = malloc(sig_bytes);
+    memset(gsh_build_mask, 0xFF, sig_bytes);
+
+    for (int i = 0; i < ds.n_train; i++) {
+        const uint8_t* q = train_sigs + (size_t)i * sig_bytes;
+        probe_state_reset(&gsh_build_st);
+        for (int m = 0; m < M; m++) {
+            const uint8_t* qk = table_train_keys[m] + (size_t)i * 4;
+            probe_table(&tables[m], qk, KEY_TRITS, 4,
+                        cfg.max_radius, cfg.min_cands, &gsh_build_st, gsh_build_scratch);
+        }
+        union_top_m_labels(&gsh_build_st, M, sig_bytes,
+                           train_sigs, q, gsh_build_mask,
+                           ds.y_train, i, vote_labels);
+        encode_gsh_sig(vote_labels, M, gsh_train + (size_t)i * GSH_SB, GSH_SB);
+
+        if ((i + 1) % 10000 == 0)
+            printf("  %d/%d training GSH sigs\n", i + 1, ds.n_train);
+    }
+    free(gsh_build_st.votes); free(gsh_build_st.hit_list);
+    free(gsh_build_mask);
+
+    glyph_bucket_table_t gsh_table;
+    glyph_bucket_build(&gsh_table, gsh_train, ds.n_train, GSH_SB);
+    printf("  GSH: %d distinct buckets.\n", glyph_bucket_count_distinct(&gsh_table));
+
     double build_sec = (double)(clock() - t0) / CLOCKS_PER_SEC;
-    printf("Built in %.1fs.\n", build_sec);
-    if (cfg.verbose)
-        printf("Table 0 distinct buckets: %d\n", glyph_bucket_count_distinct(&tables[0]));
-    printf("\n");
+    printf("Total build: %.1fs.\n\n", build_sec);
 
     /* Classify. The resolver scores by Hamming distance on the FULL
      * signature (all total_dim trits), not on the 16-trit key. The
@@ -453,6 +546,18 @@ int main(int argc, char** argv) {
     long union_sum[7]={0};
     int* final_pred = malloc((size_t)ds.n_test * sizeof(int));
     memset(final_pred, 0xFF, (size_t)ds.n_test * sizeof(int));
+
+    /* GSH query-time state. */
+    probe_state_t gst;
+    gst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
+    gst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
+    gst.max_union = cfg.max_union; gst.n_hit = 0;
+    uint8_t* q_gsh = calloc(GSH_SB, 1);
+    uint8_t* gsh_mask = malloc(GSH_SB); memset(gsh_mask, 0xFF, GSH_SB);
+
+    int lsh_total_correct = 0, gsh_total_correct = 0;
+    int agree_count = 0, agree_correct = 0;
+    int disagree_count = 0, disagree_lsh_correct = 0, disagree_gsh_correct = 0;
 
     printf("Classifying %d queries...\n", ds.n_test);
     clock_t t_sweep = clock();
@@ -515,6 +620,40 @@ int main(int argc, char** argv) {
 
             prev = Mt;
         }
+
+        /* GSH pass at max M. */
+        int lsh_pred = final_pred[qi];
+        if (lsh_pred == y) lsh_total_correct++;
+
+        union_top_m_labels(&st, M, sig_bytes, train_sigs, qs_ptr,
+                           full_mask, ds.y_train, -1, vote_labels);
+        encode_gsh_sig(vote_labels, M, q_gsh, GSH_SB);
+
+        probe_state_reset(&gst);
+        probe_table(&gsh_table, q_gsh, KEY_TRITS, 4,
+                    cfg.max_radius, cfg.min_cands, &gst, key_scratch);
+
+        int gsh_pred = -1;
+        {
+            int32_t best = INT32_MAX;
+            for (int j = 0; j < gst.n_hit; j++) {
+                int idx = gst.hit_list[j];
+                int32_t d = m4t_popcount_dist(
+                    q_gsh, gsh_train + (size_t)idx * GSH_SB,
+                    gsh_mask, GSH_SB);
+                if (d < best) { best = d; gsh_pred = ds.y_train[idx]; }
+            }
+        }
+        if (gsh_pred == y) gsh_total_correct++;
+
+        if (lsh_pred == gsh_pred) {
+            agree_count++;
+            if (lsh_pred == y) agree_correct++;
+        } else {
+            disagree_count++;
+            if (lsh_pred == y) disagree_lsh_correct++;
+            if (gsh_pred == y) disagree_gsh_correct++;
+        }
     }
     double sweep_sec = (double)(clock() - t_sweep) / CLOCKS_PER_SEC;
 
@@ -528,6 +667,22 @@ int main(int argc, char** argv) {
                100.0 * sum_c[si] / ds.n_test,
                100.0 * maj_c[si] / ds.n_test,
                100.0 * knn_c[si] / ds.n_test);
+    printf("\n");
+
+    printf("=== LSH + GSH ===\n");
+    printf("  LSH k=%d-rw:              %6.2f%%\n", KNN_K, 100.0 * lsh_total_correct / ds.n_test);
+    printf("  GSH 1-NN:                 %6.2f%%\n", 100.0 * gsh_total_correct / ds.n_test);
+    printf("  Agreement:                %6.2f%%  (%d / %d)\n",
+           100.0 * agree_count / ds.n_test, agree_count, ds.n_test);
+    printf("  P(correct | agree):       %6.2f%%  (%d / %d)\n",
+           agree_count ? 100.0 * agree_correct / agree_count : 0.0,
+           agree_correct, agree_count);
+    printf("  P(LSH correct | disagree):%6.2f%%  (%d / %d)\n",
+           disagree_count ? 100.0 * disagree_lsh_correct / disagree_count : 0.0,
+           disagree_lsh_correct, disagree_count);
+    printf("  P(GSH correct | disagree):%6.2f%%  (%d / %d)\n",
+           disagree_count ? 100.0 * disagree_gsh_correct / disagree_count : 0.0,
+           disagree_gsh_correct, disagree_count);
     printf("\n");
 
     /* Per-class at max M (from stored predictions — no double sweep). */
@@ -547,7 +702,10 @@ int main(int argc, char** argv) {
 
     /* Cleanup. */
     free(full_mask); free(st.votes); free(st.hit_list);
-    free(final_pred);
+    free(final_pred); free(vote_labels);
+    free(q_gsh); free(gsh_mask); free(gsh_train);
+    glyph_bucket_table_free(&gsh_table);
+    free(gst.votes); free(gst.hit_list);
     free(train_feat); free(test_feat);
     free(train_sigs); free(test_sigs);
     free(train_summary); free(test_summary);
