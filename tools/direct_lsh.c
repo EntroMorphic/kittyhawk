@@ -181,25 +181,29 @@ int main(int argc, char** argv) {
         memcpy(test_feat, ds.x_test, (size_t)ds.n_test * intensity_dim * sizeof(m4t_mtfp_t));
     }
 
-    /* Compute tau: different thresholds for intensity vs gradients. */
+    /* Compute tau: different thresholds for intensity vs gradients.
+     * Must extract intensity values into a CONTIGUOUS buffer because
+     * train_feat has stride=total_dim when gradients are enabled,
+     * and glyph_sig_quantize_tau assumes stride=n_dims. */
     int n_calib = (ds.n_train < 1000) ? ds.n_train : 1000;
+    m4t_mtfp_t* intensity_sample = malloc((size_t)n_calib * intensity_dim * sizeof(m4t_mtfp_t));
+    for (int i = 0; i < n_calib; i++)
+        memcpy(intensity_sample + (size_t)i * intensity_dim,
+               train_feat + (size_t)i * total_dim,
+               (size_t)intensity_dim * sizeof(m4t_mtfp_t));
     int64_t tau_intensity = glyph_sig_quantize_tau(
-        train_feat, n_calib, intensity_dim, cfg.density);
+        intensity_sample, n_calib, intensity_dim, cfg.density);
+    free(intensity_sample);
+
     int64_t tau_gradient = 0;
     if (use_gradients) {
-        /* Gradients need a lower tau — they're smaller magnitude.
-         * Use the gradient portion of the feature vectors. */
         int grad_dim = hgrad_dim + vgrad_dim;
         m4t_mtfp_t* grad_sample = malloc((size_t)n_calib * grad_dim * sizeof(m4t_mtfp_t));
         for (int i = 0; i < n_calib; i++)
             memcpy(grad_sample + (size_t)i * grad_dim,
                    train_feat + (size_t)i * total_dim + intensity_dim,
                    (size_t)grad_dim * sizeof(m4t_mtfp_t));
-        /* Gradient density: calibrated separately from intensity. Lower
-         * density = more non-zero gradient trits = more edge detail.
-         * The optimal value is dataset-dependent. */
-        double grad_density = 0.10;
-        tau_gradient = glyph_sig_quantize_tau(grad_sample, n_calib, grad_dim, grad_density);
+        tau_gradient = glyph_sig_quantize_tau(grad_sample, n_calib, grad_dim, 0.10);
         free(grad_sample);
     }
     printf("  tau_intensity=%lld (%.3f × SCALE)  tau_gradient=%lld (%.3f × SCALE)\n",
