@@ -135,9 +135,17 @@ static void union_top_m_labels(
         out_labels[i] = (i < ntk) ? topk[i].label : 0;
 }
 
-/* Compute horizontal and vertical gradients for a multi-channel image.
- * Layout: [C0 row-major, C1 row-major, ...].
- * Appends to output after the intensity values. */
+/* NOTE: trit-native transitions (quantize first, gradients second)
+ * were tested and HURT accuracy on all three datasets (CIFAR −10.67pp,
+ * Fashion −3.53pp, MNIST −1.37pp). The transitions produce 81-91%
+ * zeros because adjacent pixels often share the same ternary state.
+ * Hamming distance treats those zeros as dead weight.
+ *
+ * The float gradient with separate tau calibration (below) preserves
+ * continuous magnitude information and is quantized to keep 90%
+ * non-zero. This is the correct design for Hamming-distance scoring.
+ * SSTT's quantize-first approach works with IG-weighted inverted
+ * index scoring but not with uniform Hamming. */
 static void compute_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
                               m4t_mtfp_t* hgrad, m4t_mtfp_t* vgrad) {
     int ppc = W * H;
@@ -211,7 +219,7 @@ int main(int argc, char** argv) {
 
     clock_t t0 = clock();
 
-    /* Build feature vectors: intensity + optional gradients. */
+    /* Build feature vectors: intensity + optional float gradients. */
     printf("Building feature vectors...\n");
     m4t_mtfp_t* train_feat = malloc((size_t)ds.n_train * total_dim * sizeof(m4t_mtfp_t));
     m4t_mtfp_t* test_feat  = malloc((size_t)ds.n_test  * total_dim * sizeof(m4t_mtfp_t));
@@ -241,10 +249,8 @@ int main(int argc, char** argv) {
         memcpy(test_feat, ds.x_test, (size_t)ds.n_test * intensity_dim * sizeof(m4t_mtfp_t));
     }
 
-    /* Compute tau: different thresholds for intensity vs gradients.
-     * Must extract intensity values into a CONTIGUOUS buffer because
-     * train_feat has stride=total_dim when gradients are enabled,
-     * and glyph_sig_quantize_tau assumes stride=n_dims. */
+    /* Calibrate tau: separate thresholds for intensity and gradients.
+     * Extract into contiguous buffers for correct stride. */
     int n_calib = (ds.n_train < 1000) ? ds.n_train : 1000;
     m4t_mtfp_t* intensity_sample = malloc((size_t)n_calib * intensity_dim * sizeof(m4t_mtfp_t));
     for (int i = 0; i < n_calib; i++)
@@ -263,12 +269,6 @@ int main(int argc, char** argv) {
             memcpy(grad_sample + (size_t)i * grad_dim,
                    train_feat + (size_t)i * total_dim + intensity_dim,
                    (size_t)grad_dim * sizeof(m4t_mtfp_t));
-        /* Gradient density 0.10: only ~10% of gradient values map to
-         * zero. This is intentionally LOW — small gradients carry
-         * class-discriminative edge detail on natural images. Higher
-         * density (e.g. 0.40) was tested and reduced CIFAR-10 accuracy
-         * from 43.34% to 36.20%. The 10% zeros are from genuinely
-         * flat regions (no edge), not noise filtering. */
         tau_gradient = glyph_sig_quantize_tau(grad_sample, n_calib, grad_dim, 0.10);
         free(grad_sample);
     }
@@ -281,42 +281,29 @@ int main(int argc, char** argv) {
     uint8_t* train_sigs = calloc((size_t)ds.n_train * sig_bytes, 1);
     uint8_t* test_sigs  = calloc((size_t)ds.n_test  * sig_bytes, 1);
 
-    for (int i = 0; i < ds.n_train; i++) {
-        const m4t_mtfp_t* feat = train_feat + (size_t)i * total_dim;
-        uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
-        /* Intensity trits. */
-        for (int d = 0; d < intensity_dim; d++) {
-            int64_t v = (int64_t)feat[d];
-            if (v > tau_intensity) glyph_write_trit(sig, d, +1);
-            else if (v < -tau_intensity) glyph_write_trit(sig, d, -1);
-        }
-        /* Gradient trits. */
-        if (use_gradients) {
-            for (int d = 0; d < hgrad_dim + vgrad_dim; d++) {
-                int64_t v = (int64_t)feat[intensity_dim + d];
-                int pos = intensity_dim + d;
-                if (v > tau_gradient) glyph_write_trit(sig, pos, +1);
-                else if (v < -tau_gradient) glyph_write_trit(sig, pos, -1);
+    for (int pass = 0; pass < 2; pass++) {
+        int n_imgs = (pass == 0) ? ds.n_train : ds.n_test;
+        const m4t_mtfp_t* feat = (pass == 0) ? train_feat : test_feat;
+        uint8_t* sigs = (pass == 0) ? train_sigs : test_sigs;
+        for (int i = 0; i < n_imgs; i++) {
+            const m4t_mtfp_t* f = feat + (size_t)i * total_dim;
+            uint8_t* sig = sigs + (size_t)i * sig_bytes;
+            for (int d = 0; d < intensity_dim; d++) {
+                int64_t v = (int64_t)f[d];
+                if (v > tau_intensity) glyph_write_trit(sig, d, +1);
+                else if (v < -tau_intensity) glyph_write_trit(sig, d, -1);
+            }
+            if (use_gradients) {
+                for (int d = 0; d < hgrad_dim + vgrad_dim; d++) {
+                    int64_t v = (int64_t)f[intensity_dim + d];
+                    int pos = intensity_dim + d;
+                    if (v > tau_gradient) glyph_write_trit(sig, pos, +1);
+                    else if (v < -tau_gradient) glyph_write_trit(sig, pos, -1);
+                }
             }
         }
     }
-    for (int i = 0; i < ds.n_test; i++) {
-        const m4t_mtfp_t* feat = test_feat + (size_t)i * total_dim;
-        uint8_t* sig = test_sigs + (size_t)i * sig_bytes;
-        for (int d = 0; d < intensity_dim; d++) {
-            int64_t v = (int64_t)feat[d];
-            if (v > tau_intensity) glyph_write_trit(sig, d, +1);
-            else if (v < -tau_intensity) glyph_write_trit(sig, d, -1);
-        }
-        if (use_gradients) {
-            for (int d = 0; d < hgrad_dim + vgrad_dim; d++) {
-                int64_t v = (int64_t)feat[intensity_dim + d];
-                int pos = intensity_dim + d;
-                if (v > tau_gradient) glyph_write_trit(sig, pos, +1);
-                else if (v < -tau_gradient) glyph_write_trit(sig, pos, -1);
-            }
-        }
-    }
+    free(train_feat); free(test_feat);
 
     /* Hierarchical Trit Lattice LSH: spatial pooling builds the bucket
      * key by reducing blocks of trits via majority vote.
@@ -706,7 +693,6 @@ int main(int argc, char** argv) {
     free(q_gsh); free(gsh_mask); free(gsh_train);
     glyph_bucket_table_free(&gsh_table);
     free(gst.votes); free(gst.hit_list);
-    free(train_feat); free(test_feat);
     free(train_sigs); free(test_sigs);
     free(train_summary); free(test_summary);
     for (int m = 0; m < M; m++) {
