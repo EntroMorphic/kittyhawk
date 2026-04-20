@@ -31,7 +31,7 @@ typedef struct {
  * all-zero. */
 void glyph_rng_seed(glyph_rng_t* r, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
 
-/* Draw the next 32-bit value from the xoshiro128** state. */
+/* Draw the next 32-bit value from the xoshiro128+ state. */
 uint32_t glyph_rng_next(glyph_rng_t* r);
 
 #ifdef __cplusplus

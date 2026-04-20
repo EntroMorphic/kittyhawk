@@ -86,7 +86,7 @@ void glyph_config_defaults(glyph_config_t* cfg);
  */
 int glyph_config_parse_argv(glyph_config_t* cfg, int argc, char** argv);
 
-/* Print usage to stdout (or stderr on error). */
+/* Print usage to stdout. */
 void glyph_config_print_usage(const char* progname);
 
 #ifdef __cplusplus

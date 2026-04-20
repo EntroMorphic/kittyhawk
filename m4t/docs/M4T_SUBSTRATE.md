@@ -294,13 +294,15 @@ m4t/
     m4t_route.{c,h}          — routing primitives
     m4t_mtfp4.{c,h}          — 4-trit mantissa cell, SDOT-facing
     m4t_ternary_matmul.{c,h} — SDOT-native ternary matmul
-    m4t_mtfp.{c,h}           — TO REBUILD: mantissa + block-exponent core
+    m4t_mtfp.{c,h}           — mantissa + block-exponent core
   tests/
+    test_m4t_mtfp.c
     test_m4t_trit_ops.c
     test_m4t_trit_reducers.c
     test_m4t_route.c
     test_m4t_mtfp4.c
     test_m4t_ternary_matmul.c
+    test_m4t_trit_pack.c
   tools/
     m4t_trit_golden.c        — enumerated golden-value tests
     m4t_size_check.sh        — .text budget enforcement

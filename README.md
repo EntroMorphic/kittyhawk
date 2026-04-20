@@ -141,7 +141,7 @@ All 11 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alia
 | File | Purpose |
 |---|---|
 | [`NORTH_STAR.md`](NORTH_STAR.md) | The vision. Why base-3, why routing, what the end-game is not. Re-read when base-2 gravity pulls. |
-| [`docs/FINDINGS.md`](docs/FINDINGS.md) | Consolidated measurements and what they mean. Six axes covering accuracy, speed, inspectability, cascade architecture (dense + routed), signature-as-address, and multi-table composition. |
+| [`docs/FINDINGS.md`](docs/FINDINGS.md) | Consolidated measurements and what they mean. Eight axes covering accuracy, speed, inspectability, cascade architecture, signature-as-address, multi-table composition, Fashion-MNIST, and CIFAR-10. |
 | [`docs/LIBGLYPH.md`](docs/LIBGLYPH.md) | `libglyph` library overview — module descriptions, usage flow, how to write a new consumer. |
 | [`docs/HYPERPARAMETERS.md`](docs/HYPERPARAMETERS.md) | Every parameter across every experiment. Reference for reproduction. |
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Current empirical state. Benchmark bed open questions. |

@@ -30,7 +30,7 @@ In a base-3 environment, 1/3 of cells carry zero *by construction*. Dense matmul
 
 **Routing is essential, and will naturally outperform dense, in a base-3 environment.**
 
-The current evidence on MNIST (routing-native 81.40% vs dense-on-ternary-storage 97.61%) doesn't disprove this. It measures how well base-3 can *emulate* a base-2-native problem. MNIST is posed in base-2: scalar intensities, Euclidean distance, one-hot labels. Running routing on it is a test of adapter efficiency, not of the thesis. The real test is problems whose structure is base-3 from the start — and those may not exist yet in the canon. We may have to find them. Or invent them.
+The current evidence on MNIST (routing-native 97.24% at M=32 vs dense-on-ternary-storage 97.16% classical k-NN) confirms this for a cooperative benchmark — routing matches dense at lower cost. But MNIST is posed in base-2: scalar intensities, Euclidean distance, one-hot labels. The real test is problems whose structure is base-3 from the start — and those may not exist yet in the canon. We may have to find them. Or invent them.
 
 ---
 

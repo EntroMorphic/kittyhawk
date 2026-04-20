@@ -1,6 +1,6 @@
 ---
 title: libglyph — consumer-side routed k-NN primitives
-status: As of 2026-04-15 (Axis 5/6 production library)
+status: As of 2026-04-20 (production library — direct_lsh + Axis 5/6 consumers)
 companion: m4t/docs/M4T_SUBSTRATE.md · docs/FINDINGS.md · docs/HYPERPARAMETERS.md
 ---
 
@@ -18,6 +18,7 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
 
 ```
 ┌─────────────────────────────────────────────────────────┐
+│  tools/direct_lsh.c                  (production best)  │
 │  tools/mnist_routed_bucket_multi.c   (Axis 6 consumer)  │
 │  tools/mnist_routed_bucket.c         (Axis 5 consumer)  │
 └─────────────────────────────────────────────────────────┘
@@ -26,7 +27,7 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
 ┌─────────────────────────────────────────────────────────┐
 │  libglyph  (7 modules, ~900 lines of C)                 │
 │  ─────────────────────────────────────────────────      │
-│  glyph_dataset     MNIST IDX loader + deskew            │
+│  glyph_dataset     dataset loader + deskew + normalize   │
 │  glyph_rng         xoshiro128+ RNG                      │
 │  glyph_sig         random ternary proj + tau calib      │
 │  glyph_bucket      sorted bucket index + lower_bound    │
@@ -58,16 +59,18 @@ Every libglyph module depends only on m4t primitives and on other libglyph modul
 
 ## Module reference
 
-### `glyph_dataset` — MNIST IDX loader + deskew
+### `glyph_dataset` — dataset loader + deskew + normalize
 
 **Public header:** `src/glyph_dataset.h`
 
-**Struct:** `glyph_dataset_t` owns MTFP-encoded pixel data and integer labels for train and test splits. Allocated by `glyph_dataset_load_mnist`, freed by `glyph_dataset_free`.
+**Struct:** `glyph_dataset_t` owns MTFP-encoded pixel data and integer labels for train and test splits. Also stores `img_w`, `img_h`, `input_dim` for spatial operations. Allocated by any loader, freed by `glyph_dataset_free`.
 
 **Functions:**
 
 - `glyph_dataset_load_mnist(ds, dir)` — reads four IDX files from `<dir>`:
   `train-images-idx3-ubyte`, `train-labels-idx1-ubyte`, `t10k-images-idx3-ubyte`, `t10k-labels-idx1-ubyte`. Validates IDX magic numbers (0x00000803 for images, 0x00000801 for labels). Returns 0 on success, non-zero with a diagnostic to stderr on failure.
+- `glyph_dataset_load_cifar10(ds, dir)` — reads CIFAR-10 binary format (`data_batch_1.bin` through `data_batch_5.bin` for train, `test_batch.bin` for test). 3072 input dimensions (32×32×3 RGB). Returns 0 on success.
+- `glyph_dataset_load_auto(ds, dir)` — auto-detects dataset format by probing for IDX magic numbers vs. CIFAR-10 binary. Calls the appropriate loader.
 - `glyph_dataset_deskew(ds)` — applies integer-moment shear correction to every image in train and test. Zero float; uses int64 image moments. Idempotent.
 - `glyph_dataset_normalize(ds)` — per-image zero-mean, unit-variance normalization. Restores §18 emission coverage on variable-contrast datasets (CIFAR-10). Integer arithmetic throughout (int64 sums, Newton's-method isqrt). Idempotent.
 - `glyph_dataset_free(ds)` — releases all heap state. Safe to call multiple times.
@@ -215,7 +218,7 @@ glyph_multiprobe_enumerate(
 
 **Public header:** `src/glyph_resolver.h`
 
-A resolver reads a candidate union (produced by multi-table bucket lookup + multi-probe) and returns a predicted class label. Six variants are provided; `SUM` dominates empirically on MNIST in every measured configuration at M ≥ 2.
+A resolver reads a candidate union (produced by multi-table bucket lookup + multi-probe) and returns a predicted class label. Seven variants are provided; `SUM` dominates empirically on MNIST in every measured configuration at M ≥ 2, and `KNN` is the production resolver for the direct quantization path.
 
 **Struct:** `glyph_union_t` borrows a hit-list (array of prototype indices currently in the union), a dense vote array (indexed by prototype index, sized to `n_train`), the shared training labels, and a class cardinality. See the header for the full lifecycle contract — especially the "lazy zero" pattern for reusing the votes array across queries.
 
@@ -252,7 +255,7 @@ Both research variants are wired into the tool via `--resolver_sum {voteweighted
 
 | Field | CLI flag | Default | Role |
 |---|---|---|---|
-| `resolver_sum` | `--resolver_sum` | `"scalar"` | SUM resolver implementation: `scalar`, `neon4`, `voteweighted`, `radiusaware`. |
+| `resolver_sum` | `--resolver_sum` | `"scalar"` | SUM resolver implementation: `scalar`, `neon4`, `knn`, `voteweighted`, `radiusaware`. |
 | `radius_lambda` | `--radius_lambda` | 8 | Penalty coefficient for `radiusaware`. Only consulted when `resolver_sum == "radiusaware"`. |
 | `density_schedule` | `--density_schedule` | `"fixed"` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. |
 | `density_triple[3]` | `--density_triple` | `0.25,0.33,0.40` | Three densities for mixed schedule. Table m uses `density_triple[m % 3]`. |
@@ -337,7 +340,6 @@ int main(int argc, char** argv) {
     free(votes); free(hit_list);
     glyph_bucket_table_free(&bt);
     free(train_sigs); free(test_sigs);
-    glyph_sig_builder_free(&sb);
     glyph_dataset_free(&ds);
     return 0;
 }
@@ -378,10 +380,10 @@ Run with `ctest --test-dir build`; the test is registered as `glyph_libglyph`.
 ## Limitations (named, not hidden)
 
 - **Bucket key width:** 4 bytes only. The fused-filter variant needs `uint64_t` keys (8-byte concatenated signatures). Named in `src/glyph_bucket.h`. Future generalization.
-- **Dataset loader:** MNIST IDX only. CIFAR-10 and other benchmarks need a new loader; the rest of libglyph is dataset-agnostic once `glyph_dataset_t` is populated with MTFP-encoded pixels and integer labels.
+- **Dataset loader:** MNIST IDX and CIFAR-10 binary formats supported via `glyph_dataset_load_auto`. Other benchmarks need a new loader; the rest of libglyph is dataset-agnostic once `glyph_dataset_t` is populated with MTFP-encoded pixels and integer labels.
 - **Class cardinality:** capped at 256. Covers every current benchmark; larger caps or API changes required for ImageNet-scale class cardinalities.
 - **Config struct:** single flat `glyph_config_t` shared across all tools. Tool-specific flags (`--m_max`, `--single_m` are multi-table-only) are silently ignored by tools that don't use them. A per-tool config split is a future polish.
-- **Resolver scoring:** six variants (VOTE, SUM, SUM-NEON4, PTM, voteweighted, radiusaware) with runtime-selected dispatch via `--resolver_sum`. Two research variants (voteweighted, radiusaware) are falsified negative results retained as infrastructure. Richer resolvers (per-table normalization, calibrated distance) would require API additions.
+- **Resolver scoring:** seven variants (VOTE, SUM, SUM-NEON4, PTM, KNN, voteweighted, radiusaware) with runtime-selected dispatch via `--resolver_sum`. Two research variants (voteweighted, radiusaware) are falsified negative results retained as infrastructure. Richer resolvers (per-table normalization, calibrated distance) would require API additions.
 
 ## Related documentation
 

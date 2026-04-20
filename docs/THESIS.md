@@ -24,7 +24,7 @@ A falsification-first framing keeps this honest. The thesis is falsified if:
 2. Routing-native achieves parity but only by importing dense-shaped primitives (matmul, layernorm, etc.) into the hot path — i.e., the routing story was a reskin.
 3. Hardware measurements show the routing path doesn't actually ride the native instructions (SDOT, TBL, VCNT) at the intended utilization — meaning the "hardware-aligned" claim is aspirational rather than measured.
 
-**Current empirical state (updated 2026-04-15):** the routing-vs-dense gap on MNIST has been closed and inverted relative to the first measurement. Initially, routing-native (Trit Lattice LSH centroid, 81.40%) underperformed dense-on-ternary-storage (97.61%) by 16 points — this was the "open empirical question" for the first half of the rebuild. After the routing reframes (filter-ranker / information leverage / signature-as-address / multi-table composition), the routed production consumer reaches **97.24%** at N_PROJ=16 on deskewed MNIST — the first routed architecture in the project to exceed 97%. At M=64 the same consumer reaches 97.31%. At matched total signature bits, multi-table routed bucket LSH matches or slightly beats the pure-signature scaling curve (M=32 at 512 bits is +0.18 over pure N_PROJ=512 at 97.06%).
+**Current empirical state (updated 2026-04-20):** the routing-vs-dense gap on MNIST has been closed and inverted relative to the first measurement. Initially, routing-native (Trit Lattice LSH centroid, 81.40%) underperformed dense-on-ternary-storage (97.61%) by 16 points. After the routing reframes (filter-ranker / information leverage / signature-as-address / multi-table composition / direct ternary quantization), the routed production consumer (`direct_lsh`) reaches **97.18%** on MNIST, **87.95%** on Fashion-MNIST (beating SSTT's 86.54%), and **46.63%** on CIFAR-10 via GSH selective scoring. The multi-table bucket path (`mnist_routed_bucket_multi`) reaches **97.24%** at N_PROJ=16 on deskewed MNIST. At matched total signature bits, multi-table routed bucket LSH matches or slightly beats the pure-signature scaling curve (M=32 at 512 bits is +0.18 over pure N_PROJ=512 at 97.06%).
 
 The dense-scaffolding era headline of 97.99% (Axis 2, `mnist_routed_knn`) was measured with routing primitives inside an O(N_train) dense outer loop — a compression win against dense L1, not a routing-architecture win. The Axis 5 / Axis 6 reframes replaced that dense shape with a signature-as-address bucket index + multi-table composition, which reaches similar accuracy at a fraction of the wall-time cost while honoring the routing contract end-to-end.
 
@@ -32,15 +32,15 @@ The dense-scaffolding era headline of 97.99% (Axis 2, `mnist_routed_knn`) was me
 
 ## 3. Which consumer is M4T being built for?
 
-**Primary production consumer (as of 2026-04-15):** `tools/mnist_routed_bucket_multi.c` — the multi-table routed bucket LSH. Built on `libglyph`, which itself sits on `libm4t`. Uses the Trit Lattice signature as a *hash-table address* rather than as an operand: training prototypes are indexed by their packed-trit signatures into a sorted bucket table; query time is binary search + ternary multi-probe (O(1) amortized in N_train) followed by a routed summed-distance resolver over the candidate union. Zero dense scans at the application level.
+**Primary production consumer (as of 2026-04-20):** `tools/direct_lsh.c` — direct ternary quantization with Hierarchical Trit Lattice LSH, GSH (Global Signature Hash) confidence, and pair-IG selective scoring. Built on `libglyph` over `libm4t`. Each trit represents a specific input dimension (pixel or gradient) — no random projections. Supports MNIST, Fashion-MNIST, and CIFAR-10 via `glyph_dataset_load_auto`. Production best across all three datasets.
 
-**Companion consumer (single-table variant):** `tools/mnist_routed_bucket.c` — same signature-as-address architecture with M=1 table and an independent H2+H3+H4 resolver. Retained as the Axis 5 reference and as a simpler test of the library's single-table path.
+**Companion consumer (multi-table bucket, random projection path):** `tools/mnist_routed_bucket_multi.c` — multi-table routed bucket LSH using random ternary projections and signature-as-address indexing. Retained as the Axis 6 reference and the first routed architecture to break 97% on MNIST. Uses the Trit Lattice signature as a hash-table address; query time is binary search + ternary multi-probe (O(1) amortized in N_train) followed by a routed summed-distance resolver.
 
-**Why these consumers.** They exercise the full substrate surface — `m4t_ternary_matmul_bt`, `m4t_route_threshold_extract`, `m4t_popcount_dist`, the trit pack/unpack path — and they do so inside the routing-architecture shape the thesis demands (signature as address, not operand). They are the first Glyph consumers where wall-time cost is **independent of N_train** in the common case, which is what the hardware-up story has to mean in practice.
+**Companion consumer (single-table variant):** `tools/mnist_routed_bucket.c` — same signature-as-address architecture with M=1 table and an independent H2+H3+H4 resolver. Retained as the Axis 5 reference.
 
 **Previously named provisional consumer (`mnist_trit_lattice.c`).** Retained in `tools/` as research scaffolding but no longer the thesis-bearing consumer. It uses the Trit Lattice as a centroid-based classifier, which reaches ~58-81% depending on configuration and is useful as an atomic probe of the centroid path, not as the production surface.
 
-**Primitive-surface rule.** New substrate primitives justify themselves by concrete demand from the production consumers. "We'll probably need it" is not a justification. If `mnist_routed_bucket_multi` doesn't call it, it doesn't land in M4T or libglyph.
+**Primitive-surface rule.** New substrate primitives justify themselves by concrete demand from the production consumers. "We'll probably need it" is not a justification. If `direct_lsh` doesn't call it, it doesn't land in M4T or libglyph.
 
 **Future/candidate consumers.** Listed here to keep the future scope explicit, NOT to justify building for them pre-emptively.
 
@@ -52,22 +52,25 @@ The dense-scaffolding era headline of 97.99% (Axis 2, `mnist_routed_knn`) was me
 
 ## 4. Benchmark bed
 
-**STILL OPEN, but MNIST is now saturated under routing and the cooperative-task reading is explicit.**
+**Partially resolved (updated 2026-04-20).** Three datasets now measured under the direct ternary quantization production consumer (`direct_lsh`):
 
-Updated status (2026-04-15): MNIST has been driven to 97.24% under a pure routing architecture at N_PROJ=16 (multi-table bucket SUM), within 0.75 points of the best dense scaffolding result on the same substrate and matching the pure-signature scaling curve at equivalent total bits. Classical L1 k-NN on deskewed pixels is 97.16%. The three results cluster within 1 point of each other. **MNIST can no longer separate routing-native from dense-on-ternary-storage** — both approaches saturate around the same ceiling. Cost differs (routed bucket is ~2× faster than the equivalent dense scan at matched accuracy), but "routing beats dense" on accuracy is structurally unverifiable on this bed.
+| Dataset | Glyph | SSTT | Verdict |
+|---|---|---|---|
+| MNIST | 97.18% | 97.53% | Tied (within noise) |
+| Fashion-MNIST | 87.95% | 86.54% | **Glyph wins** (+1.41pp) |
+| CIFAR-10 | 46.63% | ~53% | Gap is 6.4pp (distance metric ceiling) |
 
-The Axis 4 / Axis 5 / Axis 6 empirical work settled this as a cooperative task: both architectures reach the MNIST ceiling. The thesis still needs a non-cooperative bed.
+MNIST is settled — both architectures saturate around the same ceiling; routing wins on cost. Fashion-MNIST is the first dataset where Glyph outperforms a published ternary baseline on accuracy. CIFAR-10 is the active frontier: the 6.4pp gap traces to per-trit Hamming distance vs. SSTT's pattern-level block scoring (see Axis 8 in FINDINGS.md).
 
-Candidate benches, ordered by how much they force the thesis to earn its keep:
+Remaining candidate benches for harder tests:
 
 | Bench | Why it's a harder test | Why it's achievable |
 |---|---|---|
-| CIFAR-10 | Higher-dim, harder, non-trivial for classical methods | Small enough for small-compute research; immediate next step |
 | Long-tailed classification (e.g. iNaturalist subset) | Class imbalance stresses routing decision quality specifically | Routing has a natural story here |
 | Char-level text classification | LSH over n-gram signatures is already a good fit for ternary | Tiny models, fast iteration |
 | Sparse-signal / one-shot tasks | Routing's "pick the right prototype" geometry matches the task | Benchmarks exist |
 
-**Next empirical step:** port `libglyph` + the routed bucket consumers to CIFAR-10. The dataset loader in `src/glyph_dataset.c` is currently MNIST-specific (IDX format); CIFAR-10 would need a new loader. Everything downstream (sig builder, bucket index, multi-probe, resolvers, CLI) is dataset-agnostic and should work without modification. The test is whether multi-table routed bucket reaches parity with pure-signature scaling on a harder bed, or whether the resolver gap widens — which would diagnose a real limit of random ternary projections on non-cooperative data.
+**Next empirical step:** close the CIFAR-10 distance-metric gap. The input representation (direct quantization + gradients) reaches 50.2% brute-force; the remaining gap is in the distance function. Pattern-level distance (block encoding with correlation-aware scoring) is the identified path forward.
 
 ## 5. What "hardware-aligned" has to mean empirically
 
@@ -95,8 +98,8 @@ The two docs are deliberately separate. Conflating them was part of what got the
 
 ## 8. Open items
 
-- **C1.** ~~Choose a consumer architecture (§3).~~ **Resolved (2026-04-15):** the multi-table routed bucket (`mnist_routed_bucket_multi`) is the primary production consumer; the single-table variant (`mnist_routed_bucket`) is the Axis 5 reference. Both live on `libglyph` over `libm4t`. `m4t_mtfp_nonlinear.c` + `m4t_mtfp_tables.c` remain in `archive/` pending a routing transformer consumer.
-- **B1.** Choose a benchmark bed beyond MNIST (§4). Still open. MNIST is now saturated under routing and no longer separates the thesis from its null. CIFAR-10 is the natural next step; requires a new dataset loader in `src/glyph_dataset.c` (the rest of libglyph is dataset-agnostic).
+- **C1.** ~~Choose a consumer architecture (§3).~~ **Resolved (2026-04-20):** `direct_lsh` is the primary production consumer (direct ternary quantization + GSH selective scoring, all three datasets). The multi-table bucket (`mnist_routed_bucket_multi`) is retained as the Axis 6 reference. Both live on `libglyph` over `libm4t`.
+- **B1.** ~~Choose a benchmark bed beyond MNIST (§4).~~ **Partially resolved (2026-04-20):** CIFAR-10 and Fashion-MNIST ported and measured. CIFAR-10 dataset loader (`glyph_dataset_load_cifar10`) and auto-detection (`glyph_dataset_load_auto`) implemented. Active frontier: closing the CIFAR-10 distance-metric gap (46.63% vs ~53% SSTT).
 - **M1.** Discharge hardware-alignment claims with measurement (§5). Partially addressed: wall-time measurements show routed bucket M=32 running at ~1.92 ms/query vs dense N_PROJ=512 scan at ~4.0 ms/query at matched accuracy. SDOT / TBL / VCNT utilization-per-cycle measurements are still unrun.
 - **A1.** (New.) Generalize libglyph's bucket index to `uint64_t` keys so the fused-filter variant (concatenated H1+H2 signatures) can be tested in the routed architecture without reintroducing dense scans.
 

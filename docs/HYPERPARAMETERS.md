@@ -1,6 +1,6 @@
 ---
 title: Hyperparameters Reference — Glyph / M4T MNIST Experiments
-status: As of 2026-04-15 (Axis 5/6 production consumers + libglyph CLI)
+status: As of 2026-04-20 (direct_lsh production + Axis 5/6 consumers + libglyph CLI)
 companion: docs/FINDINGS.md · docs/LIBGLYPH.md · CHANGELOG.md · README.md
 ---
 
@@ -24,7 +24,7 @@ Every flag below is consumed by both `mnist_routed_bucket` (single-table Axis 5)
 | Flag | Default | Role | Parsed at |
 |---|---|---|---|
 | `--data <path>` | `./data/mnist` | MNIST IDX directory | `glyph_config_parse_argv` |
-| `--n_proj <int>` | 16 | Signature dimension in trits per table. At N_PROJ=16 the signature is 4 bytes (packed 2-bit trits), which is currently the only supported width for the bucket index. | `glyph_sig_builder_init` |
+| `--n_proj <int>` | 16 | Signature dimension in trits per table. Range 1..64. At N_PROJ=16 the signature is 4 bytes (packed 2-bit trits), which is currently the only supported width for the bucket index. | `glyph_sig_builder_init` |
 | `--density <float>` | 0.33 | τ calibration density (percentile of \|projection\|). Balanced base-3 is 0.33. **Dataset-dependent optimum:** MNIST peaks at 0.33 (97.35% mean over 3 seeds); Fashion-MNIST peaks at 0.25 (85.43% mean over 3 seeds). See Phase B.2 journal for the multi-seed sweep. | `glyph_sig_builder_init` |
 | `--max_radius <int>` | 2 | Ternary multi-probe budget per table. 0 = exact-match only. 1 = exact + cost-1 neighbors (~27 probes at density 0.33). 2 = exact + cost-1 + cost-2 (~340 probes at density 0.33). | `glyph_multiprobe_enumerate` |
 | `--min_cands <int>` | 50 | Per-table candidate early-stop threshold. Once a table's neighborhood yields this many hits, multi-probe stops expanding for that table. | per-tool probe loop |
@@ -33,15 +33,15 @@ Every flag below is consumed by both `mnist_routed_bucket` (single-table Axis 5)
 | `--mode <str>` | `oracle` | `oracle` runs the fast ceiling pass only (what fraction of queries have the correct class in the union); `full` adds the VOTE / SUM / PTM resolvers at every M checkpoint. | per-tool main |
 | `--verbose` | off | Print extra diagnostic info (distinct bucket counts, per-phase wall times). | per-tool main |
 
-### Multi-table-only flags
+### Extended flags
 
-Consumed by `mnist_routed_bucket_multi`; silently ignored by `mnist_routed_bucket`:
+Consumed by `direct_lsh` and `mnist_routed_bucket_multi`. `--no_deskew` and `--normalize` are also consumed by `mnist_routed_bucket`:
 
 | Flag | Default | Role |
 |---|---|---|
-| `--m_max <int>` | 64 | Number of independent bucket tables to build at startup. Table 0 uses `--base_seed`; tables m ≥ 1 use a fixed derivation from m. |
+| `--m_max <int>` | 64 | Number of independent bucket tables to build at startup. Range 1..256. Table 0 uses `--base_seed`; tables m ≥ 1 use a fixed derivation from m. |
 | `--single_m <int>` | 0 | If > 0, restrict the M sweep to a single value. The default 0 runs the full sweep over `M ∈ {1, 2, 4, 8, 16, 32, 64}` (clamped to `--m_max`). |
-| `--resolver_sum <str>` | `scalar` | SUM resolver implementation. `scalar` = general-purpose reference; `neon4` = NEON-batched bit-exact variant for sig_bytes=4; `voteweighted` = Phase A research variant (falsified); `radiusaware` = Phase B.1 research variant (falsified). |
+| `--resolver_sum <str>` | `scalar` | SUM resolver implementation. `scalar` = general-purpose reference; `neon4` = NEON-batched bit-exact variant for sig_bytes=4; `knn` = routed k-NN (production for direct quantization); `voteweighted` = Phase A research variant (falsified); `radiusaware` = Phase B.1 research variant (falsified). |
 | `--radius_lambda <int>` | 8 | Radius penalty for `--resolver_sum radiusaware`. Higher = stronger preference for r=0 candidates. |
 | `--density_schedule <str>` | `fixed` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. Phase B.2 showed mixing is strictly dominated by the single best density. |
 | `--density_triple <a,b,c>` | `0.25,0.33,0.40` | Three densities for `--density_schedule mixed`. Table m uses `density_triple[m % 3]`. |
@@ -82,7 +82,7 @@ Produces (on deskewed MNIST, 10K test queries, single seed):
 ./build/direct_lsh --data <mnist_dir> --density 0.10 --m_max 64
 ```
 
-Note: `direct_lsh` uses direct ternary quantization (no random projections). Each trit represents a specific pixel or gradient. The `--gradients` flag appends horizontal and vertical gradient channels. Per-image normalization is applied automatically.
+Note: `direct_lsh` uses direct ternary quantization (no random projections). Each trit represents a specific pixel or gradient. The `--gradients` flag appends horizontal and vertical gradient channels. Use `--normalize` for CIFAR-10 and Fashion-MNIST.
 
 ### Axis 5 headline configuration (single-table bucket consumer)
 
@@ -99,6 +99,7 @@ Produces a 3×4 sweep (MAX_RADIUS ∈ {0,1,2} × MIN_CANDS ∈ {1,20,100,400}); 
 | VOTE | — | argmax class by summed vote weight over the union | Production (weakest; saturates ~89.77% at M=64) | `glyph_resolver_vote` |
 | **SUM** | `scalar` | argmin candidate by `Σ_m popcount_dist` across all M tables | **Production (best at every M ≥ 2)** | `glyph_resolver_sum` |
 | SUM-NEON4 | `neon4` | NEON-batched SUM; 4 candidates per vector. Bit-exact. | Production (speed; 1.2-1.3× faster than scalar) | `glyph_resolver_sum_neon4` |
+| KNN | `knn` | Top-K candidates by summed Hamming, rank-weighted majority vote | Production (direct quantization path) | `glyph_resolver_sum_knn` |
 | PTM | — | Per-table 1-NN, majority-vote the M labels | Production (middle performer) | `glyph_resolver_per_table_majority` |
 | Vote-weighted SUM | `voteweighted` | `sum_dist / (1 + votes[c])` | **Falsified** (Phase A; neutral/harmful on both datasets) | `glyph_resolver_sum_voteweighted` |
 | Radius-aware SUM | `radiusaware` | `sum_dist + λ × min_radius[c]` | **Falsified** (Phase B.1; monotone degradation with λ) | `glyph_resolver_sum_radiusaware` |

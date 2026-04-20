@@ -84,7 +84,7 @@ Severity: **H** (high — blocks real spec progress), **M** (medium — correctn
 **Remediation.**
 - [x] Block-native primitives enforce same-block by construction (signature takes exactly one block).
 - [x] Vec primitives document their single-tensor contract in the header.
-- [x] *Deferred:* block-aware tensor type. Not implemented until a consumer drives it. Note in substrate §14.
+- [ ] *Deferred:* block-aware tensor type. Not implemented until a consumer drives it. Note in substrate §14.
 
 ---
 
@@ -93,7 +93,7 @@ Severity: **H** (high — blocks real spec progress), **M** (medium — correctn
 **Remediation.**
 - [x] Fix unused-variable warning in `tools/mnist_trit_lattice.c:155`.
 - [x] Add note to `feedback_working_style.md`: commit claims distinguish "builds" / "tests pass" / "measured faster."
-- [x] *Deferred:* NEON benchmark in `m4t/tools/`. Add when a consumer's performance matters.
+- [ ] *Deferred:* NEON benchmark in `m4t/tools/`. Add when a consumer's performance matters.
 
 **Complete when.** LSH tool compiles with zero warnings; future commits observe the builds/tests/measured distinction.
 
@@ -104,7 +104,7 @@ Severity: **H** (high — blocks real spec progress), **M** (medium — correctn
 **Remediation.**
 - [x] Document in-range input precondition in the header.
 - [x] `_Static_assert((int64_t)M4T_MTFP_MAX_VAL * 2 < INT32_MAX, ...)`.
-- [x] *Deferred:* debug-mode bounds-check. Not in this pass.
+- [ ] *Deferred:* debug-mode bounds-check. Not in this pass.
 
 **Complete when.** Precondition named; compile-time assert catches config drift.
 

@@ -1,6 +1,6 @@
 ---
 title: Findings — Glyph / M4T Rebuild
-status: As of 2026-04-15 (multi-table routed bucket at M=32 reaches 97.24% on deskewed MNIST at N_PROJ=16 — first routed architecture in Glyph to exceed 97%; matches pure N_PROJ=512 scaling curve at equivalent total bits)
+status: As of 2026-04-20 (direct ternary quantization production consumer — MNIST 97.18%, Fashion-MNIST 87.95%, CIFAR-10 46.63% via GSH selective scoring; routed bucket at M=32 reaches 97.24% on MNIST)
 companion-docs: NORTH_STAR.md · docs/THESIS.md · CHANGELOG.md · m4t/docs/M4T_SUBSTRATE.md
 ---
 
@@ -950,29 +950,29 @@ MNIST density ranking: 0.33 > 0.25 ≈ 0.20 > 0.40 > 0.50. MNIST prefers 0.33 (9
 
 **Dates:** 2026-04-16 through 2026-04-20
 
-1. **First light: 35.32% with random projections (N_PROJ=16 M=64).** Applying the MNIST pipeline directly to CIFAR-10 (flatten RGB, random ternary projections, multi-table LSH) produced 35.32% — well above the 10% floor but far below MNIST territory. The signal is real but thin. Journal: `journal/cifar10_first_light.md`
+1. **First light: 35.32% with random projections (N_PROJ=16 M=64).** Applying the MNIST pipeline directly to CIFAR-10 (flatten RGB, random ternary projections, multi-table LSH) produced 35.32% — well above the 10% floor but far below MNIST territory. The signal is real but thin.
 
-2. **Cross-seed overlap: 94% seed-invariant, 32.5% always right.** Sweeping random seeds showed 94% of queries land in the same correctness bucket regardless of projection matrix. 32.5% of images are structurally easy (always correct) and roughly 6% are structurally hard (always wrong). The randomness is not the bottleneck. Journal: `journal/cifar10_seed_overlap.md`
+2. **Cross-seed overlap: 94% seed-invariant, 32.5% always right.** Sweeping random seeds showed 94% of queries land in the same correctness bucket regardless of projection matrix. 32.5% of images are structurally easy (always correct) and roughly 6% are structurally hard (always wrong). The randomness is not the bottleneck. Tool: `tools/cifar_seed_overlap.c`.
 
-3. **Brute-force N_PROJ ceiling: peaks at N_PROJ=64 (38.14%), wider hurts.** Sweeping projection width from 16 to 256 showed diminishing returns past 64 projections. Wider signatures dilute signal with noise dimensions — the curse of random projections on structured images. Journal: `journal/cifar10_nproj_sweep.md`
+3. **Brute-force N_PROJ ceiling: peaks at N_PROJ=64 (38.14%), wider hurts.** Sweeping projection width from 16 to 256 showed diminishing returns past 64 projections. Wider signatures dilute signal with noise dimensions — the curse of random projections on structured images. Journal: `journal/cifar10_nproj_ceiling.md`.
 
-4. **Per-image normalization breakthrough: 37% to 42.86%.** Restoring per-image normalization (as required by MTFP section 18 emission coverage) lifted accuracy nearly 6pp. The structural zero in unnormalized images was caused by contrast deficiency stealing trit budget — high-contrast pixels dominated while low-contrast regions collapsed to zero. Journal: `journal/cifar10_normalization.md`
+4. **Per-image normalization breakthrough: 37% to 42.86%.** Restoring per-image normalization (as required by MTFP section 18 emission coverage) lifted accuracy nearly 6pp. The structural zero in unnormalized images was caused by contrast deficiency stealing trit budget — high-contrast pixels dominated while low-contrast regions collapsed to zero. Journal: `journal/normalization_first_light.md`, LMM cycle: `journal/normalization_findings_*.md`.
 
-5. **Direct ternary quantization: 50.2% brute-force with gradients.** Replacing random projections with direct trit assignment — each trit encodes a specific pixel intensity or spatial gradient — reached 50.2% brute-force. Random projections are now deprecated for image domains; the pixel itself is the natural trit source. Journal: `journal/cifar10_direct_ternary.md`
+5. **Direct ternary quantization: 50.2% brute-force with gradients.** Replacing random projections with direct trit assignment — each trit encodes a specific pixel intensity or spatial gradient — reached 50.2% brute-force. Random projections are now deprecated for image domains; the pixel itself is the natural trit source. Journal: `journal/direct_lsh_production.md`.
 
-6. **Hierarchical Trit Lattice LSH: 44.68%.** Spatial pooling builds bucket keys from majority-voted blocks (e.g., 2x2 regions vote a single trit). The direct_lsh variant reached 44.68% — better than random projections but below brute-force, confirming that spatial hierarchy helps routing but does not replace scoring. Journal: `journal/cifar10_htl_lsh.md`
+6. **Hierarchical Trit Lattice LSH: 44.68%.** Spatial pooling builds bucket keys from majority-voted blocks (e.g., 2x2 regions vote a single trit). The direct_lsh variant reached 44.68% — better than random projections but below brute-force, confirming that spatial hierarchy helps routing but does not replace scoring. Tool: `tools/direct_lsh.c`.
 
-7. **GSH (Global Signature Hash): P(correct|agree)=56.36% on 50% agreeing subset.** Per-table routing patterns are hashed via multi-trit vote encoding to produce a global agreement signal. When multiple tables agree on the top candidate, accuracy on that subset jumps to 56.36% — a reliable confidence filter. Journal: `journal/cifar10_gsh.md`
+7. **GSH (Global Signature Hash): P(correct|agree)=56.36% on 50% agreeing subset.** Per-table routing patterns are hashed via multi-trit vote encoding to produce a global agreement signal. When multiple tables agree on the top candidate, accuracy on that subset jumps to 56.36% — a reliable confidence filter. Tool: `tools/structured_gsh.c`.
 
-8. **IG-weighted scoring (from SSTT): +2.34pp brute-force; inverted index failed (32.69%).** Pair-wise information-gain re-ranking adds 2.34pp to brute-force scoring. However, the inverted-index variant collapsed to 32.69% — IG weights need full-signature context, not isolated trit lookups. Journal: `journal/cifar10_ig_scoring.md`
+8. **IG-weighted scoring (from SSTT): +2.34pp brute-force; inverted index failed (32.69%).** Pair-wise information-gain re-ranking adds 2.34pp to brute-force scoring. However, the inverted-index variant collapsed to 32.69% — IG weights need full-signature context, not isolated trit lookups. Tools: `tools/ig_scored.c`, `tools/inverted_ig.c`.
 
-9. **Selective scoring: LSH + GSH agreement + pair-IG = 46.63%.** The combined pipeline uses Hamming distance when GSH tables agree (fast path) and pair-IG re-ranking when they disagree (accurate path). This selective strategy outperforms either method alone. Journal: `journal/cifar10_selective.md`
+9. **Selective scoring: LSH + GSH agreement + pair-IG = 46.63%.** The combined pipeline uses Hamming distance when GSH tables agree (fast path) and pair-IG re-ranking when they disagree (accurate path). This selective strategy outperforms either method alone. Tool: `tools/direct_lsh.c` (production consumer). LMM cycle: `journal/sstt_informs_v2_*.md`.
 
-10. **Comparison to SSTT: Glyph wins Fashion-MNIST (87.95% vs 86.54%), ties MNIST, CIFAR-10 gap is 6.4pp.** The gap on CIFAR-10 traces to per-trit Hamming distance vs. SSTT's pattern-level scoring. Hamming treats each trit independently; SSTT scores 27-value blocks that capture local structure. Journal: `journal/cifar10_sstt_comparison.md`
+10. **Comparison to SSTT: Glyph wins Fashion-MNIST (87.95% vs 86.54%), ties MNIST, CIFAR-10 gap is 6.4pp.** The gap on CIFAR-10 traces to per-trit Hamming distance vs. SSTT's pattern-level scoring. Hamming treats each trit independently; SSTT scores 27-value blocks that capture local structure. LMM cycles: `journal/sstt_informs_glyph_*.md`, `journal/sstt_informs_v2_*.md`.
 
-11. **FFN bridge: random weights failed (14.62%); structured class-vote GSH: 58.70% P(correct|agree).** A feed-forward bridge with random weights collapsed to near-chance. Replacing it with a structured class-vote profile — GSH agreement computed over per-class routing patterns — raised conditional accuracy to 58.70% on the agreeing subset. Journal: `journal/cifar10_ffn_bridge.md`
+11. **FFN bridge: random weights failed (14.62%); structured class-vote GSH: 58.70% P(correct|agree).** A feed-forward bridge with random weights collapsed to near-chance. Replacing it with a structured class-vote profile — GSH agreement computed over per-class routing patterns — raised conditional accuracy to 58.70% on the agreeing subset. LMM cycle: `journal/ffn_bridge_*.md`.
 
-12. **What the gap is: per-trit Hamming distance ceiling.** The remaining 6.4pp vs. SSTT is not a routing failure or a quantization failure — it is a distance-metric failure. Per-trit Hamming ignores correlations between adjacent trits. SSTT's 27-value block matching (3^3 patterns) captures exactly these correlations. The path forward requires pattern-level distance without abandoning ternary storage. Journal: `journal/cifar10_gap_analysis.md`
+12. **What the gap is: per-trit Hamming distance ceiling.** The remaining 6.4pp vs. SSTT is not a routing failure or a quantization failure — it is a distance-metric failure. Per-trit Hamming ignores correlations between adjacent trits. SSTT's 27-value block matching (3^3 patterns) captures exactly these correlations. The path forward requires pattern-level distance without abandoning ternary storage. LMM cycle: `journal/negotiation_loop_*.md`.
 
 ## What we got right, what we got wrong
 
