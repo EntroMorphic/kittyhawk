@@ -77,6 +77,12 @@ void glyph_dataset_normalize(glyph_dataset_t* ds);
  * second call is a no-op. */
 void glyph_dataset_deskew(glyph_dataset_t* ds);
 
+/* Compute horizontal and vertical spatial gradients from an MTFP image.
+ * hgrad has n_ch * H * (W-1) elements; vgrad has n_ch * (H-1) * W.
+ * Both must be pre-allocated by the caller. */
+void glyph_dataset_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
+                             m4t_mtfp_t* hgrad, m4t_mtfp_t* vgrad);
+
 /* Free all heap allocations. Safe to call multiple times. */
 void glyph_dataset_free(glyph_dataset_t* ds);
 

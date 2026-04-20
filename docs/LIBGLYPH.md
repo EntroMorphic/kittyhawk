@@ -25,13 +25,14 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
                         │
                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│  libglyph  (7 modules, ~900 lines of C)                 │
+│  libglyph  (8 modules, ~1000 lines of C)                │
 │  ─────────────────────────────────────────────────      │
 │  glyph_dataset     dataset loader + deskew + normalize   │
 │  glyph_rng         xoshiro128+ RNG                      │
 │  glyph_sig         random ternary proj + tau calib      │
 │  glyph_bucket      sorted bucket index + lower_bound    │
 │  glyph_multiprobe  ternary Hamming neighbor enum        │
+│  glyph_probe       shared multi-probe candidate collect  │
 │  glyph_resolver    7 candidate-set scoring variants      │
 │  glyph_config      hyperparameter struct + CLI parser   │
 │                                                         │

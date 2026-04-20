@@ -32,12 +32,13 @@ m4t/                  — the substrate (libm4t.a). Routing-first ternary kernel
   tools/                dev-only tools (trit_golden, lut_gen) — opt-in M4T_BUILD_TOOLS=ON
   docs/                 substrate specification
 src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infrastructure.
-  glyph_dataset.{h,c}   MNIST IDX loader + integer-moment deskew + per-image normalization
+  glyph_dataset.{h,c}   dataset loader + deskew + normalization + gradients
   glyph_rng.{h,c}       xoshiro128+ RNG
-  glyph_sig.{h,c}       random ternary projection + density-calibrated τ + signature encoder
+  glyph_sig.{h,c}       direct quantization + random ternary projection + τ calibration
   glyph_bucket.{h,c}    sorted bucket index keyed on packed-trit signatures
   glyph_multiprobe.{h,c} ternary Hamming neighbor enumeration (radius 0, 1, 2)
-  glyph_resolver.{h,c}  6 resolver variants: VOTE, SUM, SUM-NEON4, PTM, voteweighted, radiusaware
+  glyph_probe.{h,c}     shared multi-probe candidate collection (probe/reset/table)
+  glyph_resolver.{h,c}  7 resolver variants: VOTE, SUM, SUM-NEON4, PTM, KNN, voteweighted, radiusaware
   glyph_config.{h,c}    hyperparameter struct + CLI long-option parser
   glyph_*.h             thin wrapper headers that alias m4t_* into glyph_* namespace
 tools/                — CLI consumer tools built on libglyph.

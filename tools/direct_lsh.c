@@ -121,20 +121,7 @@ static void union_top_m_labels(
  * non-zero. This is the correct design for Hamming-distance scoring.
  * SSTT's quantize-first approach works with IG-weighted inverted
  * index scoring but not with uniform Hamming. */
-static void compute_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
-                              m4t_mtfp_t* hgrad, m4t_mtfp_t* vgrad) {
-    int ppc = W * H;
-    int idx_h = 0, idx_v = 0;
-    for (int ch = 0; ch < n_ch; ch++) {
-        const m4t_mtfp_t* c = img + ch * ppc;
-        for (int y = 0; y < H; y++)
-            for (int x = 0; x < W - 1; x++)
-                hgrad[idx_h++] = c[y * W + x + 1] - c[y * W + x];
-        for (int y = 0; y < H - 1; y++)
-            for (int x = 0; x < W; x++)
-                vgrad[idx_v++] = c[(y + 1) * W + x] - c[y * W + x];
-    }
-}
+/* Gradient computation provided by glyph_dataset_gradients() */
 
 int main(int argc, char** argv) {
     /* Strip --gradients before glyph_config sees it. */
@@ -206,7 +193,7 @@ int main(int argc, char** argv) {
             const m4t_mtfp_t* img = ds.x_train + (size_t)i * ds.input_dim;
             m4t_mtfp_t* out = train_feat + (size_t)i * total_dim;
             memcpy(out, img, (size_t)intensity_dim * sizeof(m4t_mtfp_t));
-            compute_gradients(img, img_w, img_h, n_ch, hg, vg);
+            glyph_dataset_gradients(img, img_w, img_h, n_ch, hg, vg);
             memcpy(out + intensity_dim, hg, (size_t)hgrad_dim * sizeof(m4t_mtfp_t));
             memcpy(out + intensity_dim + hgrad_dim, vg, (size_t)vgrad_dim * sizeof(m4t_mtfp_t));
         }
@@ -214,7 +201,7 @@ int main(int argc, char** argv) {
             const m4t_mtfp_t* img = ds.x_test + (size_t)i * ds.input_dim;
             m4t_mtfp_t* out = test_feat + (size_t)i * total_dim;
             memcpy(out, img, (size_t)intensity_dim * sizeof(m4t_mtfp_t));
-            compute_gradients(img, img_w, img_h, n_ch, hg, vg);
+            glyph_dataset_gradients(img, img_w, img_h, n_ch, hg, vg);
             memcpy(out + intensity_dim, hg, (size_t)hgrad_dim * sizeof(m4t_mtfp_t));
             memcpy(out + intensity_dim + hgrad_dim, vg, (size_t)vgrad_dim * sizeof(m4t_mtfp_t));
         }

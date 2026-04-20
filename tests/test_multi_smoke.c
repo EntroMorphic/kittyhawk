@@ -63,7 +63,17 @@ static int run_tool(const char* tool, const char* data_dir,
     snprintf(cmd, sizeof(cmd),
              "\"%s\" --data \"%s\" --mode full --m_max 3 --single_m 3 %s > \"%s\" 2>&1",
              tool, data_dir, extra_flags, output_path);
-    return system(cmd);
+    int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "tool output:\n");
+        FILE* f = fopen(output_path, "r");
+        if (f) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), f)) fputs(buf, stderr);
+            fclose(f);
+        }
+    }
+    return rc;
 }
 
 int main(int argc, char** argv) {

@@ -110,7 +110,13 @@ int main(int argc, char** argv) {
     fclose(out);
 
     if (!saw_routed) {
-        fprintf(stderr, "expected routed output marker not found\n");
+        fprintf(stderr, "expected routed output marker not found in output:\n");
+        FILE* dump = fopen(output_path, "r");
+        if (dump) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), dump)) fputs(buf, stderr);
+            fclose(dump);
+        }
         return 1;
     }
     return 0;

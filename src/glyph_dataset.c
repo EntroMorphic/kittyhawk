@@ -1,5 +1,5 @@
 /*
- * glyph_dataset.c — MNIST IDX loader + integer-moment deskew.
+ * glyph_dataset.c — dataset loader, deskew, normalize, gradients.
  *
  * Extracted from repeated use across tools/mnist_*.c. Same arithmetic,
  * same deskew formula, just centralized into libglyph.
@@ -410,4 +410,19 @@ void glyph_dataset_free(glyph_dataset_t* ds) {
     free(ds->x_test);
     free(ds->y_test);
     memset(ds, 0, sizeof(*ds));
+}
+
+void glyph_dataset_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
+                             m4t_mtfp_t* hgrad, m4t_mtfp_t* vgrad) {
+    int ppc = W * H;
+    int idx_h = 0, idx_v = 0;
+    for (int ch = 0; ch < n_ch; ch++) {
+        const m4t_mtfp_t* c = img + ch * ppc;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W - 1; x++)
+                hgrad[idx_h++] = c[y * W + x + 1] - c[y * W + x];
+        for (int y = 0; y < H - 1; y++)
+            for (int x = 0; x < W; x++)
+                vgrad[idx_v++] = c[(y + 1) * W + x] - c[y * W + x];
+    }
 }
