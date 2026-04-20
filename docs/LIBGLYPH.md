@@ -32,7 +32,7 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
 │  glyph_sig         random ternary proj + tau calib      │
 │  glyph_bucket      sorted bucket index + lower_bound    │
 │  glyph_multiprobe  ternary Hamming neighbor enum        │
-│  glyph_resolver    VOTE / SUM / PTM candidate scorers   │
+│  glyph_resolver    7 candidate-set scoring variants      │
 │  glyph_config      hyperparameter struct + CLI parser   │
 │                                                         │
 │  glyph_*.h         thin wrapper headers aliasing m4t_*  │
