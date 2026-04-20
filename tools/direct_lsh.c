@@ -22,6 +22,7 @@
 #include "m4t_trit_pack.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -305,6 +306,59 @@ int main(int argc, char** argv) {
     }
     free(train_feat); free(test_feat);
 
+    /* ============================================================
+     * Per-trit IG weights + per-class-pair IG weights.
+     * Used for pair-IG re-ranking on the LSH union.
+     * ============================================================ */
+    printf("Computing IG weights...\n");
+    uint16_t* ig_hot = calloc((size_t)total_dim * 3 * N_CLASSES, sizeof(uint16_t));
+    #define IG_HOT(d, v, c) ig_hot[(size_t)(d)*3*N_CLASSES + (size_t)(v)*N_CLASSES + (c)]
+    for (int i = 0; i < ds.n_train; i++) {
+        int lbl = ds.y_train[i];
+        const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
+        for (int d = 0; d < total_dim; d++) {
+            int8_t t = glyph_read_trit(sig, d);
+            int v = (t < 0) ? 0 : (t == 0) ? 1 : 2;
+            IG_HOT(d, v, lbl)++;
+        }
+    }
+    int ig_cc[N_CLASSES] = {0};
+    for (int i = 0; i < ds.n_train; i++) ig_cc[ds.y_train[i]]++;
+
+    /* Per-class-pair IG: for each (a,b), weight per position. */
+    double* ig_tmp = malloc((size_t)total_dim * sizeof(double));
+    uint8_t** pair_ig = malloc((size_t)N_CLASSES * N_CLASSES * sizeof(uint8_t*));
+    for (int a = 0; a < N_CLASSES; a++) {
+        for (int b = a + 1; b < N_CLASSES; b++) {
+            uint8_t* pw = malloc((size_t)total_dim);
+            int n_ab = ig_cc[a] + ig_cc[b];
+            double h_ab = 0;
+            { double pa=(double)ig_cc[a]/n_ab, pb=(double)ig_cc[b]/n_ab;
+              if(pa>0) h_ab -= pa*log2(pa); if(pb>0) h_ab -= pb*log2(pb); }
+            double pmx = 0;
+            for (int d = 0; d < total_dim; d++) {
+                double hc = 0;
+                for (int v = 0; v < 3; v++) {
+                    int va=IG_HOT(d,v,a), vb=IG_HOT(d,v,b), vt=va+vb;
+                    if (!vt) continue;
+                    double pv=(double)vt/n_ab, ha=(double)va/vt, hb=(double)vb/vt, hv=0;
+                    if(ha>0) hv -= ha*log2(ha); if(hb>0) hv -= hb*log2(hb);
+                    hc += pv*hv;
+                }
+                ig_tmp[d] = h_ab - hc;
+                if (ig_tmp[d] < 0) ig_tmp[d] = 0;
+                if (ig_tmp[d] > pmx) pmx = ig_tmp[d];
+            }
+            for (int d = 0; d < total_dim; d++)
+                pw[d] = pmx > 0 ? (uint8_t)(ig_tmp[d]/pmx*15.0+1.0) : 1;
+            pair_ig[a*N_CLASSES+b] = pw;
+            pair_ig[b*N_CLASSES+a] = pw;
+        }
+        pair_ig[a*N_CLASSES+a] = NULL;
+    }
+    free(ig_tmp); free(ig_hot);
+    printf("  Pair-IG weights computed for %d pairs.\n", N_CLASSES*(N_CLASSES-1)/2);
+
     /* Hierarchical Trit Lattice LSH: spatial pooling builds the bucket
      * key by reducing blocks of trits via majority vote.
      *
@@ -545,6 +599,7 @@ int main(int argc, char** argv) {
     int lsh_total_correct = 0, gsh_total_correct = 0;
     int agree_count = 0, agree_correct = 0;
     int disagree_count = 0, disagree_lsh_correct = 0, disagree_gsh_correct = 0;
+    int pair_ig_correct = 0, selective_correct = 0;
 
     printf("Classifying %d queries...\n", ds.n_test);
     clock_t t_sweep = clock();
@@ -633,6 +688,63 @@ int main(int argc, char** argv) {
         }
         if (gsh_pred == y) gsh_total_correct++;
 
+        /* Pair-IG re-rank on LSH union.
+         * Identify top-2 classes from Hamming k-NN, re-rank union
+         * with pair-specific IG weights. */
+        int pig_pred = lsh_pred;
+        {
+            int cv2[N_CLASSES] = {0};
+            for (int j = 0; j < st.n_hit && j < 5; j++)
+                cv2[ds.y_train[st.hit_list[j]]]++;
+            /* Actually use the Hamming topk labels. */
+            /* Re-derive top-2 from the k-NN prediction. */
+            int c1 = lsh_pred, c2 = -1;
+            if (gsh_pred >= 0 && gsh_pred != c1) c2 = gsh_pred;
+            else {
+                /* Find runner-up from vote labels. */
+                int vl_cv[N_CLASSES] = {0};
+                for (int m = 0; m < M && m < 64; m++)
+                    if (vote_labels[m] >= 0 && vote_labels[m] < N_CLASSES)
+                        vl_cv[vote_labels[m]]++;
+                for (int c = 0; c < N_CLASSES; c++)
+                    if (c != c1 && (c2 < 0 || vl_cv[c] > vl_cv[c2])) c2 = c;
+            }
+            if (c2 < 0) c2 = (c1 + 1) % N_CLASSES;
+            const uint8_t* pw = pair_ig[c1 * N_CLASSES + c2];
+            if (pw && st.n_hit > 0) {
+                typedef struct { int32_t s; int l; } ptk_t;
+                ptk_t ptopk[64]; int pntk = 0;
+                for (int j = 0; j < st.n_hit; j++) {
+                    int idx = st.hit_list[j];
+                    int32_t dig = 0;
+                    for (int d = 0; d < total_dim; d++) {
+                        int8_t a = glyph_read_trit(qs_ptr, d);
+                        int8_t b = glyph_read_trit(train_sigs + (size_t)idx * sig_bytes, d);
+                        if (a != b) dig += pw[d];
+                    }
+                    int lbl = ds.y_train[idx];
+                    if (pntk < KNN_K) {
+                        int pos = pntk;
+                        while (pos > 0 && ptopk[pos-1].s > dig) { ptopk[pos]=ptopk[pos-1]; pos--; }
+                        ptopk[pos].s = dig; ptopk[pos].l = lbl; pntk++;
+                    } else if (dig < ptopk[KNN_K-1].s) {
+                        int pos = KNN_K-1;
+                        while (pos > 0 && ptopk[pos-1].s > dig) { ptopk[pos]=ptopk[pos-1]; pos--; }
+                        ptopk[pos].s = dig; ptopk[pos].l = lbl;
+                    }
+                }
+                int pcv[N_CLASSES] = {0};
+                for (int i = 0; i < pntk; i++) pcv[ptopk[i].l] += (KNN_K - i);
+                pig_pred = 0;
+                for (int c = 1; c < N_CLASSES; c++) if (pcv[c] > pcv[pig_pred]) pig_pred = c;
+            }
+        }
+        if (pig_pred == y) pair_ig_correct++;
+
+        /* Selective: Hamming when agree, pair-IG when disagree. */
+        int sel_pred = (lsh_pred == gsh_pred) ? lsh_pred : pig_pred;
+        if (sel_pred == y) selective_correct++;
+
         if (lsh_pred == gsh_pred) {
             agree_count++;
             if (lsh_pred == y) agree_correct++;
@@ -656,10 +768,13 @@ int main(int argc, char** argv) {
                100.0 * knn_c[si] / ds.n_test);
     printf("\n");
 
-    printf("=== LSH + GSH ===\n");
-    printf("  LSH k=%d-rw:              %6.2f%%\n", KNN_K, 100.0 * lsh_total_correct / ds.n_test);
+    printf("=== LSH + GSH + pair-IG ===\n");
+    printf("  LSH k=%d-rw (Hamming):    %6.2f%%\n", KNN_K, 100.0 * lsh_total_correct / ds.n_test);
+    printf("  Pair-IG re-rank:          %6.2f%%\n", 100.0 * pair_ig_correct / ds.n_test);
     printf("  GSH 1-NN:                 %6.2f%%\n", 100.0 * gsh_total_correct / ds.n_test);
-    printf("  Agreement:                %6.2f%%  (%d / %d)\n",
+    printf("  Selective (agree→Ham, disagree→pair-IG): %6.2f%%\n",
+           100.0 * selective_correct / ds.n_test);
+    printf("\n  Agreement:                %6.2f%%  (%d / %d)\n",
            100.0 * agree_count / ds.n_test, agree_count, ds.n_test);
     printf("  P(correct | agree):       %6.2f%%  (%d / %d)\n",
            agree_count ? 100.0 * agree_correct / agree_count : 0.0,
