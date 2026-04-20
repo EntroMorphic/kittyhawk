@@ -300,6 +300,7 @@ m4t/
     test_m4t_trit_reducers.c
     test_m4t_route.c
     test_m4t_mtfp4.c
+    test_m4t_ternary_matmul.c
   tools/
     m4t_trit_golden.c        — enumerated golden-value tests
     m4t_size_check.sh        — .text budget enforcement
@@ -313,7 +314,8 @@ src/                         — glyph wrapper headers (aliases over m4t)
   glyph_route.h
   glyph_ternary_matmul.h
 
-tests/                       — glyph wrapper tests (TO REBUILD)
+tests/                       — glyph wrapper tests
+  test_glyph_wrapper.c
 tools/
   mnist_trit_lattice.c       — LSH routing tool (primary benchmark)
 

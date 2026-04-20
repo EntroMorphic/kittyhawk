@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 m4t/build/
 *.o
 *.a
@@ -17,3 +18,9 @@ m4t/build/
 
 # Tools output (binaries)
 /tmp/m4t_*
+
+# Claude Code
+.claude/
+
+# Datasets (downloaded locally)
+data/
