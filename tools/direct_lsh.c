@@ -568,6 +568,12 @@ int main(int argc, char** argv) {
     int* final_pred = malloc((size_t)ds.n_test * sizeof(int));
     memset(final_pred, 0xFF, (size_t)ds.n_test * sizeof(int));
 
+    /* Routing footprint experiment counters (Experiment 1). */
+    int rf_resolver_miss = 0;
+    int rf_route_discriminates = 0;
+    int rf_route_tied = 0;
+    long rf_droute_correct_sum = 0, rf_droute_wrong_sum = 0;
+
     /* GSH query-time state. */
     glyph_probe_state_t gst = {0};
     gst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
@@ -619,7 +625,55 @@ int main(int argc, char** argv) {
             if (best_l == y) sum_c[si]++;
             int kpred = topk_vote(topk, ntk, KNN_K);
             if (kpred == y) knn_c[si]++;
-            if (m_sweep[si] == M) final_pred[qi] = kpred;
+            if (m_sweep[si] == M) {
+                final_pred[qi] = kpred;
+
+                /* Experiment 1: routing footprint independence.
+                 * For resolver-miss cases where correct class IS in
+                 * union, compare d_route to best-correct vs best-wrong. */
+                if (kpred != y) {
+                    int has_correct = 0;
+                    int best_correct_idx = -1, best_wrong_idx = -1;
+                    int32_t best_correct_ham = INT32_MAX;
+                    int32_t best_wrong_ham = INT32_MAX;
+                    for (int j = 0; j < st.n_hit; j++) {
+                        int idx = st.hit_list[j];
+                        int32_t d = m4t_popcount_dist(
+                            qs_ptr, train_sigs + (size_t)idx * sig_bytes,
+                            full_mask, sig_bytes);
+                        if (ds.y_train[idx] == y) {
+                            has_correct = 1;
+                            if (d < best_correct_ham) {
+                                best_correct_ham = d;
+                                best_correct_idx = idx;
+                            }
+                        } else if (d < best_wrong_ham) {
+                            best_wrong_ham = d;
+                            best_wrong_idx = idx;
+                        }
+                    }
+                    if (has_correct && best_correct_idx >= 0 && best_wrong_idx >= 0) {
+                        int d_route_correct = 0, d_route_wrong = 0;
+                        for (int m = 0; m < M; m++) {
+                            uint32_t qk = glyph_sig_to_key_u32(
+                                table_test_keys[m] + (size_t)qi * 4);
+                            uint32_t ck = glyph_sig_to_key_u32(
+                                table_train_keys[m] + (size_t)best_correct_idx * 4);
+                            uint32_t wk = glyph_sig_to_key_u32(
+                                table_train_keys[m] + (size_t)best_wrong_idx * 4);
+                            if (qk != ck) d_route_correct++;
+                            if (qk != wk) d_route_wrong++;
+                        }
+                        rf_resolver_miss++;
+                        rf_droute_correct_sum += d_route_correct;
+                        rf_droute_wrong_sum += d_route_wrong;
+                        if (d_route_correct < d_route_wrong)
+                            rf_route_discriminates++;
+                        else if (d_route_correct == d_route_wrong)
+                            rf_route_tied++;
+                    }
+                }
+            }
             /* Majority vote (for comparison with brute-force baseline). */
             int mv[N_CLASSES] = {0};
             for (int i = 0; i < ntk; i++) mv[topk[i].label]++;
@@ -787,6 +841,28 @@ int main(int argc, char** argv) {
         if (pc_t[c] > 0)
             printf("   %2d    %5d   %5d     %6.2f%%\n",
                    c, pc_t[c], pc_c[c], 100.0 * pc_c[c] / pc_t[c]);
+
+    /* Routing footprint experiment results. */
+    printf("\n=== Routing Footprint Experiment 1: Independence ===\n");
+    printf("  Resolver-miss cases (wrong k-NN, correct in union): %d\n", rf_resolver_miss);
+    if (rf_resolver_miss > 0) {
+        int rf_wrong_wins = rf_resolver_miss - rf_route_discriminates - rf_route_tied;
+        printf("  Route discriminates (d_route_correct < d_route_wrong): %d (%.1f%%)\n",
+               rf_route_discriminates, 100.0 * rf_route_discriminates / rf_resolver_miss);
+        printf("  Route tied: %d (%.1f%%)\n",
+               rf_route_tied, 100.0 * rf_route_tied / rf_resolver_miss);
+        printf("  Route wrong (d_route_correct >= d_route_wrong): %d (%.1f%%)\n",
+               rf_wrong_wins, 100.0 * rf_wrong_wins / rf_resolver_miss);
+        printf("  Avg d_route to correct: %.2f / %d tables\n",
+               (double)rf_droute_correct_sum / rf_resolver_miss, M);
+        printf("  Avg d_route to wrong:   %.2f / %d tables\n",
+               (double)rf_droute_wrong_sum / rf_resolver_miss, M);
+        printf("  Verdict: %s\n",
+               rf_route_discriminates > rf_resolver_miss / 2
+                   ? "ROUTING CARRIES INDEPENDENT SIGNAL"
+                   : "Routing redundant with Hamming");
+    }
+    printf("\n");
 
     /* Cleanup. */
     for (int a = 0; a < N_CLASSES; a++)
