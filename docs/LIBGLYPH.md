@@ -74,6 +74,7 @@ Every libglyph module depends only on m4t primitives and on other libglyph modul
 - `glyph_dataset_load_auto(ds, dir)` — auto-detects dataset format by probing for IDX magic numbers vs. CIFAR-10 binary. Calls the appropriate loader.
 - `glyph_dataset_deskew(ds)` — applies integer-moment shear correction to every image in train and test. Zero float; uses int64 image moments. Idempotent.
 - `glyph_dataset_normalize(ds)` — per-image zero-mean, unit-variance normalization. Restores §18 emission coverage on variable-contrast datasets (CIFAR-10). Integer arithmetic throughout (int64 sums, Newton's-method isqrt). Idempotent.
+- `glyph_dataset_gradients(img, W, H, n_ch, hgrad, vgrad)` — compute horizontal and vertical spatial gradients from an MTFP image. `hgrad` has `n_ch × H × (W-1)` elements; `vgrad` has `n_ch × (H-1) × W`. Both must be pre-allocated by the caller.
 - `glyph_dataset_free(ds)` — releases all heap state. Safe to call multiple times.
 
 **Typical use:**
@@ -215,6 +216,48 @@ glyph_multiprobe_enumerate(
     scratch, my_probe_callback, &my_ctx);
 ```
 
+### `glyph_probe` — shared multi-probe candidate collection
+
+**Public header:** `src/glyph_probe.h`
+
+The probe module provides the candidate-collection pattern used by every routed consumer: probe a bucket table at ternary Hamming radii 0..max_radius, collecting unique prototype indices into a candidate union with vote counts. Before this module existed, each tool embedded its own copy of the probe callback, state struct, and radius loop — 14 files with ~60 lines of duplication each.
+
+**Struct:** `glyph_probe_state_t` manages the candidate union across multi-probe queries.
+
+| Field | Type | Role |
+|---|---|---|
+| `votes` | `uint16_t*` | Per-prototype vote count (`[n_train]`, caller-allocated) |
+| `min_radius` | `uint8_t*` | Smallest radius at which each proto was found (`NULL` to skip tracking) |
+| `hit_list` | `int32_t*` | Prototype indices in current union (`[max_union]`, caller-allocated) |
+| `n_hit` | `int` | Number of unique protos in current union |
+| `max_union` | `int` | Capacity of `hit_list` |
+| `n_probes` | `int` | Total probe callback invocations (diagnostic) |
+| `per_table_cands` | `int` | Candidates from current table's probing (reset per table) |
+
+**Functions:**
+
+- `glyph_probe_reset(st)` — lazy-zero the union between queries. O(n_hit), not O(n_train).
+- `glyph_probe_table(bt, query_sig, n_proj, sig_bytes, max_radius, min_cands, st, scratch)` — probe a single bucket table at radii 0..max_radius. Stops expanding radius once `per_table_cands >= min_cands`. `scratch` must have at least `sig_bytes` bytes.
+
+**Typical use (multi-table consumer):**
+
+```c
+glyph_probe_state_t st = {0};
+st.votes = calloc((size_t)n_train, sizeof(uint16_t));
+st.hit_list = malloc((size_t)max_union * sizeof(int32_t));
+st.max_union = max_union;
+
+for (int q = 0; q < n_test; q++) {
+    glyph_probe_reset(&st);
+    for (int m = 0; m < M; m++)
+        glyph_probe_table(&tables[m], query_key, n_proj, sig_bytes,
+                          max_radius, min_cands, &st, scratch);
+    /* st.hit_list[0..st.n_hit) = candidate union, st.votes[] = counts */
+}
+```
+
+Set `st.min_radius = calloc(n_train, 1)` to enable per-candidate radius tracking (used by the `radiusaware` resolver).
+
 ### `glyph_resolver` — candidate-set scorers
 
 **Public header:** `src/glyph_resolver.h`
@@ -276,7 +319,7 @@ A new routed k-NN consumer follows this skeleton:
 #include "glyph_dataset.h"
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
-#include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 
 int main(int argc, char** argv) {
@@ -285,15 +328,13 @@ int main(int argc, char** argv) {
     int rc = glyph_config_parse_argv(&cfg, argc, argv);
     if (rc != 0) return (rc < 0) ? 0 : 1;
 
-    /* 2. Load dataset. */
+    /* 2. Load dataset (auto-detects MNIST IDX or CIFAR-10 binary). */
     glyph_dataset_t ds;
-    if (glyph_dataset_load_mnist(&ds, cfg.data_dir) != 0) return 1;
-    glyph_dataset_deskew(&ds);
-
-    /* 3. Normalize (required for CIFAR-10; neutral on MNIST). */
+    if (glyph_dataset_load_auto(&ds, cfg.data_dir) != 0) return 1;
+    if (!cfg.no_deskew) glyph_dataset_deskew(&ds);
     if (cfg.normalize) glyph_dataset_normalize(&ds);
 
-    /* 4. Direct ternary quantization — each trit = one input dimension.
+    /* 3. Direct ternary quantization — each trit = one input dimension.
      * Do NOT use glyph_sig_builder_init for image classification;
      * random projections destroy spatial structure and are strictly
      * inferior on every measured image dataset. */
@@ -308,37 +349,37 @@ int main(int argc, char** argv) {
     glyph_sig_quantize_batch(ds.x_test, ds.n_test,
                               ds.input_dim, tau, test_sigs);
 
-    /* 5. Build bucket index on train signatures. */
+    /* 4. Build bucket index on train signatures. */
     glyph_bucket_table_t bt = {0};
     glyph_bucket_build(&bt, train_sigs, ds.n_train, sig_bytes);
 
-    /* 6. Per-query probe state (votes + hit_list). Reused across queries. */
-    uint16_t* votes    = calloc((size_t)ds.n_train, sizeof(uint16_t));
-    int32_t*  hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    int n_hit = 0;
+    /* 5. Per-query probe state. Reused across queries. */
+    glyph_probe_state_t st = {0};
+    st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
+    st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
+    st.max_union = cfg.max_union;
     uint8_t scratch[4];
     uint8_t mask[4]; memset(mask, 0xff, 4);
 
-    /* 7. For each test query: multi-probe, score, predict. */
+    /* 6. For each test query: probe, score, predict. */
     int correct = 0;
     for (int s = 0; s < ds.n_test; s++) {
-        /* Lazy-zero the votes touched by the previous query. */
-        for (int j = 0; j < n_hit; j++) votes[hit_list[j]] = 0;
-        n_hit = 0;
-
-        /* Build candidate union via multi-probe. Your callback should
-         * read bt, look up each probe, and append unique proto_idxs to
-         * hit_list / increment votes[idx]. */
-        /* glyph_multiprobe_enumerate(...); */
+        glyph_probe_reset(&st);
+        const uint8_t* q = test_sigs + (size_t)s * sig_bytes;
+        glyph_probe_table(&bt, q, cfg.n_proj, sig_bytes,
+                          cfg.max_radius, cfg.min_cands, &st, scratch);
 
         /* Resolve. */
-        glyph_union_t u = { hit_list, n_hit, votes, ds.y_train, /*n_classes=*/10 };
-        int pred = glyph_resolver_sum(/* ... */);
+        glyph_union_t u = {
+            st.hit_list, st.n_hit, st.votes, ds.y_train, 10
+        };
+        int pred = glyph_resolver_sum(&u, 1, sig_bytes,
+                                       train_sigs, q, mask);
         if (pred == ds.y_test[s]) correct++;
     }
 
-    /* 8. Cleanup. */
-    free(votes); free(hit_list);
+    /* 7. Cleanup. */
+    free(st.votes); free(st.hit_list);
     glyph_bucket_table_free(&bt);
     free(train_sigs); free(test_sigs);
     glyph_dataset_free(&ds);
@@ -346,7 +387,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-For a complete working example see `tools/mnist_routed_bucket.c` (single-table, ~250 lines) or `tools/mnist_routed_bucket_multi.c` (multi-table, ~300 lines).
+For complete working examples see `tools/direct_lsh.c` (production consumer, direct quantization + GSH), `tools/mnist_routed_bucket.c` (single-table Axis 5), or `tools/mnist_routed_bucket_multi.c` (multi-table Axis 6).
 
 ---
 

@@ -83,6 +83,24 @@ Claims of hardware alignment (in README, substrate spec, and this doc) need to b
 
 If these don't measure out, the hardware-up story is aspirational and needs revision.
 
+**First measurements (2026-04-20, Apple M3, `m4t/tools/m4t_profile.c`):**
+
+| Primitive | Config | Throughput | Notes |
+|---|---|---|---|
+| **SDOT** (`mtfp4_sdot_matmul_bt`) | M=1, K=512, N=16 | **60.3 Gops/s** | Sustained at 55-60 Gops/s across sizes; 8192 MACs in 136 ns |
+| **SDOT** | M=16, K=256, N=32 | **54.1 Gops/s** | 131K MACs in 2.4 μs; scales linearly |
+| **TBL** (`trit_mul`) | n=1024 trits | **41.6 Gtrits/s** | Flat throughput 38-42 Gtrits/s from 64 to 4096 trits |
+| **VCNT** (`popcount_dist`) | N_PROJ=16 (4B) | **225 Mops/s, 4.4 ns** | Production hot path; scalar __builtin_popcount |
+| **VCNT** | N_PROJ=64 (16B) | **406 Mops/s, 2.5 ns** | NEON loop entry point; fastest tier |
+| **Masked-VCNT** (`trit_counts`) | n=1024 | **131 Gtrits/s** | Sustained reduction throughput |
+| **MTFP19 matmul** (`ternary_matmul_bt`) | M=1, K=512, N=16 | **5.2 Gops/s** | TBL decode + scalar MAC; ~12× slower than SDOT path |
+
+**What this means for the thesis:** The SDOT path sustains 55-60 Gops/s on M3 — confirming that the int8 ternary matmul rides SDOT at near-peak throughput. TBL-based trit ops sustain 40+ Gtrits/s, flat across vector lengths, confirming native-rate dispatch. The VCNT popcount_dist path at N_PROJ=16 (production) completes in 4.4 ns — the routing decision is essentially free relative to the data-fetch cost.
+
+The MTFP19 matmul (5.2 Gops/s) is ~12× slower than the SDOT path because it uses scalar MAC with TBL trit decode. This confirms that the SDOT-native MTFP4 path is the correct choice for matmul-heavy workloads, and the MTFP19 path is appropriate only for setup-time operations.
+
+Cache behavior and .text budget remain unmeasured (require Instruments profiling, not microbenchmark).
+
 ## 6. What the substrate does *not* promise
 
 - That the thesis is correct. M4T is a hypothesis-testing instrument, not a hypothesis.
@@ -100,7 +118,7 @@ The two docs are deliberately separate. Conflating them was part of what got the
 
 - **C1.** ~~Choose a consumer architecture (§3).~~ **Resolved (2026-04-20):** `direct_lsh` is the primary production consumer (direct ternary quantization + GSH selective scoring, all three datasets). The multi-table bucket (`mnist_routed_bucket_multi`) is retained as the Axis 6 reference. Both live on `libglyph` over `libm4t`.
 - **B1.** ~~Choose a benchmark bed beyond MNIST (§4).~~ **Partially resolved (2026-04-20):** CIFAR-10 and Fashion-MNIST ported and measured. CIFAR-10 dataset loader (`glyph_dataset_load_cifar10`) and auto-detection (`glyph_dataset_load_auto`) implemented. Active frontier: closing the CIFAR-10 distance-metric gap (46.63% vs ~53% SSTT).
-- **M1.** Discharge hardware-alignment claims with measurement (§5). Partially addressed: wall-time measurements show routed bucket M=32 running at ~1.92 ms/query vs dense N_PROJ=512 scan at ~4.0 ms/query at matched accuracy. SDOT / TBL / VCNT utilization-per-cycle measurements are still unrun.
+- **M1.** ~~Discharge hardware-alignment claims with measurement (§5).~~ **Partially resolved (2026-04-20):** `m4t/tools/m4t_profile.c` measures SDOT at 55-60 Gops/s, TBL trit ops at 40+ Gtrits/s, VCNT popcount_dist at 225-406 Mops/s on M3. All three instruction classes run at or near native throughput. Cache behavior and .text budget remain unmeasured (require Instruments).
 - **A1.** (New.) Generalize libglyph's bucket index to `uint64_t` keys so the fused-filter variant (concatenated H1+H2 signatures) can be tested in the routed architecture without reintroducing dense scans.
 
 ## 9. Traceability

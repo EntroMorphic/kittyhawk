@@ -102,4 +102,7 @@ if(M4T_BUILD_TOOLS)
     # would link its output back in when a consumer demands them.
     add_executable(m4t_lut_gen tools/m4t_lut_gen.c)
     target_link_libraries(m4t_lut_gen PRIVATE m)
+
+    add_executable(m4t_profile tools/m4t_profile.c)
+    target_link_libraries(m4t_profile PRIVATE m4t)
 endif()

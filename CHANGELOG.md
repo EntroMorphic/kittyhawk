@@ -10,6 +10,17 @@ The first entry below marks the ground-zero rebuild that restructured the substr
 
 Triggered by a full audit that identified a collapse of Multi-Trit Floating Point into a fixed-point reading with a shared global scale, and a substrate drifting toward dense computation over base-3 hardware. The rebuild restores MTFP as base-3 floating point (mantissa cells + per-block exponent) and puts routing primitives first.
 
+### Repo housekeeping + code quality refactor (2026-04-20)
+
+- **glyph_probe module:** extracted shared multi-probe candidate collection from 14 tool files into `src/glyph_probe.{h,c}`. Eliminates 621 lines of copy-paste duplication across all routed consumers. Supports optional min_radius tracking, per-table candidate counting.
+- **glyph_dataset_gradients:** spatial gradient computation moved from direct_lsh.c into libglyph (`src/glyph_dataset.{h,c}`). Reusable by future consumers.
+- **direct_lsh.c decomposition:** extracted `build_pair_ig`, `build_spatial_summary`, `print_emission_coverage` as named helpers; `topk_insert`/`topk_vote` replace 3× copy-pasted insertion sort. main() reduced from 673 to 547 lines.
+- **Code quality:** 22 findings remediated — memory leak in pair_ig cleanup, silent malloc failures, integer overflow guards in size calculations, popcount_dist pointer asserts, CMake linking (all tools now link glyph, not m4t directly), tests/CMakeLists.txt wrapped in `if(GLYPH_BUILD_TOOLS)` with proper dependencies.
+- **CI:** GitHub Actions workflow (macos-14 Apple Silicon), .gitignore expanded, smoke tests dump output on failure.
+- **Profiling microbenchmark:** `m4t/tools/m4t_profile.c` measures SDOT/TBL/VCNT throughput on M3. Results: SDOT 55-60 Gops/s, TBL 40+ Gtrits/s, VCNT popcount_dist 225-406 Mops/s. Partially discharges THESIS.md §5 hardware-alignment claim.
+- **Documentation:** 18 doc findings remediated across 8 files; LIBGLYPH.md updated for glyph_probe, glyph_dataset_gradients, 8-module count, rewritten consumer skeleton using new APIs.
+- **Tags:** `v0.1-rebuild` (ground-zero, 2026-04-14), `v0.2-direct-quant` (production, 2026-04-20), `v0.2.1-refactor` (this refactor).
+
 ### CIFAR-10: direct quantization + GSH + selective scoring (2026-04-16 → 2026-04-20)
 
 - CIFAR-10 first light: 35.32% (random projection, M=64 N_PROJ=16).

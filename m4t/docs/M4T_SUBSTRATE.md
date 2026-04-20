@@ -307,6 +307,7 @@ m4t/
     m4t_trit_golden.c        — enumerated golden-value tests
     m4t_size_check.sh        — .text budget enforcement
     m4t_lut_gen.c            — offline LUT generator (ONLY sanctioned float)
+    m4t_profile.c            — hot-path throughput microbenchmark (SDOT/TBL/VCNT)
   docs/
     M4T_SUBSTRATE.md         — this file
 
