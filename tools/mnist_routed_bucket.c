@@ -25,6 +25,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 
 #include "m4t_trit_pack.h"
 #include "m4t_route.h"
@@ -34,48 +35,7 @@
 #include <string.h>
 #include <time.h>
 
-/* Per-query probe state: sorted-bucket hit list with dense vote array.
- * Lazy-zero pattern keeps reset O(|union|) rather than O(n_train). */
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       n_candidates;   /* total additions, including duplicates */
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0;
-    st->n_probes = 0;
-    st->n_candidates = 0;
-}
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->n_candidates++;
-    }
-    return 0;
-}
+/* Probe infrastructure provided by glyph_probe.h */
 
 int main(int argc, char** argv) {
     glyph_config_t cfg;
@@ -172,7 +132,7 @@ int main(int argc, char** argv) {
     memset(mask, 0xFF, sig_bytes);
 
     /* Per-query state (reused). */
-    probe_state_t st;
+    glyph_probe_state_t st;
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
     st.max_union = cfg.max_union;
@@ -209,15 +169,9 @@ int main(int argc, char** argv) {
                 const uint8_t* q_H4 = test_H4 + (size_t)s * sig_bytes;
                 int y = ds.y_test[s];
 
-                probe_state_reset(&st);
-                probe_ctx_t pc = {&bt, &st};
-
-                for (int r = 0; r <= MAX_R; r++) {
-                    if (st.n_candidates >= MIN_C) break;
-                    glyph_multiprobe_enumerate(
-                        q_H1, cfg.n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-                    if (st.n_hit >= st.max_union) break;
-                }
+                glyph_probe_reset(&st);
+                glyph_probe_table(&bt, q_H1, cfg.n_proj, sig_bytes,
+                                  MAX_R, MIN_C, &st, scratch);
 
                 if (st.n_hit == 0) { empty_queries++; continue; }
                 total_probes += st.n_probes;

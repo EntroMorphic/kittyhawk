@@ -20,6 +20,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 
@@ -39,57 +40,6 @@
 #define N_SCALES 4
 #define GSH_DIM (N_CLASSES * N_SCALES)  /* 10 classes × 4 features = 40 */
 
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0; st->n_probes = 0;
-}
-
-static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
-                        int n_proj, int sig_bytes, int max_radius, int min_cands,
-                        probe_state_t* st, uint8_t* scratch) {
-    probe_ctx_t pc = { bt, st };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
 
 static void compute_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
                               m4t_mtfp_t* hgrad, m4t_mtfp_t* vgrad) {
@@ -111,7 +61,7 @@ static void compute_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
  *   out[c*4+2] = votes in top-K  (broad neighborhood)
  *   out[c*4+3] = avg proximity   (distance-weighted)
  * 40 dims, each with specific meaning. No random weights. */
-static void class_vote_profile(const probe_state_t* st, int K_top,
+static void class_vote_profile(const glyph_probe_state_t* st, int K_top,
                                int sig_bytes, const uint8_t* train_sigs,
                                const uint8_t* q_sig, const uint8_t* mask,
                                const int* y_train, int exclude_idx,
@@ -341,10 +291,10 @@ int main(int argc, char** argv) {
 
     /* Build GSH: class-vote profiles for training images. */
     printf("Building structured GSH (class-vote profiles)...\n");
-    probe_state_t bst;
+    glyph_probe_state_t bst = {0};
     bst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     bst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    bst.max_union = cfg.max_union; bst.n_hit = 0;
+    bst.max_union = cfg.max_union;
     uint8_t bscratch[4];
     uint8_t* fmask = malloc(sig_bytes); memset(fmask, 0xFF, sig_bytes);
 
@@ -352,9 +302,9 @@ int main(int argc, char** argv) {
     m4t_mtfp_t profile[GSH_DIM];
     m4t_mtfp_t* gsh_calib = malloc((size_t)n_calib * GSH_DIM * sizeof(m4t_mtfp_t));
     for (int i = 0; i < n_calib; i++) {
-        probe_state_reset(&bst);
+        glyph_probe_reset(&bst);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
+            glyph_probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
                         cfg.max_radius, cfg.min_cands, &bst, bscratch);
         class_vote_profile(&bst, K_PROFILE, sig_bytes, train_sigs,
                            train_sigs+(size_t)i*sig_bytes, fmask,
@@ -367,9 +317,9 @@ int main(int argc, char** argv) {
 
     uint8_t* gsh_train = calloc((size_t)ds.n_train * gsh_sb, 1);
     for (int i = 0; i < ds.n_train; i++) {
-        probe_state_reset(&bst);
+        glyph_probe_reset(&bst);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
+            glyph_probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
                         cfg.max_radius, cfg.min_cands, &bst, bscratch);
         class_vote_profile(&bst, K_PROFILE, sig_bytes, train_sigs,
                            train_sigs+(size_t)i*sig_bytes, fmask,
@@ -385,13 +335,13 @@ int main(int argc, char** argv) {
     printf("Build: %.1fs\n\n", build_sec);
 
     /* Classify. */
-    probe_state_t st, gst;
+    glyph_probe_state_t st = {0}, gst = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    st.max_union = cfg.max_union; st.n_hit = 0;
+    st.max_union = cfg.max_union;
     gst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     gst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    gst.max_union = cfg.max_union; gst.n_hit = 0;
+    gst.max_union = cfg.max_union;
     uint8_t* q_gsh = calloc(gsh_sb, 1);
     uint8_t* gsh_mask = malloc(gsh_sb); memset(gsh_mask, 0xFF, gsh_sb);
 
@@ -405,9 +355,9 @@ int main(int argc, char** argv) {
         const uint8_t* qs = test_sigs + (size_t)qi * sig_bytes;
 
         /* LSH. */
-        probe_state_reset(&st);
+        glyph_probe_reset(&st);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], qkeys[m]+(size_t)qi*4, KEY_TRITS, 4,
+            glyph_probe_table(&tables[m], qkeys[m]+(size_t)qi*4, KEY_TRITS, 4,
                         cfg.max_radius, cfg.min_cands, &st, bscratch);
 
         /* Hamming k-NN. */
@@ -438,8 +388,8 @@ int main(int argc, char** argv) {
                            fmask, ds.y_train, -1, profile);
         glyph_sig_quantize(profile, GSH_DIM, gsh_tau, q_gsh);
 
-        probe_state_reset(&gst);
-        probe_table(&gsh_table, q_gsh, KEY_TRITS, 4,
+        glyph_probe_reset(&gst);
+        glyph_probe_table(&gsh_table, q_gsh, KEY_TRITS, 4,
                     cfg.max_radius, cfg.min_cands, &gst, bscratch);
 
         int gsh_pred = -1;

@@ -18,6 +18,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 #include "m4t_route.h"
@@ -31,57 +32,6 @@
 #define N_CLASSES 10
 #define KNN_K 5
 
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0; st->n_probes = 0;
-}
-
-static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
-                        int n_proj, int sig_bytes, int max_radius, int min_cands,
-                        probe_state_t* st, uint8_t* scratch) {
-    probe_ctx_t pc = { bt, st };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
 
 /* Generate structured spatial projection directions for a
  * width × height × n_channels image. Directions are stored
@@ -261,10 +211,10 @@ int main(int argc, char** argv) {
     int n_sweep = 0;
     for (int i = 0; i < 7; i++) if (m_sweep[i] <= M) n_sweep = i + 1;
 
-    probe_state_t st;
+    glyph_probe_state_t st = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    st.max_union = cfg.max_union; st.n_hit = 0;
+    st.max_union = cfg.max_union;
     uint8_t scratch[4];
     uint8_t mask[4]; memset(mask, 0xFF, SB);
     const uint8_t** q_ptrs = calloc((size_t)M, sizeof(uint8_t*));
@@ -279,13 +229,13 @@ int main(int argc, char** argv) {
         int y = ds.y_test[qi];
         for (int m = 0; m < M; m++)
             q_ptrs[m] = test_sigs[m] + (size_t)qi * SB;
-        probe_state_reset(&st);
+        glyph_probe_reset(&st);
 
         int prev = 0;
         for (int si = 0; si < n_sweep; si++) {
             int Mt = m_sweep[si];
             for (int m = prev; m < Mt; m++)
-                probe_table(&tables[m], q_ptrs[m], N_PROJ, SB,
+                glyph_probe_table(&tables[m], q_ptrs[m], N_PROJ, SB,
                             cfg.max_radius, cfg.min_cands, &st, scratch);
             for (int j = 0; j < st.n_hit; j++)
                 if (ds.y_train[st.hit_list[j]] == y) { oracle_c[si]++; break; }
@@ -318,9 +268,9 @@ int main(int argc, char** argv) {
         pc_total[y]++;
         for (int m = 0; m < M; m++)
             q_ptrs[m] = test_sigs[m] + (size_t)qi * SB;
-        probe_state_reset(&st);
+        glyph_probe_reset(&st);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], q_ptrs[m], N_PROJ, SB,
+            glyph_probe_table(&tables[m], q_ptrs[m], N_PROJ, SB,
                         cfg.max_radius, cfg.min_cands, &st, scratch);
         u.hit_list = st.hit_list; u.n_hit = st.n_hit; u.votes = st.votes;
         int pk = glyph_resolver_sum_knn(&u, M, SB, train_sigs, q_ptrs, mask, KNN_K);

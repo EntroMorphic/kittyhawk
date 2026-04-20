@@ -23,6 +23,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 
 #include "m4t_trit_pack.h"
@@ -38,86 +39,7 @@
 /* Per-query candidate-union state, reused across queries. Lazy zeroing
  * via hit_list[] keeps reset cost proportional to union size, not to
  * n_train. */
-typedef struct {
-    uint16_t* votes;        /* [n_train] vote count per prototype       */
-    uint8_t*  min_radius;   /* [n_train] smallest multi-probe radius at
-                              which any table found this prototype in
-                              the query's neighborhood (0, 1, 2).
-                              Undefined for proto_idxs not in hit_list. */
-    int32_t*  hit_list;     /* [max_union] proto indices in current union */
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-    int current_radius;     /* which multi-probe radius the enumerate
-                              call is currently at (0, 1, or 2). Used
-                              to record min_radius for newly-found or
-                              re-visited candidates. */
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    uint8_t cur_r = (uint8_t)pc->current_radius;
-
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;   /* cap */
-            st->hit_list[st->n_hit++] = idx;
-            st->min_radius[idx] = cur_r;
-        } else if (cur_r < st->min_radius[idx]) {
-            st->min_radius[idx] = cur_r;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    /* Lazy-zero votes AND min_radius at once. Keeping min_radius
-     * zeroed between queries isn't strictly required (the cb
-     * overwrites it on votes==0) but simplifies reasoning. */
-    for (int j = 0; j < st->n_hit; j++) {
-        int idx = st->hit_list[j];
-        st->votes[idx] = 0;
-        st->min_radius[idx] = 0;
-    }
-    st->n_hit = 0;
-    st->n_probes = 0;
-}
-
-static void probe_table(const glyph_bucket_table_t* bt,
-                        const uint8_t* q_sig,
-                        int n_proj,
-                        int sig_bytes,
-                        int max_radius,
-                        int min_cands,
-                        probe_state_t* st,
-                        uint8_t* scratch)
-{
-    probe_ctx_t pc = { bt, st, 0 };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        pc.current_radius = r;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
+/* Probe infrastructure provided by glyph_probe.h */
 
 /* Derive a seed quadruple for table m. Table 0 uses the base seed
  * verbatim; tables ≥ 1 use a fixed derivation independent of base so
@@ -268,7 +190,7 @@ int main(int argc, char** argv) {
     }
 
     /* Per-query state (reused). */
-    probe_state_t st;
+    glyph_probe_state_t st;
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.min_radius = calloc((size_t)ds.n_train, sizeof(uint8_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
@@ -337,13 +259,13 @@ int main(int argc, char** argv) {
         for (int m = 0; m < cfg.m_max; m++)
             q_sigs_p[m] = test_sigs[m] + (size_t)s * sig_bytes;
 
-        probe_state_reset(&st);
+        glyph_probe_reset(&st);
 
         int prev_M = 0;
         for (int mi = 0; mi < n_M; mi++) {
             int M_target = m_values[mi];
             for (int m = prev_M; m < M_target; m++) {
-                probe_table(&tables[m], q_sigs_p[m], cfg.n_proj, sig_bytes,
+                glyph_probe_table(&tables[m], q_sigs_p[m], cfg.n_proj, sig_bytes,
                             cfg.max_radius, cfg.min_cands, &st, scratch);
             }
 

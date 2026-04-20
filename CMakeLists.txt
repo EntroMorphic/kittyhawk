@@ -45,6 +45,7 @@ add_library(glyph STATIC
     src/glyph_sig.c
     src/glyph_bucket.c
     src/glyph_multiprobe.c
+    src/glyph_probe.c
     src/glyph_resolver.c
     src/glyph_config.c
 )

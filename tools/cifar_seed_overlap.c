@@ -15,6 +15,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 
@@ -34,57 +35,6 @@ static void derive_seed(uint32_t m, const uint32_t base[4], uint32_t out[4]) {
     out[3] =  374761393u * m + 3266489917u;
 }
 
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0; st->n_probes = 0;
-}
-
-static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
-                        int n_proj, int sig_bytes, int max_radius, int min_cands,
-                        probe_state_t* st, uint8_t* scratch) {
-    probe_ctx_t pc = { bt, st };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
 
 int main(int argc, char** argv) {
     glyph_config_t cfg;
@@ -144,11 +94,10 @@ int main(int argc, char** argv) {
             glyph_bucket_build(&tables[m], train_sigs[m], ds.n_train, sig_bytes);
         }
 
-        probe_state_t st;
+        glyph_probe_state_t st = {0};
         st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
         st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
         st.max_union = cfg.max_union;
-        st.n_hit = 0;
         uint8_t scratch[4];
         uint8_t mask[4]; memset(mask, 0xFF, 4);
         const uint8_t** q_sigs_p = calloc((size_t)M, sizeof(uint8_t*));
@@ -160,9 +109,9 @@ int main(int argc, char** argv) {
         for (int q = 0; q < ds.n_test; q++) {
             for (int m = 0; m < M; m++)
                 q_sigs_p[m] = test_sigs[m] + (size_t)q * sig_bytes;
-            probe_state_reset(&st);
+            glyph_probe_reset(&st);
             for (int m = 0; m < M; m++)
-                probe_table(&tables[m], q_sigs_p[m], cfg.n_proj, sig_bytes,
+                glyph_probe_table(&tables[m], q_sigs_p[m], cfg.n_proj, sig_bytes,
                             cfg.max_radius, cfg.min_cands, &st, scratch);
 
             glyph_union_t u = {0};

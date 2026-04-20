@@ -21,6 +21,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 
@@ -33,57 +34,6 @@
 #define N_CLASSES 10
 #define KNN_K 5
 
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0; st->n_probes = 0;
-}
-
-static void probe_table_fn(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
-                        int n_proj, int sig_bytes, int max_radius, int min_cands,
-                        probe_state_t* st, uint8_t* scratch) {
-    probe_ctx_t pc = { bt, st };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
 
 static void derive_seed(uint32_t m, const uint32_t base[4], uint32_t out[4]) {
     if (m == 0) { out[0]=base[0]; out[1]=base[1]; out[2]=base[2]; out[3]=base[3]; return; }
@@ -178,10 +128,10 @@ int main(int argc, char** argv) {
      * union. The class c whose centroid-relative representation
      * finds the nearest neighbor wins.
      * ============================================================ */
-    probe_state_t st;
+    glyph_probe_state_t st = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    st.max_union = cfg.max_union; st.n_hit = 0;
+    st.max_union = cfg.max_union;
     uint8_t scratch[4];
     uint8_t mask[4]; memset(mask, 0xFF, SB);
     const uint8_t** q_ptrs = calloc((size_t)M, sizeof(uint8_t*));
@@ -219,9 +169,9 @@ int main(int argc, char** argv) {
             }
 
             /* Probe and find the nearest neighbor. */
-            probe_state_reset(&st);
+            glyph_probe_reset(&st);
             for (int m = 0; m < M; m++)
-                probe_table_fn(&tables[m], q_ptrs[m], N_PROJ, SB,
+                glyph_probe_table(&tables[m], q_ptrs[m], N_PROJ, SB,
                             cfg.max_radius, cfg.min_cands, &st, scratch);
 
             if (st.n_hit == 0) continue;

@@ -21,6 +21,7 @@
 #include "glyph_sig.h"
 #include "glyph_bucket.h"
 #include "glyph_multiprobe.h"
+#include "glyph_probe.h"
 #include "glyph_resolver.h"
 #include "m4t_trit_pack.h"
 
@@ -52,57 +53,6 @@ static const int8_t vote_trits_tbl[10][TRITS_PER_VOTE] = {
     {-1,-1,+1,+1}, {-1, 0,-1,-1},
 };
 
-typedef struct {
-    uint16_t* votes;
-    int32_t*  hit_list;
-    int       n_hit;
-    int       max_union;
-    int       n_probes;
-    int       per_table_cands;
-} probe_state_t;
-
-typedef struct {
-    const glyph_bucket_table_t* table;
-    probe_state_t* state;
-} probe_ctx_t;
-
-static int probe_cb(const uint8_t* probe_sig, void* vctx) {
-    probe_ctx_t* pc = (probe_ctx_t*)vctx;
-    probe_state_t* st = pc->state;
-    const glyph_bucket_table_t* bt = pc->table;
-    st->n_probes++;
-    uint32_t key = glyph_sig_to_key_u32(probe_sig);
-    int lb = glyph_bucket_lower_bound(bt, key);
-    if (lb >= bt->n_entries || bt->entries[lb].key != key) return 0;
-    for (int i = lb; i < bt->n_entries && bt->entries[i].key == key; i++) {
-        int idx = bt->entries[i].proto_idx;
-        if (st->votes[idx] == 0) {
-            if (st->n_hit >= st->max_union) return 1;
-            st->hit_list[st->n_hit++] = idx;
-        }
-        st->votes[idx]++;
-        st->per_table_cands++;
-        if (st->n_hit >= st->max_union) return 1;
-    }
-    return 0;
-}
-
-static void probe_state_reset(probe_state_t* st) {
-    for (int j = 0; j < st->n_hit; j++) st->votes[st->hit_list[j]] = 0;
-    st->n_hit = 0; st->n_probes = 0;
-}
-
-static void probe_table(const glyph_bucket_table_t* bt, const uint8_t* q_sig,
-                        int n_proj, int sig_bytes, int max_radius, int min_cands,
-                        probe_state_t* st, uint8_t* scratch) {
-    probe_ctx_t pc = { bt, st };
-    st->per_table_cands = 0;
-    for (int r = 0; r <= max_radius; r++) {
-        if (st->per_table_cands >= min_cands && r > 0) break;
-        glyph_multiprobe_enumerate(q_sig, n_proj, sig_bytes, r, scratch, probe_cb, &pc);
-        if (st->n_hit >= st->max_union) break;
-    }
-}
 
 /* SSTT-style feature extraction on MTFP normalized data.
  * RGB interleave → density-calibrated quantize → gradients.
@@ -172,7 +122,7 @@ static void encode_gsh_sig(const int* labels, int n_tables,
 }
 
 static void union_top_m_labels(
-    const probe_state_t* st, int M_labels, int sig_bytes,
+    const glyph_probe_state_t* st, int M_labels, int sig_bytes,
     const uint8_t* train_sigs, const uint8_t* q_sig,
     const uint8_t* mask, const int* y_train,
     int exclude_idx, int* out_labels)
@@ -380,19 +330,19 @@ int main(int argc, char** argv) {
     const int GSH_NT = M * TRITS_PER_VOTE;
     const int GSH_SB = M4T_TRIT_PACKED_BYTES(GSH_NT);
     printf("Building GSH (%d trits)...\n", GSH_NT);
-    probe_state_t bst;
+    glyph_probe_state_t bst = {0};
     bst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     bst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    bst.max_union = cfg.max_union; bst.n_hit = 0;
+    bst.max_union = cfg.max_union;
     uint8_t bscratch[4];
     uint8_t* fmask = malloc(sig_bytes); memset(fmask, 0xFF, sig_bytes);
     int* vlabels = malloc((size_t)M * sizeof(int));
     uint8_t* gsh_train = calloc((size_t)ds.n_train * GSH_SB, 1);
 
     for (int i = 0; i < ds.n_train; i++) {
-        probe_state_reset(&bst);
+        glyph_probe_reset(&bst);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
+            glyph_probe_table(&tables[m], tkeys[m]+(size_t)i*4, KEY_TRITS, 4,
                         cfg.max_radius, cfg.min_cands, &bst, bscratch);
         union_top_m_labels(&bst, M, sig_bytes, train_sigs,
                            train_sigs+(size_t)i*sig_bytes, fmask,
@@ -408,13 +358,13 @@ int main(int argc, char** argv) {
     printf("Total build: %.1fs\n\n", build_sec);
 
     /* Classify. */
-    probe_state_t st, gst;
+    glyph_probe_state_t st = {0}, gst = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    st.max_union = cfg.max_union; st.n_hit = 0;
+    st.max_union = cfg.max_union;
     gst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     gst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    gst.max_union = cfg.max_union; gst.n_hit = 0;
+    gst.max_union = cfg.max_union;
     uint8_t* qgsh = calloc(GSH_SB, 1);
     uint8_t* gmask = malloc(GSH_SB); memset(gmask, 0xFF, GSH_SB);
 
@@ -429,9 +379,9 @@ int main(int argc, char** argv) {
         int y = ds.y_test[qi];
         const uint8_t* qs = test_sigs + (size_t)qi * sig_bytes;
 
-        probe_state_reset(&st);
+        glyph_probe_reset(&st);
         for (int m = 0; m < M; m++)
-            probe_table(&tables[m], qkeys[m]+(size_t)qi*4, KEY_TRITS, 4,
+            glyph_probe_table(&tables[m], qkeys[m]+(size_t)qi*4, KEY_TRITS, 4,
                         cfg.max_radius, cfg.min_cands, &st, bscratch);
 
         /* k-NN on full SSTT signatures. */
@@ -462,8 +412,8 @@ int main(int argc, char** argv) {
         union_top_m_labels(&st, M, sig_bytes, train_sigs, qs, fmask,
                            ds.y_train, -1, vlabels);
         encode_gsh_sig(vlabels, M, qgsh, GSH_SB);
-        probe_state_reset(&gst);
-        probe_table(&gsh_table, qgsh, KEY_TRITS, 4,
+        glyph_probe_reset(&gst);
+        glyph_probe_table(&gsh_table, qgsh, KEY_TRITS, 4,
                     cfg.max_radius, cfg.min_cands, &gst, bscratch);
         int gsh_pred = -1;
         { int32_t bd = INT32_MAX;
