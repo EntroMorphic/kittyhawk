@@ -152,6 +152,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(structured_gsh tools/structured_gsh.c)
     target_link_libraries(structured_gsh PRIVATE glyph)
+
+    add_executable(block_distance tools/block_distance.c)
+    target_link_libraries(block_distance PRIVATE glyph m)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
