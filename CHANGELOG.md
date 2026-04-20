@@ -10,6 +10,28 @@ The first entry below marks the ground-zero rebuild that restructured the substr
 
 Triggered by a full audit that identified a collapse of Multi-Trit Floating Point into a fixed-point reading with a shared global scale, and a substrate drifting toward dense computation over base-3 hardware. The rebuild restores MTFP as base-3 floating point (mantissa cells + per-block exponent) and puts routing primitives first.
 
+### CIFAR-10: direct quantization + GSH + selective scoring (2026-04-16 → 2026-04-20)
+
+- CIFAR-10 first light: 35.32% (random projection, M=64 N_PROJ=16).
+- Cross-seed overlap: 94% of queries seed-invariant. Errors are input-driven, not projection-driven.
+- Brute-force N_PROJ ceiling: peaks at N_PROJ=64 (38.14%), wider HURTS. MNIST is opposite (monotone climb).
+- Per-image normalization: lifts ceiling from 37% to 42.86% by restoring §18 emission coverage. Structural zero was stolen by contrast deficiency.
+- **Direct ternary quantization API:** `glyph_sig_quantize / _batch / _tau`. Each trit = specific pixel or gradient. Random projections DEPRECATED for images.
+- `glyph_dataset_normalize(ds)`: per-image zero-mean, unit-variance in MTFP integer arithmetic. Newton's-method isqrt.
+- Hierarchical Trit Lattice LSH: spatial pooling builds bucket keys from majority-voted blocks. direct_lsh at 44.68%.
+- GSH (Global Signature Hash): per-table routing pattern → multi-trit vote encoding → bucket index. Agreement filter: P(correct|agree)=56.36% on 50% subset.
+- `glyph_resolver_sum_knn`: routed k-NN with rank-weighted majority vote. +1.74pp on CIFAR-10.
+- Dynamic N_PROJ cascade (tools/dynamic_nproj.c): 7-stage resolution cascade, threshold-gated. Validated re-rank principle (~4× table equivalence).
+- IG-weighted scoring (from SSTT): pair-IG re-ranking adds +2.34pp brute-force. Inverted index tested and failed (32.69%).
+- **Selective scoring: LSH + GSH agreement + pair-IG = 46.63% CIFAR-10.** When LSH+GSH agree use Hamming; when disagree use pair-IG.
+- Bucket index generalized from sig_bytes==4 to sig_bytes>=4 (key on first 4 bytes).
+- FFN bridge: random weights tested and failed (14.62%). Structured class-vote profile GSH: 58.70% P(correct|agree) on 37.8%.
+- Negotiation loop: filtered pair-IG diagnostic confirms +0.51pp from purity (below specialist table threshold).
+- **Comparison to SSTT:** Glyph wins Fashion-MNIST (87.95% vs 86.54%), ties MNIST (97.18% vs 97.53%), CIFAR-10 gap 6.4pp (46.63% vs ~53%).
+- 9 LMM cycles: dynamic_nproj, lattice_geometry, routing_the_gap, reciprocal_learning, normalization, ffn_bridge, sstt_informs (×2), negotiation_loop.
+- New tools: direct_lsh, dynamic_nproj, bruteforce_nproj, cifar_seed_overlap, structured_gsh, ig_scored, inverted_ig, sstt_precog, conv_lsh, centroid_routed, subsetted_multi, structured_lsh, specialist_rerank, layered_lsh.
+- Documentation: Axis 7 (Fashion-MNIST), Axis 8 (CIFAR-10), DYNAMIC_NPROJ.md, LATTICE_GEOMETRY_RESOLVER.md, direct_lsh_production.md.
+
 ### Fashion-MNIST generalization + resolver-gap diagnosis (2026-04-15)
 
 - Architecture generalizes to Fashion-MNIST at 85.15% (M=64, density=0.33, SUM) — matching classical pixel k-NN baselines. Resolver gap is ~6× wider than MNIST, concentrated in upper-body-garment cluster.

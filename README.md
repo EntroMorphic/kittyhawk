@@ -8,18 +8,20 @@ A routing-first ternary compute stack for Apple Silicon. Built on the thesis tha
 
 ## Status
 
-Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation collapsed Multi-Trit Floating Point into a fixed-point reading with a shared global scale; the rebuild restored the F in MTFP (mantissa cells + per-block exponent metadata) and put routing primitives first. Since then the project has closed out six remediation rounds, converted every dense-resolver cascade tool to routing-native primitives, rebuilt the architecture with the signature-as-address reframe, and broken 97% accuracy on deskewed MNIST using a purely routed consumer at N_PROJ=16.
+Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation collapsed Multi-Trit Floating Point into a fixed-point reading with a shared global scale; the rebuild restored the F in MTFP (mantissa cells + per-block exponent metadata) and put routing primitives first. Since then the project has closed out six remediation rounds, converted every dense-resolver cascade tool to routing-native primitives, rebuilt the architecture with the signature-as-address reframe, broken 97% accuracy on deskewed MNIST using a purely routed consumer at N_PROJ=16, and extended to CIFAR-10 and Fashion-MNIST via direct ternary quantization with GSH (Global Signature Hash) selective scoring.
 
 - **Substrate spec:** locked. See [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md).
 - **Numeric core:** block-native primitives for MTFP19, compile clean under repo-root `-Werror`, all tests pass.
 - **Routing surface:** trit pack/unpack, TBL-based trit ops, masked-VCNT reducers, threshold-based signature extraction, ternary matmul (MTFP19 and SDOT-native MTFP4 paths).
-- **Consumer library (`libglyph`):** higher-level routed k-NN infrastructure sitting on top of `libm4t` — MNIST loader, signature builder, bucket index, ternary multi-probe, resolver variants, CLI hyperparameter parser.
+- **Signature path:** direct ternary quantization is the preferred production path. Pixel intensities are quantized directly to {-1, 0, +1} via density-calibrated thresholds — no random projection matrix required. Optional gradient features extend discrimination to texture-rich datasets (CIFAR-10, Fashion-MNIST).
+- **Consumer library (`libglyph`):** higher-level routed k-NN infrastructure sitting on top of `libm4t` — MNIST/Fashion-MNIST/CIFAR-10 loader with optional normalization, signature builder, bucket index, ternary multi-probe, resolver variants, CLI hyperparameter parser.
 - **Production consumers:**
+  - `direct_lsh` — direct ternary quantization consumer with GSH selective scoring; supports MNIST, Fashion-MNIST, and CIFAR-10 (production best across all three datasets)
   - `mnist_routed_bucket` — single-table bucket-indexed LSH, signature-as-address (Axis 5)
   - `mnist_routed_bucket_multi` — multi-table bucket-indexed LSH with cross-table union-merge and summed-distance resolver (Axis 6); **breaks 97% at N_PROJ=16**
 - **Architecture discipline:** every active routed consumer is zero-dense-scan at the application level; cascade tools are retained as research scaffolding.
 - **Red-team:** six rounds plus a full libglyph refactor red-team complete. See [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) and recent `CHANGELOG.md` entries.
-- **Tests:** 11/11 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
+- **Tests:** 12/12 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
 
 ## Architecture
 
@@ -31,6 +33,7 @@ m4t/                  — the substrate (libm4t.a). Routing-first ternary kernel
   docs/                 substrate specification
 src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infrastructure.
   glyph_dataset.{h,c}   MNIST IDX loader + integer-moment deskew
+  glyph_dataset_normalize.{h,c}  per-channel mean/std normalization (CIFAR-10, Fashion-MNIST)
   glyph_rng.{h,c}       xoshiro128+ RNG
   glyph_sig.{h,c}       random ternary projection + density-calibrated τ + signature encoder
   glyph_bucket.{h,c}    sorted bucket index keyed on packed-trit signatures
@@ -39,7 +42,8 @@ src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infra
   glyph_config.{h,c}    hyperparameter struct + CLI long-option parser
   glyph_*.h             thin wrapper headers that alias m4t_* into glyph_* namespace
 tools/                — CLI consumer tools built on libglyph.
-                         Production: mnist_routed_bucket, mnist_routed_bucket_multi
+                         Production: direct_lsh (CIFAR-10/Fashion-MNIST/MNIST via direct quantization),
+                           mnist_routed_bucket, mnist_routed_bucket_multi
                          Diagnostic: fashion_atomics (resolver-gap atomics on Fashion-MNIST)
                          Research scaffolding: mnist_cascade_*, mnist_routed_knn, mnist_full_sweep,
                            mnist_resolver_sweep, mnist_local_*, mnist_lvg_*, mnist_probe_nproj16,
@@ -86,7 +90,22 @@ cmake --build build-tools -j
 
 Every hyperparameter is a CLI flag. No source edits required to sweep N_PROJ, density, M, multi-probe radius, per-table candidate threshold, base seed, or dataset path. `--help` on either tool prints the full option list.
 
-### Multi-table routed bucket (production best, Axis 6)
+### Direct LSH (production best, direct ternary quantization)
+
+```bash
+# CIFAR-10: direct quantization with gradient features and normalization
+./build/direct_lsh --data /path/to/cifar10 --no_deskew --normalize --density 0.395 --gradients --m_max 64
+
+# Fashion-MNIST: same configuration
+./build/direct_lsh --data /path/to/fashion-mnist --no_deskew --normalize --density 0.395 --gradients --m_max 64
+
+# MNIST: deskewed pixels only, no gradients or normalization needed
+./build/direct_lsh --data /path/to/mnist --density 0.10 --m_max 64
+```
+
+Default runs reproduce the production measurements with GSH selective scoring.
+
+### Multi-table routed bucket (Axis 6, random projection path)
 
 ```bash
 # Default: oracle pass over M ∈ {1,2,4,8,16,32,64} at N_PROJ=16
@@ -132,14 +151,29 @@ All 11 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alia
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes since the ground-zero rebuild. |
 | [`m4t/README.md`](m4t/README.md) | Substrate-layer build and surface. |
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
+| `journal/direct_lsh_production.md` | Direct ternary quantization: design, measurements, GSH selective scoring. |
+| `journal/normalization_first_light.md` | Per-channel normalization breakthrough for CIFAR-10 and Fashion-MNIST. |
+| `journal/cifar10_nproj_ceiling.md` | CIFAR-10 projection ceiling analysis — why 46% and what the gap means. |
+| [`docs/DYNAMIC_NPROJ.md`](docs/DYNAMIC_NPROJ.md) | Dynamic N_PROJ exploration and per-dataset tuning. |
+| [`docs/LATTICE_GEOMETRY_RESOLVER.md`](docs/LATTICE_GEOMETRY_RESOLVER.md) | Lattice geometry resolver design and integration notes. |
 | `journal/fashion_mnist_*.md` | Fashion-MNIST generalization, atomics diagnosis, density-sweep experiments. |
 | `journal/` | LMM-cycle research artifacts (raw → nodes → reflect → synthesize). |
 
-## Headline results (deskewed MNIST, single seed unless noted)
+## Headline results
 
 The architecture went through several phases. Numbers below reflect the current state after the routing-native refactor; see [`docs/FINDINGS.md`](docs/FINDINGS.md) for the full axis-by-axis story.
 
-### Routed production architecture (Axis 5 / 6)
+### Production (direct quantization path)
+
+| Dataset | Consumer | Config | Accuracy | vs SSTT | Notes |
+|---|---|---|---|---|---|
+| CIFAR-10 | `direct_lsh` | d=0.395, gradients, normalize, M=64, selective | **46.63%** | ~53% | First CIFAR-10 result; gap is projection ceiling (see `journal/cifar10_nproj_ceiling.md`) |
+| Fashion-MNIST | `direct_lsh` | d=0.395, gradients, normalize, M=64, selective | **87.95%** | 86.54% | **Glyph wins** — +1.41 points over SSTT |
+| MNIST | `direct_lsh` | d=0.10, M=64, selective | **97.18%** | 97.53% | Tied (within noise); 97.23% without gradients |
+
+SSTT = Self-Supervised Ternary Transformers (published baseline for ternary-native classification).
+
+### Legacy (random projection path, Axis 5 / 6)
 
 | Consumer | Config | Accuracy | ms/query | Architecture |
 |---|---|---|---|---|
@@ -150,7 +184,7 @@ The architecture went through several phases. Numbers below reflect the current 
 
 Multi-table routed bucket at M=32 (512 total signature trits) matches or slightly beats the pure-signature scaling curve at equivalent total bits (pure N_PROJ=512 is 97.06%; M=32 SUM is +0.18 points). Wall-time cost is ~2× faster than an equivalent dense N_PROJ=512 scan. Zero dense scans anywhere in the pipeline.
 
-### Fashion-MNIST generalization (same architecture, no deskew)
+### Fashion-MNIST legacy (random projection path, no deskew)
 
 | Consumer | Config | Accuracy | Notes |
 |---|---|---|---|

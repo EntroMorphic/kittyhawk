@@ -46,6 +46,8 @@ Consumed by `mnist_routed_bucket_multi`; silently ignored by `mnist_routed_bucke
 | `--density_schedule <str>` | `fixed` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. Phase B.2 showed mixing is strictly dominated by the single best density. |
 | `--density_triple <a,b,c>` | `0.25,0.33,0.40` | Three densities for `--density_schedule mixed`. Table m uses `density_triple[m % 3]`. |
 | `--no_deskew` | off | Skip integer-moment deskew. Recommended for Fashion-MNIST and other non-digit datasets. |
+| `--normalize` | off | Per-image contrast normalization. Required for CIFAR-10 (lifts accuracy from ~37% to ~43%). Neutral on MNIST. |
+| `--knn_k <int>` | 5 | K for routed k-NN resolver (--resolver_sum knn). Range 1..64. |
 
 ### Axis 6 headline configuration (breaks 97% at N_PROJ=16)
 
@@ -66,6 +68,21 @@ Produces (on deskewed MNIST, 10K test queries, single seed):
 | 16 | 85.78% | 96.13% | 91.48% | 100.00% |
 | **32** | 88.50% | **97.24%** | 94.25% | 100.00% |
 | 64 | 89.77% | **97.31%** | 95.36% | 100.00% |
+
+### Direct quantization production configurations (Axis 8)
+
+```bash
+# CIFAR-10 (selective scoring: 46.63%)
+./build/direct_lsh --data <cifar10_dir> --no_deskew --density 0.395 --m_max 64 --gradients
+
+# Fashion-MNIST (87.95%)
+./build/direct_lsh --data <fashion_dir> --no_deskew --density 0.395 --m_max 64 --gradients
+
+# MNIST (97.23%)
+./build/direct_lsh --data <mnist_dir> --density 0.10 --m_max 64
+```
+
+Note: `direct_lsh` uses direct ternary quantization (no random projections). Each trit represents a specific pixel or gradient. The `--gradients` flag appends horizontal and vertical gradient channels. Per-image normalization is applied automatically.
 
 ### Axis 5 headline configuration (single-table bucket consumer)
 

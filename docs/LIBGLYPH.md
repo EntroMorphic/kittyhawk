@@ -69,6 +69,7 @@ Every libglyph module depends only on m4t primitives and on other libglyph modul
 - `glyph_dataset_load_mnist(ds, dir)` — reads four IDX files from `<dir>`:
   `train-images-idx3-ubyte`, `train-labels-idx1-ubyte`, `t10k-images-idx3-ubyte`, `t10k-labels-idx1-ubyte`. Validates IDX magic numbers (0x00000803 for images, 0x00000801 for labels). Returns 0 on success, non-zero with a diagnostic to stderr on failure.
 - `glyph_dataset_deskew(ds)` — applies integer-moment shear correction to every image in train and test. Zero float; uses int64 image moments. Idempotent.
+- `glyph_dataset_normalize(ds)` — per-image zero-mean, unit-variance normalization. Restores §18 emission coverage on variable-contrast datasets (CIFAR-10). Integer arithmetic throughout (int64 sums, Newton's-method isqrt). Idempotent.
 - `glyph_dataset_free(ds)` — releases all heap state. Safe to call multiple times.
 
 **Typical use:**
@@ -224,6 +225,7 @@ A resolver reads a candidate union (produced by multi-table bucket lookup + mult
 - `glyph_resolver_sum(u, m_active, sig_bytes, train_sigs, query_sigs, mask)` — argmin candidate by `Σ_m popcount_dist(q_sig_m, cand_sig_m)` across all active tables. O(n_hit × m_active) popcount_dist calls. Best resolver at every M ≥ 2 on MNIST.
 - `glyph_resolver_sum_neon4(...)` — NEON-batched SUM variant for sig_bytes=4 (N_PROJ=16). Processes 4 candidates per 16-byte vector. Bit-exact equivalent to `glyph_resolver_sum` for any mask value. Falls back to scalar SUM on non-NEON targets. 1.2-1.3× faster than scalar on M-series.
 - `glyph_resolver_per_table_majority(u, m_active, sig_bytes, train_sigs, query_sigs, mask)` — per-table 1-NN within the union; majority-vote the M labels. Middle performer.
+- `glyph_resolver_sum_knn(u, m_active, sig_bytes, train_sigs, query_sigs, mask, k)` — routed k-NN: finds top-K candidates by summed Hamming distance, rank-weighted majority vote over their labels. k must be in [1, 64]. Production resolver for direct quantization path.
 
 **Functions (research / falsified variants):**
 
@@ -254,6 +256,8 @@ Both research variants are wired into the tool via `--resolver_sum {voteweighted
 | `radius_lambda` | `--radius_lambda` | 8 | Penalty coefficient for `radiusaware`. Only consulted when `resolver_sum == "radiusaware"`. |
 | `density_schedule` | `--density_schedule` | `"fixed"` | `fixed` = all tables use `--density`; `mixed` = round-robin over `--density_triple`. |
 | `density_triple[3]` | `--density_triple` | `0.25,0.33,0.40` | Three densities for mixed schedule. Table m uses `density_triple[m % 3]`. |
+| `knn_k` | `--knn_k` | 5 | K for routed k-NN resolver. Only consulted when resolver_sum == "knn". |
+| `normalize` | `--normalize` | 0 | Per-image contrast normalization (zero-mean, unit-variance). Required for CIFAR-10. |
 
 See `journal/fashion_mnist_atomics.md` and `journal/fashion_mnist_density_sweep.md` for the experiments that motivated these fields.
 
