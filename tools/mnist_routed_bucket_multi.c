@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
     }
 
     /* Per-query state (reused). */
-    glyph_probe_state_t st;
+    glyph_probe_state_t st = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.min_radius = calloc((size_t)ds.n_train, sizeof(uint8_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));

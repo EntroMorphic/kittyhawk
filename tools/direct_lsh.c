@@ -508,10 +508,10 @@ int main(int argc, char** argv) {
     const int GSH_SB = M4T_TRIT_PACKED_BYTES(GSH_NTRITS);
     printf("Building GSH (%d trits = %d bytes)...\n", GSH_NTRITS, GSH_SB);
 
-    glyph_probe_state_t gsh_build_st;
+    glyph_probe_state_t gsh_build_st = {0};
     gsh_build_st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     gsh_build_st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    gsh_build_st.max_union = cfg.max_union; gsh_build_st.n_hit = 0;
+    gsh_build_st.max_union = cfg.max_union;
     int* vote_labels = malloc((size_t)M * sizeof(int));
     uint8_t* gsh_train = calloc((size_t)ds.n_train * GSH_SB, 1);
     uint8_t gsh_build_scratch[4];
@@ -547,10 +547,10 @@ int main(int argc, char** argv) {
     /* Classify. The resolver scores by Hamming distance on the FULL
      * signature (all total_dim trits), not on the 16-trit key. The
      * bucket key is for FILTERING only. */
-    glyph_probe_state_t st;
+    glyph_probe_state_t st = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    st.max_union = cfg.max_union; st.n_hit = 0;
+    st.max_union = cfg.max_union;
     uint8_t key_scratch[4];
     uint8_t* full_mask = malloc(sig_bytes); memset(full_mask, 0xFF, sig_bytes);
 
@@ -569,10 +569,10 @@ int main(int argc, char** argv) {
     memset(final_pred, 0xFF, (size_t)ds.n_test * sizeof(int));
 
     /* GSH query-time state. */
-    glyph_probe_state_t gst;
+    glyph_probe_state_t gst = {0};
     gst.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     gst.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
-    gst.max_union = cfg.max_union; gst.n_hit = 0;
+    gst.max_union = cfg.max_union;
     uint8_t* q_gsh = calloc(GSH_SB, 1);
     uint8_t* gsh_mask = malloc(GSH_SB); memset(gsh_mask, 0xFF, GSH_SB);
 

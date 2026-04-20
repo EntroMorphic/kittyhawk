@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     memset(mask, 0xFF, sig_bytes);
 
     /* Per-query state (reused). */
-    glyph_probe_state_t st;
+    glyph_probe_state_t st = {0};
     st.votes = calloc((size_t)ds.n_train, sizeof(uint16_t));
     st.hit_list = malloc((size_t)cfg.max_union * sizeof(int32_t));
     st.max_union = cfg.max_union;
