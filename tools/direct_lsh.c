@@ -123,6 +123,143 @@ static void union_top_m_labels(
  * index scoring but not with uniform Hamming. */
 /* Gradient computation provided by glyph_dataset_gradients() */
 
+static void build_pair_ig(const uint8_t* train_sigs, const int* y_train,
+                          int n_train, int total_dim, int sig_bytes,
+                          uint8_t** pair_ig) {
+    uint16_t* ig_hot = calloc((size_t)total_dim * 3 * N_CLASSES, sizeof(uint16_t));
+    #define IG_HOT(d, v, c) ig_hot[(size_t)(d)*3*N_CLASSES + (size_t)(v)*N_CLASSES + (c)]
+    for (int i = 0; i < n_train; i++) {
+        int lbl = y_train[i];
+        const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
+        for (int d = 0; d < total_dim; d++) {
+            int8_t t = glyph_read_trit(sig, d);
+            int v = (t < 0) ? 0 : (t == 0) ? 1 : 2;
+            IG_HOT(d, v, lbl)++;
+        }
+    }
+    int ig_cc[N_CLASSES] = {0};
+    for (int i = 0; i < n_train; i++) ig_cc[y_train[i]]++;
+
+    double* ig_tmp = malloc((size_t)total_dim * sizeof(double));
+    for (int a = 0; a < N_CLASSES; a++) {
+        for (int b = a + 1; b < N_CLASSES; b++) {
+            uint8_t* pw = malloc((size_t)total_dim);
+            int n_ab = ig_cc[a] + ig_cc[b];
+            double pa = (double)ig_cc[a] / n_ab;
+            double pb = (double)ig_cc[b] / n_ab;
+            double h_ab = 0;
+            if (pa > 0) h_ab -= pa * log2(pa);
+            if (pb > 0) h_ab -= pb * log2(pb);
+            double pmx = 0;
+            for (int d = 0; d < total_dim; d++) {
+                double hc = 0;
+                for (int v = 0; v < 3; v++) {
+                    int va = IG_HOT(d, v, a);
+                    int vb = IG_HOT(d, v, b);
+                    int vt = va + vb;
+                    if (!vt) continue;
+                    double pv = (double)vt / n_ab;
+                    double ha = (double)va / vt;
+                    double hb = (double)vb / vt;
+                    double hv = 0;
+                    if (ha > 0) hv -= ha * log2(ha);
+                    if (hb > 0) hv -= hb * log2(hb);
+                    hc += pv * hv;
+                }
+                ig_tmp[d] = h_ab - hc;
+                if (ig_tmp[d] < 0) ig_tmp[d] = 0;
+                if (ig_tmp[d] > pmx) pmx = ig_tmp[d];
+            }
+            for (int d = 0; d < total_dim; d++)
+                pw[d] = pmx > 0 ? (uint8_t)(ig_tmp[d]/pmx*15.0+1.0) : 1;
+            pair_ig[a*N_CLASSES+b] = pw;
+            pair_ig[b*N_CLASSES+a] = pw;
+        }
+        pair_ig[a*N_CLASSES+a] = NULL;
+    }
+    free(ig_tmp); free(ig_hot);
+    #undef IG_HOT
+}
+
+static void build_spatial_summary(const uint8_t* sigs, int n_imgs, int sig_bytes,
+                                  int img_w, int img_h, int n_ch,
+                                  int blk_w, int blk_h, int summary_bytes,
+                                  uint8_t* summaries) {
+    int sum_w = img_w / blk_w;
+    int sum_h = img_h / blk_h;
+    int ppc = img_w * img_h;
+    for (int i = 0; i < n_imgs; i++) {
+        const uint8_t* sig = sigs + (size_t)i * sig_bytes;
+        uint8_t* sum_sig = summaries + (size_t)i * summary_bytes;
+        int si = 0;
+        for (int ch = 0; ch < n_ch; ch++) {
+            for (int by = 0; by < sum_h; by++) {
+                for (int bx = 0; bx < sum_w; bx++) {
+                    int pos_count = 0, neg_count = 0;
+                    for (int dy = 0; dy < blk_h; dy++) {
+                        for (int dx = 0; dx < blk_w; dx++) {
+                            int px = bx * blk_w + dx;
+                            int py = by * blk_h + dy;
+                            if (px >= img_w || py >= img_h) continue;
+                            int trit_pos = ch * ppc + py * img_w + px;
+                            int8_t t = glyph_read_trit(sig, trit_pos);
+                            if (t > 0) pos_count++;
+                            else if (t < 0) neg_count++;
+                        }
+                    }
+                    int8_t summary_trit = 0;
+                    if (pos_count > neg_count) summary_trit = +1;
+                    else if (neg_count > pos_count) summary_trit = -1;
+                    glyph_write_trit(sum_sig, si, summary_trit);
+                    si++;
+                }
+            }
+        }
+    }
+}
+
+static void print_emission_coverage(const uint8_t* train_sigs, int n_train,
+                                    int sig_bytes, int total_dim,
+                                    int intensity_dim, int use_gradients) {
+    long n_pos = 0, n_neg = 0, n_zero = 0;
+    int sample_n = (n_train < 1000) ? n_train : 1000;
+    for (int i = 0; i < sample_n; i++) {
+        const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
+        for (int d = 0; d < total_dim; d++) {
+            int8_t t = glyph_read_trit(sig, d);
+            if (t > 0) n_pos++;
+            else if (t < 0) n_neg++;
+            else n_zero++;
+        }
+    }
+    long sampled = (long)sample_n * total_dim;
+    printf("  Emission coverage (first %d images):\n", sample_n);
+    printf("    +1: %.1f%%  0: %.1f%%  -1: %.1f%%\n",
+           100.0 * n_pos / sampled,
+           100.0 * n_zero / sampled,
+           100.0 * n_neg / sampled);
+    if (use_gradients) {
+        long ip = 0, iz = 0, in_ = 0, gp = 0, gz = 0, gn = 0;
+        for (int i = 0; i < sample_n; i++) {
+            const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
+            for (int d = 0; d < intensity_dim; d++) {
+                int8_t t = glyph_read_trit(sig, d);
+                if (t > 0) ip++; else if (t < 0) in_++; else iz++;
+            }
+            for (int d = intensity_dim; d < total_dim; d++) {
+                int8_t t = glyph_read_trit(sig, d);
+                if (t > 0) gp++; else if (t < 0) gn++; else gz++;
+            }
+        }
+        long it = (long)sample_n * intensity_dim;
+        long gt = (long)sample_n * (total_dim - intensity_dim);
+        printf("    intensity: +1=%.1f%% 0=%.1f%% -1=%.1f%%\n",
+               100.0*ip/it, 100.0*iz/it, 100.0*in_/it);
+        printf("    gradient:  +1=%.1f%% 0=%.1f%% -1=%.1f%%\n",
+               100.0*gp/gt, 100.0*gz/gt, 100.0*gn/gt);
+    }
+}
+
 int main(int argc, char** argv) {
     /* Strip --gradients before glyph_config sees it. */
     int use_gradients = 0;
@@ -267,65 +404,9 @@ int main(int argc, char** argv) {
     }
     free(train_feat); free(test_feat);
 
-    /* ============================================================
-     * Per-trit IG weights + per-class-pair IG weights.
-     * Used for pair-IG re-ranking on the LSH union.
-     * ============================================================ */
     printf("Computing IG weights...\n");
-    uint16_t* ig_hot = calloc((size_t)total_dim * 3 * N_CLASSES, sizeof(uint16_t));
-    #define IG_HOT(d, v, c) ig_hot[(size_t)(d)*3*N_CLASSES + (size_t)(v)*N_CLASSES + (c)]
-    for (int i = 0; i < ds.n_train; i++) {
-        int lbl = ds.y_train[i];
-        const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
-        for (int d = 0; d < total_dim; d++) {
-            int8_t t = glyph_read_trit(sig, d);
-            int v = (t < 0) ? 0 : (t == 0) ? 1 : 2;
-            IG_HOT(d, v, lbl)++;
-        }
-    }
-    int ig_cc[N_CLASSES] = {0};
-    for (int i = 0; i < ds.n_train; i++) ig_cc[ds.y_train[i]]++;
-
-    /* Per-class-pair IG: for each (a,b), weight per position. */
-    double* ig_tmp = malloc((size_t)total_dim * sizeof(double));
     uint8_t** pair_ig = malloc((size_t)N_CLASSES * N_CLASSES * sizeof(uint8_t*));
-    for (int a = 0; a < N_CLASSES; a++) {
-        for (int b = a + 1; b < N_CLASSES; b++) {
-            uint8_t* pw = malloc((size_t)total_dim);
-            int n_ab = ig_cc[a] + ig_cc[b];
-            double pa = (double)ig_cc[a] / n_ab;
-            double pb = (double)ig_cc[b] / n_ab;
-            double h_ab = 0;
-            if (pa > 0) h_ab -= pa * log2(pa);
-            if (pb > 0) h_ab -= pb * log2(pb);
-            double pmx = 0;
-            for (int d = 0; d < total_dim; d++) {
-                double hc = 0;
-                for (int v = 0; v < 3; v++) {
-                    int va = IG_HOT(d, v, a);
-                    int vb = IG_HOT(d, v, b);
-                    int vt = va + vb;
-                    if (!vt) continue;
-                    double pv = (double)vt / n_ab;
-                    double ha = (double)va / vt;
-                    double hb = (double)vb / vt;
-                    double hv = 0;
-                    if (ha > 0) hv -= ha * log2(ha);
-                    if (hb > 0) hv -= hb * log2(hb);
-                    hc += pv * hv;
-                }
-                ig_tmp[d] = h_ab - hc;
-                if (ig_tmp[d] < 0) ig_tmp[d] = 0;
-                if (ig_tmp[d] > pmx) pmx = ig_tmp[d];
-            }
-            for (int d = 0; d < total_dim; d++)
-                pw[d] = pmx > 0 ? (uint8_t)(ig_tmp[d]/pmx*15.0+1.0) : 1;
-            pair_ig[a*N_CLASSES+b] = pw;
-            pair_ig[b*N_CLASSES+a] = pw;
-        }
-        pair_ig[a*N_CLASSES+a] = NULL;
-    }
-    free(ig_tmp); free(ig_hot);
+    build_pair_ig(train_sigs, ds.y_train, ds.n_train, total_dim, sig_bytes, pair_ig);
     printf("  Pair-IG weights computed for %d pairs.\n", N_CLASSES*(N_CLASSES-1)/2);
 
     /* Hierarchical Trit Lattice LSH: spatial pooling builds the bucket
@@ -358,88 +439,18 @@ int main(int argc, char** argv) {
     printf("Hierarchical key: %dx%d blocks → %dx%dx%d = %d summary trits\n",
            blk_w, blk_h, sum_w, sum_h, n_ch, summary_dim);
 
-    /* Compute summary trits for all images by majority-voting
-     * within each spatial block of the intensity channel. */
     int summary_bytes = M4T_TRIT_PACKED_BYTES(summary_dim);
     uint8_t* train_summary = calloc((size_t)ds.n_train * summary_bytes, 1);
     uint8_t* test_summary  = calloc((size_t)ds.n_test  * summary_bytes, 1);
-    int ppc = img_w * img_h;
+    build_spatial_summary(train_sigs, ds.n_train, sig_bytes,
+                          img_w, img_h, n_ch, blk_w, blk_h,
+                          summary_bytes, train_summary);
+    build_spatial_summary(test_sigs, ds.n_test, sig_bytes,
+                          img_w, img_h, n_ch, blk_w, blk_h,
+                          summary_bytes, test_summary);
 
-    for (int pass = 0; pass < 2; pass++) {
-        int n_imgs = (pass == 0) ? ds.n_train : ds.n_test;
-        const uint8_t* sigs = (pass == 0) ? train_sigs : test_sigs;
-        uint8_t* summaries = (pass == 0) ? train_summary : test_summary;
-
-        for (int i = 0; i < n_imgs; i++) {
-            const uint8_t* sig = sigs + (size_t)i * sig_bytes;
-            uint8_t* sum_sig = summaries + (size_t)i * summary_bytes;
-            int si = 0;
-            for (int ch = 0; ch < n_ch; ch++) {
-                for (int by = 0; by < sum_h; by++) {
-                    for (int bx = 0; bx < sum_w; bx++) {
-                        int pos_count = 0, neg_count = 0;
-                        for (int dy = 0; dy < blk_h; dy++) {
-                            for (int dx = 0; dx < blk_w; dx++) {
-                                int px = bx * blk_w + dx;
-                                int py = by * blk_h + dy;
-                                if (px >= img_w || py >= img_h) continue;
-                                int trit_pos = ch * ppc + py * img_w + px;
-                                int8_t t = glyph_read_trit(sig, trit_pos);
-                                if (t > 0) pos_count++;
-                                else if (t < 0) neg_count++;
-                            }
-                        }
-                        int8_t summary_trit = 0;
-                        if (pos_count > neg_count) summary_trit = +1;
-                        else if (neg_count > pos_count) summary_trit = -1;
-                        glyph_write_trit(sum_sig, si, summary_trit);
-                        si++;
-                    }
-                }
-            }
-        }
-    }
-
-    /* Emission coverage diagnostic: measure trit distribution. */
-    {
-        long n_pos = 0, n_neg = 0, n_zero = 0;
-        int sample_n = (ds.n_train < 1000) ? ds.n_train : 1000;
-        for (int i = 0; i < sample_n; i++) {
-            const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
-            for (int d = 0; d < total_dim; d++) {
-                int8_t t = glyph_read_trit(sig, d);
-                if (t > 0) n_pos++;
-                else if (t < 0) n_neg++;
-                else n_zero++;
-            }
-        }
-        long sampled = (long)sample_n * total_dim;
-        printf("  Emission coverage (first %d images):\n", sample_n);
-        printf("    +1: %.1f%%  0: %.1f%%  -1: %.1f%%\n",
-               100.0 * n_pos / sampled,
-               100.0 * n_zero / sampled,
-               100.0 * n_neg / sampled);
-        if (use_gradients) {
-            long ip = 0, iz = 0, in_ = 0, gp = 0, gz = 0, gn = 0;
-            for (int i = 0; i < sample_n; i++) {
-                const uint8_t* sig = train_sigs + (size_t)i * sig_bytes;
-                for (int d = 0; d < intensity_dim; d++) {
-                    int8_t t = glyph_read_trit(sig, d);
-                    if (t > 0) ip++; else if (t < 0) in_++; else iz++;
-                }
-                for (int d = intensity_dim; d < total_dim; d++) {
-                    int8_t t = glyph_read_trit(sig, d);
-                    if (t > 0) gp++; else if (t < 0) gn++; else gz++;
-                }
-            }
-            long it = (long)sample_n * intensity_dim;
-            long gt = (long)sample_n * (total_dim - intensity_dim);
-            printf("    intensity: +1=%.1f%% 0=%.1f%% -1=%.1f%%\n",
-                   100.0*ip/it, 100.0*iz/it, 100.0*in_/it);
-            printf("    gradient:  +1=%.1f%% 0=%.1f%% -1=%.1f%%\n",
-                   100.0*gp/gt, 100.0*gz/gt, 100.0*gn/gt);
-        }
-    }
+    print_emission_coverage(train_sigs, ds.n_train, sig_bytes,
+                           total_dim, intensity_dim, use_gradients);
     printf("\n");
 
     /* Build M bucket tables. Each table uses a different permutation

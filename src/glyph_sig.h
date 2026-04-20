@@ -74,6 +74,8 @@ typedef struct {
  * calibration uses the |W @ x| distribution percentile at `density`
  * to set tau. density=0.33 gives the balanced base-3 deployment.
  *
+ * Preconditions: n_proj > 0, input_dim > 0, n_calib > 0,
+ * density in (0, 1), (s0|s1|s2|s3) != 0.
  * Returns 0 on success, non-zero on allocation failure. */
 int glyph_sig_builder_init(
     glyph_sig_builder_t* sb,

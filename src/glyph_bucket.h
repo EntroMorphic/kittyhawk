@@ -60,8 +60,9 @@ uint32_t glyph_sig_to_key_u32(const uint8_t* sig);
 
 /* Build a sorted bucket table over n_entries packed signatures. Each
  * signature is sig_bytes bytes, stored contiguously at sigs. Returns
- * 0 on success. Allocates bt->entries via malloc; caller must call
- * glyph_bucket_table_free. */
+ * 0 on success, 1 on error. Allocates bt->entries via malloc; caller
+ * must call glyph_bucket_table_free.
+ * Preconditions: n_entries >= 0, sig_bytes >= 4 (keys first 4 bytes). */
 int glyph_bucket_build(glyph_bucket_table_t* bt,
                        const uint8_t* sigs,
                        int n_entries,
