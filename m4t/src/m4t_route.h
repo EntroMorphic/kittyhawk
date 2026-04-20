@@ -166,8 +166,8 @@ void m4t_route_apply_signed(
  *
  * signatures layout: T rows of Dp packed bytes.
  *
- * scratch: caller-provided buffer of at least (T + 1) * D int64_t values.
- *   Used for column sums ([T * D]) and means ([D]).
+ * scratch: caller-owned temporary buffer of at least (T + 1) * D int64_t
+ *   values. Contents are overwritten; no useful data on return.
  *
  * D is not capped by the substrate. The row unpack buffer is heap-allocated.
  * This is a setup-time function, not a hot-path opcode. */

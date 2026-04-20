@@ -56,7 +56,12 @@ static m4t_mtfp_t* load_images_mtfp(const char* path, int* n, int* rows, int* co
         return NULL;
     }
     int dim = (*rows) * (*cols);
-    size_t total = (size_t)(*n) * dim;
+    if (*rows > 0 && dim / (*rows) != *cols) {
+        fprintf(stderr, "glyph_dataset: %s dimension overflow rows=%d cols=%d\n",
+                path, *rows, *cols);
+        fclose(f); return NULL;
+    }
+    size_t total = (size_t)(*n) * (size_t)dim;
     uint8_t* raw = malloc(total);
     if (!raw) { fclose(f); return NULL; }
     if (fread(raw, 1, total, f) != total) {
@@ -114,6 +119,11 @@ int glyph_dataset_load_mnist(glyph_dataset_t* ds, const char* dir) {
     memset(ds, 0, sizeof(*ds));
 
     char path[1024];
+    if (strlen(dir) > sizeof(path) - 64) {
+        fprintf(stderr, "glyph_dataset: data path too long (max %zu chars)\n",
+                sizeof(path) - 64);
+        return 1;
+    }
 
     int tr_rows = 0, tr_cols = 0;
     snprintf(path, sizeof(path), "%s/train-images-idx3-ubyte", dir);
@@ -285,6 +295,11 @@ int glyph_dataset_load_cifar10(glyph_dataset_t* ds, const char* dir) {
     memset(ds, 0, sizeof(*ds));
     const int dim = 3072;  /* 32 × 32 × 3 */
     char path[1024];
+    if (strlen(dir) > sizeof(path) - 64) {
+        fprintf(stderr, "glyph_dataset: data path too long (max %zu chars)\n",
+                sizeof(path) - 64);
+        return 1;
+    }
 
     snprintf(path, sizeof(path), "%s/train_images.bin", dir);
     ds->x_train = load_float32_images(path, dim, &ds->n_train);

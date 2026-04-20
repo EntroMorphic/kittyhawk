@@ -65,7 +65,8 @@ void m4t_mtfp_block_sub(
 /* ── Vec-native (compositions) ────────────────────────────────────────── */
 
 void m4t_mtfp_vec_zero(m4t_mtfp_t* dst, int n) {
-    if (n <= 0) return;
+    assert(n >= 0);
+    if (n == 0) return;
     memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
 }
 

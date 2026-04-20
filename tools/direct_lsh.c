@@ -32,6 +32,29 @@
 #define KNN_K 5
 #define TRITS_PER_VOTE 4
 
+typedef struct { int32_t score; int label; } topk_entry_t;
+
+static inline void topk_insert(topk_entry_t* tk, int* n, int k,
+                                int32_t score, int label) {
+    if (*n < k) {
+        int pos = *n;
+        while (pos > 0 && tk[pos-1].score > score) { tk[pos] = tk[pos-1]; pos--; }
+        tk[pos].score = score; tk[pos].label = label; (*n)++;
+    } else if (score < tk[k-1].score) {
+        int pos = k - 1;
+        while (pos > 0 && tk[pos-1].score > score) { tk[pos] = tk[pos-1]; pos--; }
+        tk[pos].score = score; tk[pos].label = label;
+    }
+}
+
+static inline int topk_vote(const topk_entry_t* tk, int n, int k) {
+    int cv[N_CLASSES] = {0};
+    for (int i = 0; i < n; i++) cv[tk[i].label] += (k - i);
+    int best = 0;
+    for (int c = 1; c < N_CLASSES; c++) if (cv[c] > cv[best]) best = c;
+    return best;
+}
+
 static const int8_t vote_trits[10][TRITS_PER_VOTE] = {
     {-1,-1,-1,-1}, {-1,-1,-1, 0}, {-1,-1,-1,+1}, {-1,-1, 0,-1},
     {-1,-1, 0, 0}, {-1,-1, 0,+1}, {-1,-1,+1,-1}, {-1,-1,+1, 0},
@@ -332,18 +355,26 @@ int main(int argc, char** argv) {
         for (int b = a + 1; b < N_CLASSES; b++) {
             uint8_t* pw = malloc((size_t)total_dim);
             int n_ab = ig_cc[a] + ig_cc[b];
+            double pa = (double)ig_cc[a] / n_ab;
+            double pb = (double)ig_cc[b] / n_ab;
             double h_ab = 0;
-            { double pa=(double)ig_cc[a]/n_ab, pb=(double)ig_cc[b]/n_ab;
-              if(pa>0) h_ab -= pa*log2(pa); if(pb>0) h_ab -= pb*log2(pb); }
+            if (pa > 0) h_ab -= pa * log2(pa);
+            if (pb > 0) h_ab -= pb * log2(pb);
             double pmx = 0;
             for (int d = 0; d < total_dim; d++) {
                 double hc = 0;
                 for (int v = 0; v < 3; v++) {
-                    int va=IG_HOT(d,v,a), vb=IG_HOT(d,v,b), vt=va+vb;
+                    int va = IG_HOT(d, v, a);
+                    int vb = IG_HOT(d, v, b);
+                    int vt = va + vb;
                     if (!vt) continue;
-                    double pv=(double)vt/n_ab, ha=(double)va/vt, hb=(double)vb/vt, hv=0;
-                    if(ha>0) hv -= ha*log2(ha); if(hb>0) hv -= hb*log2(hb);
-                    hc += pv*hv;
+                    double pv = (double)vt / n_ab;
+                    double ha = (double)va / vt;
+                    double hb = (double)vb / vt;
+                    double hv = 0;
+                    if (ha > 0) hv -= ha * log2(ha);
+                    if (hb > 0) hv -= hb * log2(hb);
+                    hc += pv * hv;
                 }
                 ig_tmp[d] = h_ab - hc;
                 if (ig_tmp[d] < 0) ig_tmp[d] = 0;
@@ -627,36 +658,22 @@ int main(int argc, char** argv) {
 
             /* Score by Hamming distance on FULL signature (1 "table"). */
             int32_t best_d = INT32_MAX; int best_l = -1;
-            typedef struct { int32_t s; int l; } tk_t;
-            tk_t topk[64]; int ntk = 0;
+            topk_entry_t topk[64]; int ntk = 0;
             for (int j = 0; j < st.n_hit; j++) {
                 int idx = st.hit_list[j];
                 int32_t d = m4t_popcount_dist(
                     qs_ptr, train_sigs + (size_t)idx * sig_bytes,
                     full_mask, sig_bytes);
                 if (d < best_d) { best_d = d; best_l = ds.y_train[idx]; }
-                int lbl = ds.y_train[idx];
-                if (ntk < KNN_K) {
-                    int pos = ntk;
-                    while (pos > 0 && topk[pos-1].s > d) { topk[pos]=topk[pos-1]; pos--; }
-                    topk[pos].s = d; topk[pos].l = lbl; ntk++;
-                } else if (d < topk[KNN_K-1].s) {
-                    int pos = KNN_K-1;
-                    while (pos > 0 && topk[pos-1].s > d) { topk[pos]=topk[pos-1]; pos--; }
-                    topk[pos].s = d; topk[pos].l = lbl;
-                }
+                topk_insert(topk, &ntk, KNN_K, d, ds.y_train[idx]);
             }
             if (best_l == y) sum_c[si]++;
-            /* Rank-weighted vote. */
-            int cv[N_CLASSES] = {0};
-            for (int i = 0; i < ntk; i++) cv[topk[i].l] += (KNN_K - i);
-            int kpred = 0;
-            for (int c = 1; c < N_CLASSES; c++) if (cv[c] > cv[kpred]) kpred = c;
+            int kpred = topk_vote(topk, ntk, KNN_K);
             if (kpred == y) knn_c[si]++;
             if (m_sweep[si] == M) final_pred[qi] = kpred;
             /* Majority vote (for comparison with brute-force baseline). */
             int mv[N_CLASSES] = {0};
-            for (int i = 0; i < ntk; i++) mv[topk[i].l]++;
+            for (int i = 0; i < ntk; i++) mv[topk[i].label]++;
             int mpred = 0;
             for (int c = 1; c < N_CLASSES; c++) if (mv[c] > mv[mpred]) mpred = c;
             if (mpred == y) maj_c[si]++;
@@ -713,8 +730,7 @@ int main(int argc, char** argv) {
             if (c2 < 0) c2 = (c1 + 1) % N_CLASSES;
             const uint8_t* pw = pair_ig[c1 * N_CLASSES + c2];
             if (pw && st.n_hit > 0) {
-                typedef struct { int32_t s; int l; } ptk_t;
-                ptk_t ptopk[64]; int pntk = 0;
+                topk_entry_t ptopk[64]; int pntk = 0;
                 for (int j = 0; j < st.n_hit; j++) {
                     int idx = st.hit_list[j];
                     int32_t dig = 0;
@@ -723,21 +739,9 @@ int main(int argc, char** argv) {
                         int8_t b = glyph_read_trit(train_sigs + (size_t)idx * sig_bytes, d);
                         if (a != b) dig += pw[d];
                     }
-                    int lbl = ds.y_train[idx];
-                    if (pntk < KNN_K) {
-                        int pos = pntk;
-                        while (pos > 0 && ptopk[pos-1].s > dig) { ptopk[pos]=ptopk[pos-1]; pos--; }
-                        ptopk[pos].s = dig; ptopk[pos].l = lbl; pntk++;
-                    } else if (dig < ptopk[KNN_K-1].s) {
-                        int pos = KNN_K-1;
-                        while (pos > 0 && ptopk[pos-1].s > dig) { ptopk[pos]=ptopk[pos-1]; pos--; }
-                        ptopk[pos].s = dig; ptopk[pos].l = lbl;
-                    }
+                    topk_insert(ptopk, &pntk, KNN_K, dig, ds.y_train[idx]);
                 }
-                int pcv[N_CLASSES] = {0};
-                for (int i = 0; i < pntk; i++) pcv[ptopk[i].l] += (KNN_K - i);
-                pig_pred = 0;
-                for (int c = 1; c < N_CLASSES; c++) if (pcv[c] > pcv[pig_pred]) pig_pred = c;
+                pig_pred = topk_vote(ptopk, pntk, KNN_K);
             }
         }
         if (pig_pred == y) pair_ig_correct++;
@@ -749,34 +753,21 @@ int main(int argc, char** argv) {
             int fc1 = lsh_pred, fc2 = (gsh_pred >= 0) ? gsh_pred : (fc1+1)%N_CLASSES;
             const uint8_t* fpw = pair_ig[fc1 * N_CLASSES + fc2];
             if (fpw && st.n_hit > 0) {
-                typedef struct { int32_t s; int l; } fptk_t;
-                fptk_t fptopk[64]; int fpntk = 0;
+                topk_entry_t fptopk[64]; int fpntk = 0;
                 for (int j = 0; j < st.n_hit; j++) {
                     int idx = st.hit_list[j];
                     int lbl = ds.y_train[idx];
-                    if (lbl != fc1 && lbl != fc2) continue; /* FILTER */
+                    if (lbl != fc1 && lbl != fc2) continue;
                     int32_t dig = 0;
                     for (int d = 0; d < total_dim; d++) {
                         int8_t a = glyph_read_trit(qs_ptr, d);
                         int8_t b = glyph_read_trit(train_sigs + (size_t)idx * sig_bytes, d);
                         if (a != b) dig += fpw[d];
                     }
-                    if (fpntk < KNN_K) {
-                        int pos = fpntk;
-                        while (pos > 0 && fptopk[pos-1].s > dig) { fptopk[pos]=fptopk[pos-1]; pos--; }
-                        fptopk[pos].s = dig; fptopk[pos].l = lbl; fpntk++;
-                    } else if (dig < fptopk[KNN_K-1].s) {
-                        int pos = KNN_K-1;
-                        while (pos > 0 && fptopk[pos-1].s > dig) { fptopk[pos]=fptopk[pos-1]; pos--; }
-                        fptopk[pos].s = dig; fptopk[pos].l = lbl;
-                    }
+                    topk_insert(fptopk, &fpntk, KNN_K, dig, lbl);
                 }
-                if (fpntk > 0) {
-                    int fpcv[N_CLASSES] = {0};
-                    for (int i = 0; i < fpntk; i++) fpcv[fptopk[i].l] += (KNN_K - i);
-                    fpig_pred = 0;
-                    for (int c = 1; c < N_CLASSES; c++) if (fpcv[c] > fpcv[fpig_pred]) fpig_pred = c;
-                }
+                if (fpntk > 0)
+                    fpig_pred = topk_vote(fptopk, fpntk, KNN_K);
             }
         }
         if (fpig_pred == y) filtered_ig_correct++;
@@ -849,6 +840,10 @@ int main(int argc, char** argv) {
                    c, pc_t[c], pc_c[c], 100.0 * pc_c[c] / pc_t[c]);
 
     /* Cleanup. */
+    for (int a = 0; a < N_CLASSES; a++)
+        for (int b = a + 1; b < N_CLASSES; b++)
+            free(pair_ig[a * N_CLASSES + b]);
+    free(pair_ig);
     free(full_mask); free(st.votes); free(st.hit_list);
     free(final_pred); free(vote_labels);
     free(q_gsh); free(gsh_mask); free(gsh_train);

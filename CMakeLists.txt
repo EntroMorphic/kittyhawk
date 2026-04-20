@@ -53,54 +53,53 @@ target_include_directories(glyph PUBLIC
 )
 target_link_libraries(glyph PUBLIC m4t)
 
-# Consumers built on the substrate. Currently one: the Trit Lattice LSH
-# tool, the provisional primary consumer per docs/THESIS.md.
+# Consumer tools built on libglyph (which transitively pulls libm4t).
 option(GLYPH_BUILD_TOOLS "Build glyph consumer tools" ON)
 if(GLYPH_BUILD_TOOLS)
     add_executable(mnist_trit_lattice tools/mnist_trit_lattice.c)
-    target_link_libraries(mnist_trit_lattice PRIVATE m4t)
+    target_link_libraries(mnist_trit_lattice PRIVATE glyph)
 
     add_executable(mnist_routed_lattice tools/mnist_routed_lattice.c)
-    target_link_libraries(mnist_routed_lattice PRIVATE m4t)
+    target_link_libraries(mnist_routed_lattice PRIVATE glyph)
 
     add_executable(mnist_routed_knn tools/mnist_routed_knn.c)
-    target_link_libraries(mnist_routed_knn PRIVATE m4t)
+    target_link_libraries(mnist_routed_knn PRIVATE glyph)
 
     add_executable(mnist_routed_trace tools/mnist_routed_trace.c)
-    target_link_libraries(mnist_routed_trace PRIVATE m4t)
+    target_link_libraries(mnist_routed_trace PRIVATE glyph)
 
     add_executable(mnist_routed_weighted tools/mnist_routed_weighted.c)
-    target_link_libraries(mnist_routed_weighted PRIVATE m4t)
+    target_link_libraries(mnist_routed_weighted PRIVATE glyph)
 
     add_executable(mnist_routed_amplified tools/mnist_routed_amplified.c)
-    target_link_libraries(mnist_routed_amplified PRIVATE m4t)
+    target_link_libraries(mnist_routed_amplified PRIVATE glyph)
 
     add_executable(mnist_full_sweep tools/mnist_full_sweep.c)
-    target_link_libraries(mnist_full_sweep PRIVATE m4t)
+    target_link_libraries(mnist_full_sweep PRIVATE glyph)
 
     add_executable(mnist_probe_nproj16 tools/mnist_probe_nproj16.c)
-    target_link_libraries(mnist_probe_nproj16 PRIVATE m4t)
+    target_link_libraries(mnist_probe_nproj16 PRIVATE glyph)
 
     add_executable(mnist_cascade_nproj16 tools/mnist_cascade_nproj16.c)
-    target_link_libraries(mnist_cascade_nproj16 PRIVATE m4t)
+    target_link_libraries(mnist_cascade_nproj16 PRIVATE glyph)
 
     add_executable(mnist_cascade_atomics tools/mnist_cascade_atomics.c)
-    target_link_libraries(mnist_cascade_atomics PRIVATE m4t)
+    target_link_libraries(mnist_cascade_atomics PRIVATE glyph)
 
     add_executable(mnist_cascade_sweep tools/mnist_cascade_sweep.c)
-    target_link_libraries(mnist_cascade_sweep PRIVATE m4t)
+    target_link_libraries(mnist_cascade_sweep PRIVATE glyph)
 
     add_executable(mnist_resolver_sweep tools/mnist_resolver_sweep.c)
-    target_link_libraries(mnist_resolver_sweep PRIVATE m4t m)
+    target_link_libraries(mnist_resolver_sweep PRIVATE glyph m)
 
     add_executable(mnist_local_vs_global tools/mnist_local_vs_global.c)
-    target_link_libraries(mnist_local_vs_global PRIVATE m4t)
+    target_link_libraries(mnist_local_vs_global PRIVATE glyph)
 
     add_executable(mnist_lvg_atomics tools/mnist_lvg_atomics.c)
-    target_link_libraries(mnist_lvg_atomics PRIVATE m4t)
+    target_link_libraries(mnist_lvg_atomics PRIVATE glyph)
 
     add_executable(mnist_local_v2 tools/mnist_local_v2.c)
-    target_link_libraries(mnist_local_v2 PRIVATE m4t)
+    target_link_libraries(mnist_local_v2 PRIVATE glyph)
 
     add_executable(mnist_routed_bucket tools/mnist_routed_bucket.c)
     target_link_libraries(mnist_routed_bucket PRIVATE glyph)

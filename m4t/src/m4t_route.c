@@ -9,6 +9,7 @@
 #include "m4t_mtfp.h"
 #include "m4t_internal.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -152,7 +153,10 @@ void m4t_route_signature_update(
     memset(col_sums, 0, (size_t)T * D * sizeof(int64_t));
 
     m4t_trit_t* row_buf = (m4t_trit_t*)malloc((size_t)D * sizeof(m4t_trit_t));
-    if (!row_buf) { assert(row_buf && "m4t_route_signature_update: row_buf malloc failed"); return; }
+    if (!row_buf) {
+        fprintf(stderr, "m4t_route_signature_update: malloc failed (D=%d)\n", D);
+        return;
+    }
 
     for (int t = 0; t < T; t++) {
         int64_t* cs = col_sums + (size_t)t * D;

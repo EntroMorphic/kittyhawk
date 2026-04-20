@@ -89,6 +89,7 @@ void m4t_unpack_trits_rowmajor(
 int32_t m4t_popcount_dist(
     const uint8_t* a, const uint8_t* b, const uint8_t* mask, int packed_bytes)
 {
+    assert(a && b && mask);
     /* Ternary Hamming distance; see guard comment in m4t_trit_pack.h.
      * Correctness depends on the 2-bit trit codes (+1=0b01, 0=0b00,
      * -1=0b10). Per-position cost is 0/1/2 from XOR popcount on each

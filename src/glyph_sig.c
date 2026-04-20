@@ -60,7 +60,7 @@ int glyph_sig_builder_init(
     glyph_rng_t rng;
     glyph_rng_seed(&rng, s0, s1, s2, s3);
 
-    proj_w = malloc((size_t)n_proj * input_dim);
+    proj_w = malloc((size_t)n_proj * (size_t)input_dim);
     if (!proj_w) goto cleanup;
     for (int i = 0; i < n_proj * input_dim; i++) {
         uint32_t r = glyph_rng_next(&rng) % 3;
@@ -68,14 +68,14 @@ int glyph_sig_builder_init(
     }
 
     int proj_Dp = M4T_TRIT_PACKED_BYTES(input_dim);
-    sb->proj_packed = malloc((size_t)n_proj * proj_Dp);
+    sb->proj_packed = malloc((size_t)n_proj * (size_t)proj_Dp);
     if (!sb->proj_packed) goto cleanup;
     m4t_pack_trits_rowmajor(sb->proj_packed, proj_w, n_proj, input_dim);
 
     /* Calibrate tau from the |projection| distribution of the calibration
      * subset. Uses the same percentile-at-density rule every cascade tool
      * used before this refactor. */
-    calib_proj = malloc((size_t)n_calib * n_proj * sizeof(m4t_mtfp_t));
+    calib_proj = malloc((size_t)n_calib * (size_t)n_proj * sizeof(m4t_mtfp_t));
     if (!calib_proj) goto cleanup;
     for (int i = 0; i < n_calib; i++) {
         m4t_mtfp_ternary_matmul_bt(
