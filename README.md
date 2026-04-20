@@ -28,7 +28,7 @@ Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation c
 ```
 m4t/                  — the substrate (libm4t.a). Routing-first ternary kernels.
   src/                  numeric core, routing primitives, ternary matmul, trit ops/pack/reducers
-  tests/                6 test binaries, hand-derived integer golden values
+  tests/                7 test binaries, hand-derived integer golden values
   tools/                dev-only tools (trit_golden, lut_gen) — opt-in M4T_BUILD_TOOLS=ON
   docs/                 substrate specification
 src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infrastructure.
@@ -135,7 +135,7 @@ Default run reproduces the Axis 5 measurement: **82.58% at 9.9 μs/query** (MAX_
 ctest --test-dir build
 ```
 
-All 11 test binaries should pass: 5 `m4t` substrate tests, `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 4 integration tests (`m4t_ternary_matmul`, `m4t_trit_pack`, `routed_tool_smoke`, `multi_smoke`).
+All 11 test binaries should pass: 7 `m4t` substrate tests (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`, `m4t_ternary_matmul`, `m4t_trit_pack`), `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 2 integration tests (`routed_tool_smoke`, `multi_smoke`).
 
 ## Documentation map
 

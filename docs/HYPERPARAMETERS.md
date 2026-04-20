@@ -73,10 +73,10 @@ Produces (on deskewed MNIST, 10K test queries, single seed):
 
 ```bash
 # CIFAR-10 (selective scoring: 46.63%)
-./build/direct_lsh --data <cifar10_dir> --no_deskew --density 0.395 --m_max 64 --gradients
+./build/direct_lsh --data <cifar10_dir> --no_deskew --normalize --density 0.395 --m_max 64 --gradients
 
 # Fashion-MNIST (87.95%)
-./build/direct_lsh --data <fashion_dir> --no_deskew --density 0.395 --m_max 64 --gradients
+./build/direct_lsh --data <fashion_dir> --no_deskew --normalize --density 0.395 --m_max 64 --gradients
 
 # MNIST (97.23%)
 ./build/direct_lsh --data <mnist_dir> --density 0.10 --m_max 64
