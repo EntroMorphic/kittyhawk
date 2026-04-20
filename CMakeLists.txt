@@ -149,6 +149,9 @@ if(GLYPH_BUILD_TOOLS)
 
     add_executable(inverted_ig tools/inverted_ig.c)
     target_link_libraries(inverted_ig PRIVATE glyph)
+
+    add_executable(structured_gsh tools/structured_gsh.c)
+    target_link_libraries(structured_gsh PRIVATE glyph)
 endif()
 
 # Glyph tests compile against the glyph headers and can smoke-test routed
