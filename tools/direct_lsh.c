@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
     glyph_dataset_t ds;
     if (glyph_dataset_load_auto(&ds, cfg.data_dir) != 0) return 1;
     if (!cfg.no_deskew) glyph_dataset_deskew(&ds);
-    glyph_dataset_normalize(&ds);
+    if (cfg.normalize) glyph_dataset_normalize(&ds);
 
     int n_ch = (ds.input_dim > 784) ? 3 : 1;
     int img_w = ds.img_w > 0 ? ds.img_w : (n_ch == 3 ? 32 : 28);

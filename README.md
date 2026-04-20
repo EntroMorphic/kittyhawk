@@ -21,7 +21,7 @@ Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation c
   - `mnist_routed_bucket_multi` — multi-table bucket-indexed LSH with cross-table union-merge and summed-distance resolver (Axis 6); **breaks 97% at N_PROJ=16**
 - **Architecture discipline:** every active routed consumer is zero-dense-scan at the application level; cascade tools are retained as research scaffolding.
 - **Red-team:** six rounds plus a full libglyph refactor red-team complete. See [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) and recent `CHANGELOG.md` entries.
-- **Tests:** 12/12 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
+- **Tests:** 11/11 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
 
 ## Architecture
 
@@ -32,8 +32,7 @@ m4t/                  — the substrate (libm4t.a). Routing-first ternary kernel
   tools/                dev-only tools (trit_golden, lut_gen) — opt-in M4T_BUILD_TOOLS=ON
   docs/                 substrate specification
 src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infrastructure.
-  glyph_dataset.{h,c}   MNIST IDX loader + integer-moment deskew
-  glyph_dataset_normalize.{h,c}  per-channel mean/std normalization (CIFAR-10, Fashion-MNIST)
+  glyph_dataset.{h,c}   MNIST IDX loader + integer-moment deskew + per-image normalization
   glyph_rng.{h,c}       xoshiro128+ RNG
   glyph_sig.{h,c}       random ternary projection + density-calibrated τ + signature encoder
   glyph_bucket.{h,c}    sorted bucket index keyed on packed-trit signatures
