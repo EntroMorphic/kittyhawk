@@ -33,7 +33,11 @@
 #define N_CLASSES 10
 #define KNN_K 5
 #define KEY_TRITS 16
-#define GSH_DIM (N_CLASSES * 2)  /* 10 vote counts + 10 avg distances = 20 */
+/* Multi-scale class-vote profile: for each class, record vote counts
+ * at MULTIPLE K thresholds (top-5, top-20, top-64). Plus avg distance.
+ * Total: N_CLASSES × 4 = 40 trits. Each has specific meaning. */
+#define N_SCALES 4
+#define GSH_DIM (N_CLASSES * N_SCALES)  /* 10 classes × 4 features = 40 */
 
 typedef struct {
     uint16_t* votes;
@@ -101,57 +105,56 @@ static void compute_gradients(const m4t_mtfp_t* img, int W, int H, int n_ch,
     }
 }
 
-/* Compute the class-vote profile from the union's top-K nearest.
- * out[0..9] = vote count per class (scaled to MTFP)
- * out[10..19] = avg distance per class (relative to median, scaled)
- * Each dimension has a SPECIFIC MEANING. No random weights. */
+/* Multi-scale class-vote profile. For each class c:
+ *   out[c*4+0] = votes in top-5  (close neighborhood density)
+ *   out[c*4+1] = votes in top-20 (medium neighborhood)
+ *   out[c*4+2] = votes in top-K  (broad neighborhood)
+ *   out[c*4+3] = avg proximity   (distance-weighted)
+ * 40 dims, each with specific meaning. No random weights. */
 static void class_vote_profile(const probe_state_t* st, int K_top,
                                int sig_bytes, const uint8_t* train_sigs,
                                const uint8_t* q_sig, const uint8_t* mask,
                                const int* y_train, int exclude_idx,
                                m4t_mtfp_t* out) {
     typedef struct { int32_t d; int label; } dl_t;
-    dl_t topk[256];
+    dl_t* topk = malloc((size_t)K_top * sizeof(dl_t));
     int ntk = 0;
-    int klim = (K_top < 256) ? K_top : 256;
-
     for (int j = 0; j < st->n_hit; j++) {
         int idx = st->hit_list[j];
         if (idx == exclude_idx) continue;
-        int32_t d = m4t_popcount_dist(q_sig, train_sigs + (size_t)idx * sig_bytes,
-                                       mask, sig_bytes);
+        int32_t d = m4t_popcount_dist(q_sig, train_sigs + (size_t)idx * sig_bytes, mask, sig_bytes);
         int lbl = y_train[idx];
-        if (ntk < klim) {
+        if (ntk < K_top) {
             int pos = ntk;
             while (pos > 0 && topk[pos-1].d > d) { topk[pos]=topk[pos-1]; pos--; }
             topk[pos].d = d; topk[pos].label = lbl; ntk++;
-        } else if (d < topk[klim-1].d) {
-            int pos = klim - 1;
+        } else if (d < topk[K_top-1].d) {
+            int pos = K_top - 1;
             while (pos > 0 && topk[pos-1].d > d) { topk[pos]=topk[pos-1]; pos--; }
             topk[pos].d = d; topk[pos].label = lbl;
         }
     }
-
-    int votes[N_CLASSES] = {0};
+    int votes5[N_CLASSES]={0}, votes20[N_CLASSES]={0}, votesK[N_CLASSES]={0};
     int64_t dist_sum[N_CLASSES] = {0};
-    int median_d = (ntk > 0) ? topk[ntk / 2].d : 1;
-    if (median_d == 0) median_d = 1;
-
     for (int i = 0; i < ntk; i++) {
         int c = topk[i].label;
-        if (c >= 0 && c < N_CLASSES) {
-            votes[c]++;
-            dist_sum[c] += topk[i].d;
-        }
+        if (c < 0 || c >= N_CLASSES) continue;
+        if (i < 5)  votes5[c]++;
+        if (i < 20) votes20[c]++;
+        votesK[c]++;
+        dist_sum[c] += topk[i].d;
     }
-
+    int median_d = (ntk > 0) ? topk[ntk/2].d : 1;
+    if (median_d == 0) median_d = 1;
     for (int c = 0; c < N_CLASSES; c++) {
-        out[c] = (m4t_mtfp_t)((int64_t)votes[c] * M4T_MTFP_SCALE / (klim > 0 ? klim : 1));
-        out[N_CLASSES + c] = votes[c] > 0
-            ? (m4t_mtfp_t)(((int64_t)(median_d * votes[c] - dist_sum[c]) * M4T_MTFP_SCALE)
-                           / (median_d * votes[c]))
+        out[c*N_SCALES+0] = (m4t_mtfp_t)((int64_t)votes5[c] * M4T_MTFP_SCALE / 5);
+        out[c*N_SCALES+1] = (m4t_mtfp_t)((int64_t)votes20[c] * M4T_MTFP_SCALE / 20);
+        out[c*N_SCALES+2] = ntk > 0 ? (m4t_mtfp_t)((int64_t)votesK[c] * M4T_MTFP_SCALE / ntk) : 0;
+        out[c*N_SCALES+3] = votesK[c] > 0
+            ? (m4t_mtfp_t)(((int64_t)(median_d*votesK[c] - dist_sum[c]) * M4T_MTFP_SCALE) / (median_d*votesK[c]))
             : 0;
     }
+    free(topk);
 }
 
 int main(int argc, char** argv) {
@@ -183,7 +186,7 @@ int main(int argc, char** argv) {
     int gsh_sb = M4T_TRIT_PACKED_BYTES(GSH_DIM);
 
     const int M = cfg.m_max;
-    const int K_PROFILE = 64;
+    const int K_PROFILE = 200;  /* cover most of the union */
 
     printf("structured_gsh: class-vote-profile GSH\n");
     printf("  data=%s  gradients=%s  density=%.3f  M=%d\n",
@@ -358,7 +361,7 @@ int main(int argc, char** argv) {
                            ds.y_train, i, profile);
         memcpy(gsh_calib + (size_t)i*GSH_DIM, profile, sizeof(profile));
     }
-    int64_t gsh_tau = glyph_sig_quantize_tau(gsh_calib, n_calib, GSH_DIM, 0.33);
+    int64_t gsh_tau = glyph_sig_quantize_tau(gsh_calib, n_calib, GSH_DIM, 0.50);
     free(gsh_calib);
     printf("  GSH tau=%lld (%.3f×S)\n", (long long)gsh_tau, (double)gsh_tau/M4T_MTFP_SCALE);
 
@@ -440,12 +443,27 @@ int main(int argc, char** argv) {
                     cfg.max_radius, cfg.min_cands, &gst, bscratch);
 
         int gsh_pred = -1;
-        { int32_t bd = INT32_MAX;
-          for (int j = 0; j < gst.n_hit; j++) {
-              int idx = gst.hit_list[j];
-              int32_t d = m4t_popcount_dist(q_gsh, gsh_train+(size_t)idx*gsh_sb, gsh_mask, gsh_sb);
-              if (d < bd) { bd = d; gsh_pred = ds.y_train[idx]; }
-          }
+        {
+            typedef struct { int32_t s; int l; } gtk_t;
+            gtk_t gtopk[64]; int gntk = 0;
+            for (int j = 0; j < gst.n_hit; j++) {
+                int idx = gst.hit_list[j];
+                int32_t d = m4t_popcount_dist(q_gsh, gsh_train+(size_t)idx*gsh_sb, gsh_mask, gsh_sb);
+                int lbl = ds.y_train[idx];
+                if (gntk < KNN_K) {
+                    int pos = gntk;
+                    while (pos > 0 && gtopk[pos-1].s > d) { gtopk[pos]=gtopk[pos-1]; pos--; }
+                    gtopk[pos].s = d; gtopk[pos].l = lbl; gntk++;
+                } else if (d < gtopk[KNN_K-1].s) {
+                    int pos = KNN_K - 1;
+                    while (pos > 0 && gtopk[pos-1].s > d) { gtopk[pos]=gtopk[pos-1]; pos--; }
+                    gtopk[pos].s = d; gtopk[pos].l = lbl;
+                }
+            }
+            int gcv[N_CLASSES] = {0};
+            for (int gi = 0; gi < gntk; gi++) gcv[gtopk[gi].l] += (KNN_K - gi);
+            gsh_pred = 0;
+            for (int gc = 1; gc < N_CLASSES; gc++) if (gcv[gc] > gcv[gsh_pred]) gsh_pred = gc;
         }
         if (gsh_pred == y) gsh_c++;
 
