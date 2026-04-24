@@ -66,7 +66,18 @@ typedef struct {
     uint32_t  seed[4];      /* seed used at init, for reproducibility      */
 } glyph_sig_builder_t;
 
-/* Initialize a signature builder. Generates a random ternary projection
+/* DEPRECATED — legacy random-projection path. Retained only for
+ * Axis 5 / Axis 6 benchmark reproducibility (see docs/LIBGLYPH.md).
+ *
+ * Violates the NO RANDOM PROJECTIONS / NO RANDOM WEIGHTS discipline
+ * for image classification: each output trit is a random linear
+ * combination of ~D/3 input dimensions, destroying spatial identity.
+ * Every production consumer must use glyph_sig_quantize* (direct
+ * ternary quantization) instead. The 26 legacy tools that call
+ * glyph_sig_builder_init are gated behind CMake's GLYPH_BUILD_LEGACY_RP
+ * (default OFF); default builds do not link them.
+ *
+ * Initialize a signature builder. Generates a random ternary projection
  * matrix from the given seed, then calibrates tau on the provided
  * calibration set (typically a subset of the training data).
  *

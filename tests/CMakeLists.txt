@@ -9,7 +9,11 @@ add_executable(test_glyph_libglyph test_glyph_libglyph.c)
 target_link_libraries(test_glyph_libglyph PRIVATE glyph)
 add_test(NAME glyph_libglyph COMMAND test_glyph_libglyph)
 
-if(GLYPH_BUILD_TOOLS)
+if(GLYPH_BUILD_TOOLS AND GLYPH_BUILD_LEGACY_RP)
+    # These two smoke tests exercise legacy random-projection consumers
+    # (mnist_trit_lattice, mnist_routed_bucket_multi). They gate on the
+    # same flag as their target tools — default OFF. When a direct-
+    # quantization smoke test lands, it goes here without the flag.
     add_executable(test_routed_tool_smoke test_routed_tool_smoke.c)
     add_test(NAME routed_tool_smoke COMMAND $<TARGET_FILE:test_routed_tool_smoke> $<TARGET_FILE:mnist_trit_lattice>)
     add_dependencies(test_routed_tool_smoke mnist_trit_lattice)

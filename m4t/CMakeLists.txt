@@ -88,21 +88,22 @@ if(M4T_BUILD_TESTS)
     add_test(NAME m4t_trit_pack COMMAND test_m4t_trit_pack)
 endif()
 
-option(M4T_BUILD_TOOLS "Build M4T dev tools (trit_golden, lut_gen)" OFF)
+option(M4T_BUILD_TOOLS "Build M4T dev tools (trit_golden, profile)" OFF)
 if(M4T_BUILD_TOOLS)
     # Golden-value enumerator for trit op truth tables. Pure substrate,
     # no float. Useful when regenerating LUT_MUL / LUT_SAT_ADD / etc.
     add_executable(m4t_trit_golden tools/m4t_trit_golden.c)
     target_link_libraries(m4t_trit_golden PRIVATE m4t)
 
-    # Offline LUT generator for (future) ternary-float nonlinearities.
-    # This is the ONLY sanctioned place in the ecosystem where binary
-    # float (libm) is used — at build time, not runtime. Currently has
-    # no live consumer inside libm4t; archived nonlinearity consumers
-    # would link its output back in when a consumer demands them.
-    add_executable(m4t_lut_gen tools/m4t_lut_gen.c)
-    target_link_libraries(m4t_lut_gen PRIVATE m)
-
+    # Microbenchmark harness for the hot-path primitives (SDOT, TBL, VCNT,
+    # masked-VCNT, ternary matmul). Uses double only for ns / Gops display
+    # math — sanctioned under §12 as a non-runtime path. Never linked into
+    # libm4t.
     add_executable(m4t_profile tools/m4t_profile.c)
     target_link_libraries(m4t_profile PRIVATE m4t)
 endif()
+
+# Note: m4t_lut_gen.c (offline GELU/exp LUT generator) was archived under
+# archive/m4t/tools/ alongside its consumers (archive/m4t/src/m4t_mtfp_nonlinear.c
+# and archive/m4t/src/m4t_mtfp_tables.c). It returns when a routing consumer
+# demands smooth nonlinearities. See archive/README.md.

@@ -15,6 +15,7 @@ What lives here now:
 | `m4t/src/m4t_mtfp.{c,h}` | MTFP19 numeric core | Dense matmul, bias, fan-in, LayerNorm bundled with element-wise arithmetic. Rewritten cleanly in the new substrate. |
 | `m4t/src/m4t_mtfp_w.{c,h}` | MTFP39 wide-cell arithmetic | Dense matmul path; no routing consumer. |
 | `m4t/src/m4t_mtfp_nonlinear.c` + `m4t_mtfp_tables.c` | GELU / softmax / argmax LUTs | Dense-transformer consumers. 118K-line LUT table. Returns if a routing consumer needs smooth nonlinearities. |
+| `m4t/tools/m4t_lut_gen.c` | Offline LUT generator | Sanctioned build-time binary-float. Archived 2026-04-20 because its live consumers (`m4t_mtfp_nonlinear.c` + `m4t_mtfp_tables.c`) were already archived — keeping the generator live made it an orphan float site. Returns with its consumers when a routing architecture needs smooth nonlinearities; rebuild with `cc -o m4t_lut_gen archive/m4t/tools/m4t_lut_gen.c -lm`. |
 | `m4t/src/m4t_ops.{c,h}` | Function-pointer dispatch table | Mixed dense and routing opcodes; needs pruning before it can return. |
 | `m4t/tests/test_m4t_smoke.c` | Omnibus substrate smoke test | Exercised the dense path; replaced by focused per-primitive tests. |
 | `m4t/tests/test_m4t_mtfp_w.c` | MTFP39 tests | Moved with MTFP39 source. |
@@ -38,7 +39,7 @@ An item leaves archive only under a named consumer demand. Not "we might need it
 
 - Any path that treats MTFP as fixed-point with a shared global scale.
 - Any primitive whose natural shape is dense matmul over ternary data.
-- Any IEEE-754 float at runtime. (Build-time LUT generation is sanctioned in one named place: `m4t/tools/m4t_lut_gen.c`.)
+- Any IEEE-754 float at runtime. (Sanctioned non-runtime float sites are enumerated in `m4t/docs/M4T_SUBSTRATE.md` §12: archived build-time LUT generator, microbenchmark display math, one-shot dataset ingestion.)
 
 ## Further reading
 

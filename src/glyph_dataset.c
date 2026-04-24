@@ -213,6 +213,13 @@ static void deskew_all(m4t_mtfp_t* images, int n, int img_w, int img_h, int inpu
  * ----------------------------------------------------------------
  * Reads raw float32/int32 dumps exported from the Python pipeline.
  * Float→MTFP conversion happens once at load time.
+ *
+ * Policy (M4T_SUBSTRATE.md §12): binary float is sanctioned here ONLY
+ * because this is a one-shot ingestion path — called once at consumer
+ * startup, converts to MTFP mantissas, and the float buffer is freed
+ * before any query runs. New loaders MUST preserve this shape; any
+ * loader that touches float per-query or per-batch violates the
+ * substrate contract.
  * ---------------------------------------------------------------- */
 
 static long file_size(const char* path) {

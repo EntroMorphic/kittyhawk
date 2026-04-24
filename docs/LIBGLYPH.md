@@ -10,7 +10,7 @@ companion: m4t/docs/M4T_SUBSTRATE.md · docs/FINDINGS.md · docs/HYPERPARAMETERS
 
 Before this library existed, every tool in `tools/` embedded its own MNIST loader, RNG, deskew, random-projection build, density calibration, and bucket index. The duplication was fine for research scaffolding but bad for production: changing a hyperparameter meant editing source in multiple places, and architectural invariants drifted between tools. The Axis 5 / Axis 6 refactor consolidated everything into `libglyph` and rewrote the production consumers as thin CLI wrappers.
 
-**Design shape:** libglyph is a static library (`libglyph.a`) with a flat `src/glyph_*.{h,c}` layout. Every public function has a `glyph_` prefix. The library is ternary-routed end-to-end — no float, no dense scans at the application level, no hidden pixel-space fallbacks.
+**Design shape:** libglyph is a static library (`libglyph.a`) with a flat `src/glyph_*.{h,c}` layout. Every public function has a `glyph_` prefix. The library is ternary-routed end-to-end: no float in any hot-path kernel, no dense scans at the application level, no hidden pixel-space fallbacks. Binary float is confined to two well-bounded sites: dataset ingestion (`glyph_dataset.c`, one-shot at startup for float32 dumps like CIFAR-10) and the density-percentile `double` used by `tau_for_density` during tau calibration — neither participates in per-query work.
 
 ---
 
@@ -18,9 +18,18 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  tools/direct_lsh.c                  (production best)  │
-│  tools/mnist_routed_bucket_multi.c   (Axis 6 consumer)  │
-│  tools/mnist_routed_bucket.c         (Axis 5 consumer)  │
+│  CURRENT CONSUMERS (default build)                       │
+│  tools/direct_lsh.c              (production best)      │
+│  tools/sstt_precog.c             (SSTT-style re-rank)   │
+│  tools/structured_lsh.c          (structured sig LSH)   │
+│  tools/structured_gsh.c          (structured GSH)       │
+│  tools/ig_scored.c               (IG-weighted scoring)  │
+│  tools/inverted_ig.c             (IG inverted index)    │
+│  tools/block_distance.c          (distance analysis)    │
+│                                                         │
+│  LEGACY RANDOM-PROJECTION CONSUMERS (opt-in)            │
+│  Gated behind -DGLYPH_BUILD_LEGACY_RP=ON. Retained for   │
+│  Axis 5/6 benchmark reproducibility only. See below.    │
 └─────────────────────────────────────────────────────────┘
                         │
                         ▼
@@ -29,7 +38,8 @@ Before this library existed, every tool in `tools/` embedded its own MNIST loade
 │  ─────────────────────────────────────────────────      │
 │  glyph_dataset     dataset loader + deskew + normalize   │
 │  glyph_rng         xoshiro128+ RNG                      │
-│  glyph_sig         random ternary proj + tau calib      │
+│  glyph_sig         direct quantize (current) +          │
+│                    random-projection builder (legacy)   │
 │  glyph_bucket      sorted bucket index + lower_bound    │
 │  glyph_multiprobe  ternary Hamming neighbor enum        │
 │  glyph_probe       shared multi-probe candidate collect  │
@@ -426,6 +436,31 @@ Run with `ctest --test-dir build`; the test is registered as `glyph_libglyph`.
 - **Class cardinality:** capped at 256. Covers every current benchmark; larger caps or API changes required for ImageNet-scale class cardinalities.
 - **Config struct:** single flat `glyph_config_t` shared across all tools. Tool-specific flags (`--m_max`, `--single_m` are multi-table-only) are silently ignored by tools that don't use them. A per-tool config split is a future polish.
 - **Resolver scoring:** seven variants (VOTE, SUM, SUM-NEON4, PTM, KNN, voteweighted, radiusaware) with runtime-selected dispatch via `--resolver_sum`. Two research variants (voteweighted, radiusaware) are falsified negative results retained as infrastructure. Richer resolvers (per-table normalization, calibrated distance) would require API additions.
+
+## Legacy random-projection consumers (opt-in)
+
+The `glyph_sig_builder_*` API and its 26 tool consumers pre-date the direct-quantization architecture. They generate a random ternary projection matrix at startup, calibrate τ on a subset of training, and score queries in projection space. This violates the NO RANDOM PROJECTIONS / NO RANDOM WEIGHTS discipline for image classification (each output trit is a random mixture of ~D/3 input dimensions — no spatial identity; each projection weight is random — no assigned meaning).
+
+They are retained for one reason only: benchmark reproducibility. The Axis 5 (signature-as-address, 82.58%) and Axis 6 (multi-table, M=32 SUM at 97.24% on deskewed MNIST) results are cited in `docs/FINDINGS.md` and `docs/THESIS.md`; the tools that produced them must remain buildable so those numbers are re-runnable.
+
+Default builds do NOT include these tools. Opt in only when reproducing a historical measurement:
+
+```bash
+cmake -S . -B build-legacy -DGLYPH_BUILD_LEGACY_RP=ON
+cmake --build build-legacy -j
+```
+
+The 26 legacy tools, by grouping:
+
+| Group | Tools |
+|---|---|
+| Axis 5 / Axis 6 bucket | `mnist_routed_bucket`, `mnist_routed_bucket_multi` |
+| Cascade (dense outer / routed kernels) | `mnist_cascade_atomics`, `mnist_cascade_nproj16`, `mnist_cascade_sweep`, `mnist_full_sweep`, `mnist_resolver_sweep` |
+| Routed k-NN scaffolding | `mnist_routed_knn`, `mnist_routed_lattice`, `mnist_routed_trace`, `mnist_routed_weighted`, `mnist_routed_amplified`, `mnist_trit_lattice` |
+| Atomic probes | `mnist_probe_nproj16`, `mnist_local_v2`, `mnist_local_vs_global`, `mnist_lvg_atomics`, `fashion_atomics`, `cifar_seed_overlap` |
+| Architecture probes | `dynamic_nproj`, `subsetted_multi`, `bruteforce_nproj`, `layered_lsh`, `specialist_rerank`, `centroid_routed`, `conv_lsh` |
+
+Every tool above calls `glyph_sig_builder_init` directly or hand-rolls a `rng_next() % 3` projection matrix. The library-level deprecation comment lives on `glyph_sig_builder_init` in `src/glyph_sig.h`. No new tool should be written against this API.
 
 ## Related documentation
 

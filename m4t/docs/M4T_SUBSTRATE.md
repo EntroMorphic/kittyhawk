@@ -60,7 +60,7 @@ Secondary anchors (in priority order):
 
 Anchors explicitly NOT used:
 - **SME / ZA tiles** — dense-matmul-shaped, hundreds of lanes. Out of scope; M4T is routing-first.
-- **IEEE-754 FP units** — binary float. Banned except in build-time LUT generation (`m4t_lut_gen.c`).
+- **IEEE-754 FP units** — binary float. Banned in runtime kernels. Permitted only at compile-time LUT generation (`m4t_lut_gen.c`), in microbenchmark display math (`m4t_profile.c`), and at consumer startup dataset ingestion. See §12.
 
 ---
 
@@ -277,7 +277,7 @@ Explicitly out of scope. Consumer-layer concerns.
 - **GELU, softmax, argmax.** Dense-transformer nonlinearities. Archived with their LUTs; may return as routing-consumer primitives if needed.
 - **Training.** M4T is inference-substrate-only. Training artifacts live in the consumer.
 - **Threading.** Single-threaded at the opcode level. Parallelism is a consumer concern (no libdispatch, no pthreads).
-- **Binary floating-point.** Banned at runtime. Permitted only in build-time LUT generation (`m4t_lut_gen.c`).
+- **Binary floating-point.** Banned in every runtime kernel of `libm4t` and in every per-query / per-batch path of `libglyph`. Permitted in four bounded sites outside the runtime hot path: (1) build-time LUT generation (`archive/m4t/tools/m4t_lut_gen.c` — archived with its consumers, returns when a routing consumer demands smooth nonlinearities); (2) microbenchmark timing arithmetic (`m4t/tools/m4t_profile.c`, display-only ns/Gops conversions); (3) one-shot dataset ingestion at consumer startup (`src/glyph_dataset.c` float32 loaders for CIFAR-10-style dumps, converted to MTFP mantissas once and never touched again); (4) one-shot pair-IG LUT build in `tools/direct_lsh.c::build_ig_log_table` (`T[i] = round(i × log2(i) × SCALE)`, built once per consumer startup; per-query pair-IG re-rank is then pure integer arithmetic against the LUT). All four are compile-time-opt-in or startup-only; none execute per-query.
 
 ---
 
@@ -306,8 +306,10 @@ m4t/
   tools/
     m4t_trit_golden.c        — enumerated golden-value tests
     m4t_size_check.sh        — .text budget enforcement
-    m4t_lut_gen.c            — offline LUT generator (ONLY sanctioned float)
-    m4t_profile.c            — hot-path throughput microbenchmark (SDOT/TBL/VCNT)
+    m4t_profile.c            — hot-path throughput microbenchmark (SDOT/TBL/VCNT;
+                                sanctioned display-only float for ns/Gops conversion)
+    (m4t_lut_gen.c was moved to archive/m4t/tools/ alongside its archived
+     consumers; see archive/README.md)
   docs/
     M4T_SUBSTRATE.md         — this file
 

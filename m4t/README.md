@@ -65,7 +65,9 @@ cmake -S . -B build -DM4T_BUILD_TOOLS=ON
 
 This builds:
 - `m4t_trit_golden` — truth-table enumerator for TBL opcode verification.
-- `m4t_lut_gen` — offline GELU/exp LUT generator. The *only* sanctioned binary-float code in the entire ecosystem; runs at build time, emits an integer `.c` file, never linked into `libm4t.a` at runtime.
+- `m4t_profile` — microbenchmark for SDOT / TBL / VCNT / masked-VCNT / ternary matmul.
+
+Sanctioned binary-float exceptions are enumerated in `docs/M4T_SUBSTRATE.md` §12 (build-time LUT generation — archived under `archive/m4t/tools/m4t_lut_gen.c`; profile display math; one-shot dataset ingestion).
 
 ## Tests
 
