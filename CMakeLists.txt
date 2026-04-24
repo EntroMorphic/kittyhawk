@@ -121,6 +121,14 @@ if(GLYPH_BUILD_TOOLS)
     add_executable(image_distance_probe tools/image_distance_probe.c)
     target_link_libraries(image_distance_probe PRIVATE glyph m)
 
+    # trained_classifier — first application of libtrain (routed autodiff
+    # MVP) to a real dataset. Trains a dense ternary linear classifier via
+    # tlinear forward+backward on direct-quantization signatures. Tests
+    # whether learned weights close the CIFAR representation tax that k-NN
+    # can't escape. See journal/... (forthcoming sweep cycle).
+    add_executable(trained_classifier tools/trained_classifier.c)
+    target_link_libraries(trained_classifier PRIVATE glyph train m)
+
     # -------- Legacy random-projection consumers (opt-in) --------
 
     if(GLYPH_BUILD_LEGACY_RP)
