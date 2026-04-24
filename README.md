@@ -15,13 +15,17 @@ Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation c
 - **Routing surface:** trit pack/unpack, TBL-based trit ops, masked-VCNT reducers, threshold-based signature extraction, ternary matmul (MTFP19 and SDOT-native MTFP4 paths).
 - **Signature path:** direct ternary quantization is the preferred production path. Pixel intensities are quantized directly to {-1, 0, +1} via density-calibrated thresholds — no random projection matrix required. Optional gradient features extend discrimination to texture-rich datasets (CIFAR-10, Fashion-MNIST).
 - **Consumer library (`libglyph`):** higher-level routed k-NN infrastructure sitting on top of `libm4t` — MNIST/Fashion-MNIST/CIFAR-10 loader with optional normalization, signature builder, bucket index, ternary multi-probe, resolver variants, CLI hyperparameter parser.
-- **Production consumers:**
+- **Production consumers (default build, rule-compliant):**
   - `direct_lsh` — direct ternary quantization consumer with GSH selective scoring; supports MNIST, Fashion-MNIST, and CIFAR-10 (production best across all three datasets)
+  - `structured_lsh`, `structured_gsh`, `sstt_precog`, `ig_scored`, `inverted_ig`, `block_distance` — additional direct-signature or structured-signature consumers
+- **Legacy random-projection consumers (opt-in, `-DGLYPH_BUILD_LEGACY_RP=ON`):**
   - `mnist_routed_bucket` — single-table bucket-indexed LSH, signature-as-address (Axis 5)
-  - `mnist_routed_bucket_multi` — multi-table bucket-indexed LSH with cross-table union-merge and summed-distance resolver (Axis 6); **breaks 97% at N_PROJ=16**
+  - `mnist_routed_bucket_multi` — multi-table bucket-indexed LSH (Axis 6); **breaks 97% at N_PROJ=16** — retained for benchmark reproducibility only (see `docs/LIBGLYPH.md`)
 - **Architecture discipline:** every active routed consumer is zero-dense-scan at the application level; cascade tools are retained as research scaffolding.
 - **Red-team:** six rounds plus a full libglyph refactor red-team complete. See [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) and recent `CHANGELOG.md` entries.
-- **Tests:** 11/11 ctest binaries passing (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, `routed_tool_smoke`, `multi_smoke`).
+- **Tests:** **14/14 ctest binaries** passing in the default build (`m4t_*` substrate tests, `glyph_wrapper`, `glyph_libglyph` unit tests, plus 5 `train_*` routed-autodiff tests). 16/16 with `-DGLYPH_BUILD_LEGACY_RP=ON` (adds `routed_tool_smoke` and `multi_smoke` against the legacy random-projection consumers).
+- **Routed autodiff MVP (`libtrain.a`):** consumer-layer training scaffolding per NORTH_STAR §13. Scalar forward + backward through `tlinear` (dense ternary linear) and `rroute` (routed top-k dispatch), hysteresis-aware re-quantization of float latents to trits, 5 tests covering gradient checks, convergence, edge cases, and expert-collapse diagnosis on a 10-class toy. Opt-in via `-DGLYPH_BUILD_TRAIN=ON` (default ON). See [`train/README.md`](train/README.md).
+- **Substrate distance refinement (2026-04-24):** `go_probe` cycle identified a density-scaling bias in raw trit Hamming that `hamming_norm = H · 1024 / (|a|₀ + |b|₀ + 1)` corrects. +48pp on Go phase-ID (40% → 88%) via a one-line fix. Red-team confirmed the result under game-wise split (no within-game leakage), but also showed the gain is mostly density-recovery, not a new structural axis. Image-pipeline measurement on MNIST/Fashion/CIFAR is the next decisive test (queued). See [`journal/substrate_distance_refinement_closeout.md`](journal/substrate_distance_refinement_closeout.md).
 
 ## Architecture
 
@@ -29,8 +33,12 @@ Ground-zero rebuild completed (initiated 2026-04-14). The prior implementation c
 m4t/                  — the substrate (libm4t.a). Routing-first ternary kernels.
   src/                  numeric core, routing primitives, ternary matmul, trit ops/pack/reducers
   tests/                7 test binaries, hand-derived integer golden values
-  tools/                dev-only tools (trit_golden, lut_gen) — opt-in M4T_BUILD_TOOLS=ON
+  tools/                dev-only tools (trit_golden, profile) — opt-in M4T_BUILD_TOOLS=ON
   docs/                 substrate specification
+train/                — libtrain.a. Routed autodiff MVP (consumer-layer, §13).
+  src/                  backward_linear, backward_routed, requantize (hysteresis)
+  tests/                5 tests: gradient checks, 2- and 10-class toys, edge cases
+  README.md             scope, primitives, MVP findings, hyperparameters
 src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infrastructure.
   glyph_dataset.{h,c}   dataset loader + deskew + normalization + gradients
   glyph_rng.{h,c}       xoshiro128+ RNG
@@ -41,14 +49,19 @@ src/                  — libglyph (libglyph.a). Consumer-side routed k-NN infra
   glyph_resolver.{h,c}  7 resolver variants: VOTE, SUM, SUM-NEON4, PTM, KNN, voteweighted, radiusaware
   glyph_config.{h,c}    hyperparameter struct + CLI long-option parser
   glyph_*.h             thin wrapper headers that alias m4t_* into glyph_* namespace
-tools/                — CLI consumer tools built on libglyph.
-                         Production: direct_lsh (CIFAR-10/Fashion-MNIST/MNIST via direct quantization),
-                           mnist_routed_bucket, mnist_routed_bucket_multi
-                         Diagnostic: fashion_atomics (resolver-gap atomics on Fashion-MNIST)
-                         Research scaffolding: mnist_cascade_*, mnist_routed_knn, mnist_full_sweep,
-                           mnist_resolver_sweep, mnist_local_*, mnist_lvg_*, mnist_probe_nproj16,
-                           mnist_trit_lattice, mnist_routed_lattice, mnist_routed_weighted,
-                           mnist_routed_trace, mnist_routed_amplified
+tools/                — CLI consumer tools built on libglyph or standalone.
+                         Default build (rule-compliant): direct_lsh, structured_lsh,
+                           structured_gsh, sstt_precog, ig_scored, inverted_ig,
+                           block_distance, csa_classifier, go_probe
+                         Legacy (random-projection, opt-in -DGLYPH_BUILD_LEGACY_RP=ON,
+                           retained for Axis 5/6 benchmark reproducibility):
+                           mnist_routed_bucket{,_multi}, mnist_cascade_*,
+                           mnist_routed_{knn,lattice,trace,weighted,amplified},
+                           mnist_trit_lattice, mnist_full_sweep, mnist_resolver_sweep,
+                           mnist_local_*, mnist_lvg_*, mnist_probe_nproj16,
+                           fashion_atomics, cifar_seed_overlap, dynamic_nproj,
+                           subsetted_multi, bruteforce_nproj, layered_lsh,
+                           specialist_rerank, centroid_routed, conv_lsh
 tests/                — libm4t unit tests + glyph wrapper tests + libglyph unit tests
 docs/                 — FINDINGS, THESIS, LIBGLYPH, HYPERPARAMETERS, REMEDIATION_PLAN
 journal/              — LMM-cycle research log (raw → nodes → reflect → synthesize)
@@ -66,7 +79,7 @@ MTFP — Multi-Trit Floating Point, base 3. A value is `mantissa × 3^exponent`;
 | `m4t_mtfp_t` | int32 | 19 | 4 | general activations (default) |
 | `m4t_mtfp_w_t` | int64 | 39 | 2 | wide accumulation |
 
-Binary floating point (IEEE-754 / float / double / float16 / bfloat16) is banned at runtime. The only sanctioned binary float lives in `m4t/tools/m4t_lut_gen.c`, a build-time LUT generator. See [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md) for the full contract.
+Binary floating point (IEEE-754 / float / double / float16 / bfloat16) is banned in every runtime kernel of `libm4t` and in every per-query / per-batch path of `libglyph`. Sanctioned non-runtime float sites are enumerated in [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/M4T_SUBSTRATE.md) §12: archived build-time LUT generator, microbenchmark display math, and one-shot dataset ingestion.
 
 ## Build
 
@@ -105,26 +118,43 @@ Every hyperparameter is a CLI flag. No source edits required to sweep N_PROJ, de
 
 Default runs reproduce the production measurements with GSH selective scoring.
 
-### Multi-table routed bucket (Axis 6, random projection path)
+### go_probe — base-3-native benchmark probing (Go positions)
 
 ```bash
-# Default: oracle pass over M ∈ {1,2,4,8,16,32,64} at N_PROJ=16
-./build/mnist_routed_bucket_multi --data /path/to/mnist
-
-# Full: oracle + VOTE/SUM/PTM resolvers at every M checkpoint
-./build/mnist_routed_bucket_multi --data /path/to/mnist --mode full
-
-# Single M checkpoint at M=16 to check the target neighborhood
-./build/mnist_routed_bucket_multi --data /path/to/mnist --mode full --single_m 16
+# Requires a directory of 19×19 SGF files on disk.
+./build/go_probe /path/to/sgf_dir --max_games 2000 --sample_every 5 \
+    --encoding {raw,contrast3} \
+    --metric   {hamming,hamming_norm} \
+    --task     {phase,same_game} \
+    --split    {position,game}
 ```
 
-Default run reproduces the Axis 6 measurement byte-for-byte: **M=32 SUM reaches 97.24%** on deskewed MNIST at N_PROJ=16 — the first routed architecture in the project to exceed 97%.
+Standalone SGF parser + Go rules engine + brute-force Hamming k-NN on raw 361-trit position state. Used for the `base3_benchmarks` and `substrate_distance_refinement` cycles; identified a density-scaling bias in raw trit Hamming and a one-line fix (`hamming_norm`) that recovers +48pp on Go phase-ID under a leakage-free game-wise split. See `journal/base3_go_probe.md` and `journal/substrate_distance_refinement_closeout.md`.
 
-### Single-table routed bucket (Axis 5)
+### Multi-table routed bucket (Axis 6, legacy random-projection path — opt-in)
 
 ```bash
-# Tunes MAX_RADIUS × MIN_CANDIDATES at M=1 with H1 filter + H2+H3+H4 resolver
-./build/mnist_routed_bucket --data /path/to/mnist
+# Reconfigure with the legacy flag, rebuild:
+cmake -S . -B build-legacy -DGLYPH_BUILD_LEGACY_RP=ON
+cmake --build build-legacy -j
+
+# Default: oracle pass over M ∈ {1,2,4,8,16,32,64} at N_PROJ=16
+./build-legacy/mnist_routed_bucket_multi --data /path/to/mnist
+
+# Full: oracle + VOTE/SUM/PTM resolvers at every M checkpoint
+./build-legacy/mnist_routed_bucket_multi --data /path/to/mnist --mode full
+
+# Single M checkpoint at M=16 to check the target neighborhood
+./build-legacy/mnist_routed_bucket_multi --data /path/to/mnist --mode full --single_m 16
+```
+
+Default run reproduces the Axis 6 measurement byte-for-byte: **M=32 SUM reaches 97.24%** on deskewed MNIST at N_PROJ=16 — the first routed architecture in the project to exceed 97%. The consumer uses random ternary projection weights; retained only for benchmark reproducibility. See `docs/LIBGLYPH.md` "Legacy random-projection consumers" section for the full list of 26 legacy tools.
+
+### Single-table routed bucket (Axis 5, legacy — opt-in)
+
+```bash
+# Requires -DGLYPH_BUILD_LEGACY_RP=ON
+./build-legacy/mnist_routed_bucket --data /path/to/mnist
 ```
 
 Default run reproduces the Axis 5 measurement: **82.58% at 9.9 μs/query** (MAX_R=2, MIN_C=100).
@@ -135,7 +165,9 @@ Default run reproduces the Axis 5 measurement: **82.58% at 9.9 μs/query** (MAX_
 ctest --test-dir build
 ```
 
-All 11 test binaries should pass: 7 `m4t` substrate tests (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`, `m4t_ternary_matmul`, `m4t_trit_pack`), `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 2 integration tests (`routed_tool_smoke`, `multi_smoke`).
+Default build: **14/14 tests** pass — 7 `m4t` substrate tests (`m4t_mtfp`, `m4t_trit_ops`, `m4t_trit_reducers`, `m4t_route`, `m4t_mtfp4`, `m4t_ternary_matmul`, `m4t_trit_pack`), `glyph_wrapper` (alias surface), `glyph_libglyph` (20 unit tests covering RNG, bucket, multi-probe, resolvers), and 5 `train_*` routed-autodiff tests (`train_gradient_linear`, `train_gradient_routed`, `train_toy_convergence`, `train_toy_10class`, `train_edge_cases`).
+
+Legacy opt-in build (`-DGLYPH_BUILD_LEGACY_RP=ON`): **16/16 tests** — adds `routed_tool_smoke` and `multi_smoke` against the legacy random-projection consumers.
 
 ## Documentation map
 
@@ -150,6 +182,7 @@ All 11 test binaries should pass: 7 `m4t` substrate tests (`m4t_mtfp`, `m4t_trit
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Red-team findings and remediation status (first-light round; later rounds tracked in CHANGELOG). |
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes since the ground-zero rebuild. |
 | [`m4t/README.md`](m4t/README.md) | Substrate-layer build and surface. |
+| [`train/README.md`](train/README.md) | Routed autodiff MVP — scope, primitives, findings, hyperparameters. |
 | [`archive/README.md`](archive/README.md) | What's in the archive and why. |
 | `journal/direct_lsh_production.md` | Direct ternary quantization: design, measurements, GSH selective scoring. |
 | `journal/normalization_first_light.md` | Per-channel normalization breakthrough for CIFAR-10 and Fashion-MNIST. |

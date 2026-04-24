@@ -10,6 +10,45 @@ The first entry below marks the ground-zero rebuild that restructured the substr
 
 Triggered by a full audit that identified a collapse of Multi-Trit Floating Point into a fixed-point reading with a shared global scale, and a substrate drifting toward dense computation over base-3 hardware. The rebuild restores MTFP as base-3 floating point (mantissa cells + per-block exponent) and puts routing primitives first.
 
+### substrate_distance_refinement LMM cycle (2026-04-24)
+
+Follow-up to `base3_go_probe` RED. Tested whether the substrate's distance machinery can see structural signal without training.
+
+- **Finding (headline):** raw int8 trit Hamming has a density-scaling bias. Sparse-vs-sparse distances are systematically smaller than dense-vs-dense, which lets sparse vectors (e.g. opening Go positions) dominate k-NN neighborhoods of any query regardless of the query's density. Fix: `hamming_norm(a, b) = H(a, b) · 1024 / (|a|₀ + |b|₀ + 1)`. One-line, trainless, zero-allocation.
+- **Phase-ID on Go positions:** raw Hamming 40.40% → `hamming_norm` **85.40%** (position-split); **88.40%** (game-split, no within-game leakage).
+- **3×3 local-contrast encoding:** per-cell sign of (own − opp) summed over 3×3 neighborhood. +33pp over raw Hamming alone (73.60%). Combined with `hamming_norm` UNDER-performs pure `hamming_norm` (79.60% < 88.40%) — the two fixes are substitutes, not complements.
+- **Same-game retrieval:** raw Hamming already hits 24.48% at k=50 (413× random baseline after correction), confirming the substrate sees positional structure on density-controlled tasks. `hamming_norm` adds a small improvement to 27.32% (461× lift).
+- **Red-team:** (1) within-game leakage concern rejected — game-split is marginally stronger, not weaker; (2) same-game random baseline calculation corrected from `k/n_train` to `g_q/n_train` — lifts went up, not down; (3) contrast3 + hamming_norm combo tested, shown to hurt; (4) density-only still beats hamming_norm (98.6% > 88.4%), so hamming_norm has positional content but is mostly density-recovery, not a new structural axis.
+- **Honest framing:** `hamming_norm` unlocks density-adjacency, not structure per se. Its substrate-wide value is contingent on whether image pipelines already compensate for density (via MS4 + per-image contrast normalize). Image-pipeline measurement queued as the decisive gate on whether this becomes a substrate primitive or stays Go-specific.
+- **Tool:** `tools/go_probe.c` extended with `--encoding {raw,contrast3}`, `--metric {hamming,hamming_norm}`, `--task {phase,same_game}`, `--split {position,game}`.
+- **Journal:** `journal/substrate_distance_refinement_{raw,nodes,reflect,synthesize,closeout}.md`.
+
+### base3_benchmarks LMM cycle + Go probe (2026-04-24)
+
+Framing cycle after `routed_autodiff` closed with the finding "frozen-U selection-only routing collapses on multi-class." Question: why have we been measuring the substrate on data that fails all substrate-property criteria?
+
+- **Decomposition of "base-3 native":** (a) ternary-representable input without quantization loss, (b) routing-load-bearing task, (c) inspectability-credited evaluation. MNIST/Fashion/CIFAR score 0/3.
+- **Commitment:** image classification canon demoted from north-star to regression-guard. Primary direction is **ternary-state board-game position evaluation** (Go first).
+- **Probe outcome (pre-refinement):** raw Hamming k-NN phase-ID at **40.40% k=50**; density-only k=200 at **98.28%**. Raw ternary Hamming actively WORSE than trivial stone-counting on 19×19 Go positions. Probe RED. The `substrate_distance_refinement` cycle (above) re-interpreted this as a metric bias, not a substrate failure, but the demotion of image canon stands.
+- **Tool:** `tools/go_probe.c` — standalone SGF parser, Go rules engine with captures/suicide, per-cell ternary encoding, brute-force k-NN. 400 LOC, no libglyph dependency.
+- **Journal:** `journal/base3_benchmarks_{raw,nodes,reflect,synthesize,closeout}.md`, `journal/base3_go_probe.md`.
+
+### routed_autodiff MVP LMM cycle (2026-04-23 → 2026-04-24)
+
+Consumer-layer autodiff for the routing-first ternary substrate. Not an autograd engine — one forward/backward pair per primitive, hand-coded, gradient-checked.
+
+- **New subtree:** `train/libtrain.a` with `backward_linear`, `backward_routed`, `requantize` modules. Opt-in via `-DGLYPH_BUILD_TRAIN=ON` (default ON). Not linked into libm4t or libglyph (NORTH_STAR §13).
+- **Gradient checks pass** at 1.4e-4 (dW) and 1.6e-4 (dX) combined relative-or-absolute tolerance using double-precision finite differences.
+- **2-class toy converges**: 96.50% mean, σ=2.79pp across 5 seeds; 95% single-seed.
+- **Expert-collapse finding (the substrate-level result):** 10-class toy with T=16 k=2 routing, frozen random U, selection-only dispatch, trains to only 34% test accuracy (random-U) or 44% (class-centroid-U) vs 91% for plain ternary linear T=1 k=1. The frozen-gate + selection-only configuration dilutes gradient signal across tiles — classical MoE expert collapse. Fix requires learned U (soft routing), load-balancing loss, or per-tile specialization pressure. Out of MVP scope.
+- **Hysteresis re-quantization**: sticky trits fix the early-training 100% → 1.6% → 100% accuracy oscillation where latents near τ flipped on every SGD step. Documented in `train/src/requantize.h`.
+- **STE behavior monitor**: runtime assertion in `test_toy_convergence` that per-epoch selection-flip count is 0 under frozen U. Guards against edits accidentally coupling routing to trainable state.
+- **Principled hyperparameter derivations**: every init/lr/density value in `test_toy_convergence.c` is documented next to its definition (max-entropy prior, drift-vs-τ ratio, half-normal percentile, STE clip boundary).
+- **5 tests**: `test_gradient_linear`, `test_gradient_routed`, `test_toy_convergence`, `test_toy_10class`, `test_edge_cases`. All pass.
+- **Deferred** (queued for `routed_go` trainer cycle): NEON port of backward kernels, soft routing / learned U, CIFAR-scale memory audit, signature-producing head.
+- **Journal:** `journal/routed_autodiff_{raw,nodes,reflect,synthesize,closeout}.md`.
+- **Subtree README:** `train/README.md` — scope, primitives, findings, hyperparameters.
+
 ### Repo housekeeping + code quality refactor (2026-04-20)
 
 - **glyph_probe module:** extracted shared multi-probe candidate collection from 14 tool files into `src/glyph_probe.{h,c}`. Eliminates 621 lines of copy-paste duplication across all routed consumers. Supports optional min_radius tracking, per-table candidate counting.
