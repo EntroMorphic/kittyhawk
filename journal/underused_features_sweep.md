@@ -71,13 +71,25 @@ The most surprising data point: **CSA centroid mode (29%) beats tlinear SGD (20%
 
 **Implication:** class-centroid initialization is a strictly better starting point for any CIFAR trainer than random Gaussian. A CSA-initialized tlinear trainer is the obvious next experiment; it combines CSA's structural prior with tlinear's refinement capacity. Queued (not executed in this sweep).
 
-## Result 4 — direct_lsh resolver variants on CIFAR
+## Result 4 — direct_lsh resolver variants on CIFAR (all four bit-identical)
 
-Quick ablation over the four SUM resolver modes on CIFAR (all other flags held at production config). Measurement runs in background; results to fill in when complete. Expected: scalar and neon4 tie (bit-exact), voteweighted marginal, radiusaware hurts at default λ.
+Quick ablation over the four SUM resolver modes on CIFAR (all other flags held at production config: `--no_deskew --normalize --density 0.395 --gradients --m_max 64`).
+
+| Resolver | LSH-only k=5-rw at M=64 | Pair-IG | GSH 1-NN | Selective |
+|---|---|---|---|---|
+| `scalar` (default) | 44.68% | 45.73% | 36.87% | **46.63%** |
+| `neon4` | 44.68% | 45.73% | 36.87% | 46.63% |
+| `voteweighted` | 44.68% | 45.73% | 36.87% | 46.63% |
+| `radiusaware` (λ=8) | 44.68% | 45.73% | 36.87% | 46.63% |
+
+**All four variants produce bit-identical numbers across the entire M-sweep.** This is itself a finding: the SUM resolver is not the bottleneck on CIFAR. `voteweighted` and `radiusaware` were originally designed to recover the Fashion-MNIST resolver gap (concentrated in the upper-body-garment cluster, classes {0, 2, 4, 6}); on CIFAR there is no analogous tied-distance pattern for them to break. The bottleneck is upstream — at the filter step or the signature representation, not at the SUM ranker.
+
+**Implication:** alternate resolvers are Fashion-specific tools. They don't apply to CIFAR. Direct_lsh's CIFAR Selective (46.63%) is fixed by everything except the resolver choice.
 
 ## Results NOT measured in this sweep
 
 - **`block_distance` on CIFAR.** Attempted, aborted — O(N²) brute force on 3072-dim signatures is too slow for in-session measurement. Reopen as a scheduled background run.
+- **direct_lsh resolver variants on Fashion** — Result 4 measured CIFAR only; the resolver variants were originally designed for Fashion. Re-running on Fashion to confirm they still help there is a separate small ablation.
 - **Diagonal/local-contrast features for images.** Analogous to Go's `contrast3` win; adds 2–4× the trit budget per image. Requires code in `glyph_dataset` gradients module. Not written.
 - **Multi-table M sweep beyond default.** direct_lsh default is M=64; untested at M=128 or M=32 with different seeds. Not run.
 
