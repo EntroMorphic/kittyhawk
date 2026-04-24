@@ -10,6 +10,21 @@ The first entry below marks the ground-zero rebuild that restructured the substr
 
 Triggered by a full audit that identified a collapse of Multi-Trit Floating Point into a fixed-point reading with a shared global scale, and a substrate drifting toward dense computation over base-3 hardware. The rebuild restores MTFP as base-3 floating point (mantissa cells + per-block exponent) and puts routing primitives first.
 
+### hamming_norm on image pipelines — gate measurement (2026-04-24)
+
+Decisive gate for whether the Go-probe `hamming_norm` finding is substrate-wide or Go-specific.
+
+- **New tool:** `tools/image_distance_probe.c` — standalone brute-force k-NN under both `hamming` and `hamming_norm` on `glyph_sig_quantize` ternary signatures. Mirrors `tools/go_probe.c` in structure.
+- **Results (full 10k test, k=50):**
+    - MNIST (density=0.10, deskew): hamming 95.65% → hamming_norm 95.49%. **Tied (−0.16pp, noise).**
+    - Fashion-MNIST (density=0.33, normalize, no_deskew): 81.04% → 78.39%. **Hurts by 2.65pp.**
+    - CIFAR-10 (density=0.33, normalize, no_deskew): 13.06% → 14.04%. **Marginal +0.98pp (3× noise floor).**
+- **Decision:** do NOT retrofit `hamming_norm` into `direct_lsh` or any image consumer. Keep as Go-specific distance primitive.
+- **Mechanism:** `hamming_norm` is a remedy, not an enhancement. It fixes raw Hamming when the sparse-vector attractor dominates positional discrimination AND density variance is class-uninformative AND the pipeline doesn't already decorrelate density. Go hits all three (density 5–250 across phases, 361-trit signature, no normalization). Images fail all three (normalize equalizes total signal; density variance when present correlates informatively with class).
+- **Retrospective:** the `step_change` CIFAR representation tax is a real representation tax, not a metric artifact. `hamming_norm` does not close it. Image-canon demotion from `base3_benchmarks` stands firmly.
+- **Substrate-wide claim rescinded:** `substrate_distance_refinement_closeout.md`'s "ship `hamming_norm` retrofit" recommendation is explicitly retracted in favor of the domain-specific framing.
+- **Journal:** `journal/hamming_norm_on_images.md`.
+
 ### substrate_distance_refinement LMM cycle (2026-04-24)
 
 Follow-up to `base3_go_probe` RED. Tested whether the substrate's distance machinery can see structural signal without training.

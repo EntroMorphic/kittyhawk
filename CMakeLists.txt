@@ -114,6 +114,13 @@ if(GLYPH_BUILD_TOOLS)
     add_executable(go_probe tools/go_probe.c)
     target_link_libraries(go_probe PRIVATE m)
 
+    # image_distance_probe — substrate_distance_refinement gate (task #40).
+    # Measures Hamming vs hamming_norm head-to-head on MNIST/Fashion/CIFAR
+    # quantized signatures. Decides whether hamming_norm retrofits into
+    # direct_lsh as a substrate-wide primitive or stays Go-specific.
+    add_executable(image_distance_probe tools/image_distance_probe.c)
+    target_link_libraries(image_distance_probe PRIVATE glyph m)
+
     # -------- Legacy random-projection consumers (opt-in) --------
 
     if(GLYPH_BUILD_LEGACY_RP)
