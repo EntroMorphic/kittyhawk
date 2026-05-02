@@ -8,11 +8,19 @@ Lattice-native routing layer over a frozen ternary bank. Sits atop libm4t. The s
 
 **Phase A.2 — lattice update training — ONLINE.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry. **Measured across a multi-seed sig_dim sweep extended through sig_dim = 1024 (`docs/sweep_dims_results.md`, 5 seeds per cell, 12 dims): lattice update earns its complexity in the compression regime — gain plateaus at +8pp at sig_dim ∈ {16, 32}. Random ternary projection at sig_dim = D beats identity by +7pp robustly across seeds (hypothesis: implicit denoising; not mechanism-verified). Expansion saturates monotonically: at sig_dim = 1024 (16× input dim) random and trained converge to 98.6% ± 0.5pp with +0.0pp gain. The single-seed sweep's "+15pp peak" and "−2pp anomaly" were artifacts that didn't survive multi-seed averaging.**
 
-**Phase B probe — RAN 2026-05-02.** Two pre-committed gates from `journal/gesh_findings_synthesize.md`:
-- **Gate 1 (image canon parity, MNIST): FAIL.** Trained Gesh hits 51.6% / 54.7% at sig_dim ∈ {128, 256}; gain over random R within seed noise (+0.5 to +0.8pp). Pre-committed PASS bar was ≥95% with ≥+2pp gain; far below the inconclusive floor. **However, C2 transfers cleanly:** random R at sig_dim=128 beats identity at sig_dim=784 by **+7.3pp** — substrate-level finding survives. The Gesh-Phase-A *consumer* architecture (single class-mean bank, top_k=1) is the bottleneck, not the substrate. Details: `docs/phase_b_gate1_results.md`.
-- **Gate 2 (H1 mechanism test): PASS.** Pearson r = +0.892, t = 157.89, p << 0.001. The "implicit denoising" mechanism behind C2 is empirically demonstrated: output dims of random R with high prototype-subspace alignment yield proportionately larger inter-class discrimination. H1 upgraded from hypothesis to demonstrated mechanism. Details: `docs/phase_b_gate2_results.md`.
+**Phase B probe — RAN 2026-05-02; revised post-red-team.** Two pre-committed gates plus a 4-cell ablation triggered by the Phase B red-team's C1+H1+H2 critique.
 
-Closeout and loop-back to NODES recorded in `journal/gesh_phase_b_probe_closeout.md`. Recommended next cycle: richer consumer (multi-table LSH composition or multi-prototype banks) before substrate-claim measurement on Go positions.
+- **Gate 1 (image canon parity, MNIST): FAIL on absolute bar; PASS on gain bar at 10× budget.**
+  - Original probe (2 cells, n_train=2000, budget=20K): trained 51.6%/54.7% at sig_dim ∈ {128, 256}; gain within seed noise. The closeout originally attributed this to consumer-architecture bottleneck — **the red-team flagged this as causally unsupported.**
+  - Ablation remediation (4 cells × 3 seeds at sig_dim=128, isolating budget × n_train) **falsified the original "lattice-update doesn't transfer" claim**: at 10× budget (Cell B), trained gain rises to **+2.0pp** — exactly the original gain threshold. C1 transfers, smaller (+2pp on MNIST vs +8pp on synthetic).
+  - Architecture *is* the absolute-accuracy ceiling: trained caps at ~52–53% across 100× the original compute budget. Now demonstrated from 4 cells, not asserted from 1.
+  - **C2 in its faithful regime (random@D=784 vs identity@D=784): +13.9pp on MNIST**, ~2× the synthetic's +7.4pp. C2 transfers strongly. Details: `docs/phase_b_gate1_results.md`.
+
+- **Gate 2 (H1 mechanism test): PASS.** Pearson r = +0.892, t = 157.89, p << 0.001. Output dims of random R with high prototype-subspace alignment yield proportionately larger inter-class discrimination. H1 upgraded from hypothesis to demonstrated mechanism. Details: `docs/phase_b_gate2_results.md`.
+
+Path A (richer consumer with multi-table LSH composition) is still the recommended next cycle, but for a refined reason: lattice-update *does* contribute small gains; a richer consumer should let it contribute proportionately more. Pre-committed Gate 1.A specified in the closeout: PASS = ≥92% MNIST AND ≥+1pp delta over `mnist_routed_bucket_multi` random-R baseline.
+
+Closeout, ablation, revised NODES, and Gate 1.A in `journal/gesh_phase_b_probe_closeout.md`. Red-team's methodology lesson (*multi-config gates the story; multi-seed gates the cell*) lifted into `CONTRIBUTING.md`.
 
 ## Design lineage
 

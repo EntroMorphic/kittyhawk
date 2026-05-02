@@ -9,6 +9,7 @@
 #include "image_canon.h"
 #include "m4t_types.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,6 +223,7 @@ void image_canon_quantize_unpacked_batch(const m4t_mtfp_t* x_batch,
                                           int n, int n_dims,
                                           int64_t tau,
                                           m4t_trit_t* out_trits) {
+    assert((const void*)out_trits != (const void*)x_batch);
     for (int i = 0; i < n; i++) {
         const m4t_mtfp_t* x = x_batch + (size_t)i * n_dims;
         m4t_trit_t* o = out_trits + (size_t)i * n_dims;

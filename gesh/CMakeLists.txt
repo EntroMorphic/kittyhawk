@@ -28,6 +28,19 @@ target_include_directories(gesh PUBLIC
 target_link_libraries(gesh PUBLIC m4t)
 set_target_properties(gesh PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Image canon — substrate-legal MNIST loader + ternary quantization
+# pipeline (no random projections; one trit per pixel). Lifted from
+# 01MAY26_archived/src/{glyph_dataset.c, glyph_sig.c}. Declared before
+# the test block so test_image_canon can link against it.
+add_library(gesh_image_canon STATIC
+    bench/image_canon.c
+)
+target_include_directories(gesh_image_canon PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
+)
+target_link_libraries(gesh_image_canon PUBLIC m4t)
+set_target_properties(gesh_image_canon PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Tests.
 option(GESH_BUILD_TESTS "Build Gesh tests" ON)
 if(GESH_BUILD_TESTS)
@@ -46,24 +59,18 @@ if(GESH_BUILD_TESTS)
     add_executable(test_gesh_train tests/test_gesh_train.c)
     target_link_libraries(test_gesh_train PRIVATE gesh gesh_bench)
     add_test(NAME gesh_train COMMAND test_gesh_train)
+
+    # Smoke test for image_canon (MNIST loader + normalize + quantize).
+    # Lifted from M3 in the Phase B red-team.
+    add_executable(test_image_canon tests/test_image_canon.c)
+    target_link_libraries(test_image_canon PRIVATE gesh_image_canon)
+    add_test(NAME gesh_image_canon COMMAND test_image_canon)
 endif()
 
 # Sweep tool (benchmark, not regression test). Builds with the library.
 # Links `m` for sqrt (used for stddev computation in multi-seed reporting).
 add_executable(gesh_sweep_dims bench/sweep_dims.c)
 target_link_libraries(gesh_sweep_dims PRIVATE gesh gesh_bench m)
-
-# Image canon — substrate-legal MNIST loader + ternary quantization
-# pipeline (no random projections; one trit per pixel). Lifted from
-# 01MAY26_archived/src/{glyph_dataset.c, glyph_sig.c}.
-add_library(gesh_image_canon STATIC
-    bench/image_canon.c
-)
-target_include_directories(gesh_image_canon PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
-)
-target_link_libraries(gesh_image_canon PUBLIC m4t)
-set_target_properties(gesh_image_canon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Phase B Gate 1: MNIST canonical pipeline probe.
 add_executable(gesh_mnist_probe bench/mnist_probe.c)
