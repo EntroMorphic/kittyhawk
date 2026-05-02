@@ -1,13 +1,13 @@
 ---
 title: Phase A.2 — sig_dim sweep
-date: 2026-05-02 (multi-seed revision)
+date: 2026-05-02 (multi-seed extended to sig_dim = 1024)
 benchmark: synthetic prototype classification
 status: deterministic measurement, 5 seeds per (sig_dim, variant) cell
 ---
 
-# Phase A.2 sig_dim sweep — multi-seed
+# Phase A.2 sig_dim sweep — multi-seed (extended)
 
-Three variants × eight projection dimensions, **5 independent seeds per cell**, deterministic. Tool: `gesh/bench/sweep_dims.c`. Reproducible via `./build/gesh/gesh_sweep_dims`.
+Three variants × **twelve** projection dimensions, **5 independent seeds per cell**, deterministic. Tool: `gesh/bench/sweep_dims.c`. Reproducible via `./build/gesh/gesh_sweep_dims`. Total runtime: ~515s on Apple Silicon.
 
 ## Setup
 
@@ -31,8 +31,12 @@ Three variants × eight projection dimensions, **5 independent seeds per cell**,
 |      64 |  76.4% ± 2.1 pp |  78.2% ± 2.3 pp |  +1.8 pp |   20480 |
 |     128 |  90.0% ± 1.7 pp |  89.2% ± 1.5 pp |  −0.8 pp |   40960 |
 |     256 |  95.4% ± 0.9 pp |  95.4% ± 0.5 pp |  +0.0 pp |   81920 |
+|     384 |  96.8% ± 0.4 pp |  96.8% ± 0.4 pp |  +0.0 pp |  122880 |
+|     512 |  97.4% ± 0.5 pp |  97.6% ± 0.5 pp |  +0.2 pp |  163840 |
+|     768 |  98.2% ± 0.4 pp |  98.2% ± 0.4 pp |  +0.0 pp |  245760 |
+|    1024 |  98.6% ± 0.5 pp |  98.6% ± 0.5 pp |  +0.0 pp |  327680 |
 
-**Identity (sig_dim = D = 64, no projection): 69%.**
+**Identity (sig_dim = D = 64, no projection): 69%.** Random projection asymptotes toward (but does not reach) 100% as sig_dim grows: 98.6% at sig_dim = 16×D = 1024.
 
 ## What multi-seed corrected from the earlier single-seed version
 
@@ -59,6 +63,11 @@ At sig_dim = 2: 21% mean trained accuracy. With 3² = 9 distinct ternary signatu
 ### 4. Diminishing returns at sig_dim ≥ 128
 At sig_dim = 128, multi-seed gain is **−0.8 ± 1.5pp** (slightly negative, within noise of zero). At sig_dim = 256, exactly +0.0pp. Random ternary expansion already encodes whatever signal exists; training has nothing to add.
 
+### 5. Expansion saturation is monotone all the way to sig_dim = 1024
+Extending the sweep from 256 to 1024 (16× the input dimensionality) shows random and trained accuracies converge tightly: **at sig_dim = 1024, both reach 98.6% ± 0.5pp**, with gain **+0.0pp**. Stddev shrinks toward 0.4pp as accuracy approaches the test-set ceiling. There is no inflection upward — at no expansion ratio does training start beating random again. The expansion regime is a stable saturation, not a transient that flips at very large sig_dim.
+
+This is consistent with a "random ternary projection is asymptotically a sufficient statistic" reading: at 16× expansion with C = 10 classes, inter-class signatures are far enough apart in Hamming space that any reasonable encoding suffices. Class-mean banks built from random ternary signatures preserve the discriminative axis with vanishing per-seed variance.
+
 ## Hypotheses (NOT verified findings)
 
 These remain conjectures — plausible explanations for the data, not demonstrated mechanisms. Future cycles could pressure-test them:
@@ -83,7 +92,7 @@ cmake -S . -B build && cmake --build build -j
 ./build/gesh/gesh_sweep_dims
 ```
 
-Total runtime ~22 seconds on Apple Silicon. Deterministic given the seed lists in `sweep_dims.c::main`.
+Total runtime ~515 seconds on Apple Silicon (extended sweep through sig_dim = 1024). Deterministic given the seed lists in `sweep_dims.c::main`.
 
 ## Methodology note
 

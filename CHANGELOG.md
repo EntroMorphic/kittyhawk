@@ -147,6 +147,26 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Gesh Phase A.2 sweep extended to sig_dim = 1024]
+
+Re-ran the multi-seed sweep with four additional expansion ratios: 384, 512, 768, 1024. Confirms expansion saturation is monotone — random and trained accuracies converge tightly at every extreme dim, with gain pinned to ≤ +0.2pp.
+
+| sig_dim | random         | trained        | gain    |
+|---------|------------------|------------------|---------|
+|     384 |  96.8% ± 0.4pp |  96.8% ± 0.4pp |  +0.0 pp |
+|     512 |  97.4% ± 0.5pp |  97.6% ± 0.5pp |  +0.2 pp |
+|     768 |  98.2% ± 0.4pp |  98.2% ± 0.4pp |  +0.0 pp |
+|    1024 |  98.6% ± 0.5pp |  98.6% ± 0.5pp |  +0.0 pp |
+
+At 16× the input dimensionality, random ternary projection asymptotes to 98.6% on this benchmark. There is no inflection upward at any expansion ratio — training does not start beating random again. The expansion-regime saturation is stable, not a transient.
+
+Per-seed stddev tightens to ~0.4pp as accuracy approaches the test-set ceiling. Total sweep runtime: 515s (12 sig_dims × 5 seeds × 2 variants).
+
+### Changed
+- `gesh/bench/sweep_dims.c` — `dims[]` extended to `{2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 768, 1024}`.
+- `gesh/docs/sweep_dims_results.md` — table extended; new finding #5 ("Expansion saturation is monotone all the way to sig_dim = 1024").
+- `gesh/README.md` — Phase A.2 status block notes 16× expansion saturation.
+
 ## [2026-05-02 — Gesh Phase A.2 red-team: 13 findings, multi-seed methodology promoted]
 
 End-to-end pressure on Phase A.2's code, measurement methodology, and documentation ensemble after the sig_dim sweep landed. Modeled after the m4t kernel red-teams and Phase A.1's red-team. 13 findings; 12 remediated; 1 lifted to project-level methodology rule. Recorded in `journal/gesh_phase_a2_redteam.md`.

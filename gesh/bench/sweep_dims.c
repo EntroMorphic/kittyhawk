@@ -215,7 +215,7 @@ static void compute_stats(const int* vals, int n, double* out_mean, double* out_
 int main(void) {
     fixture_t f = make_fixture();
 
-    int dims[] = { 2, 4, 8, 16, 32, 64, 128, 256 };
+    int dims[] = { 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 768, 1024 };
     int n_dims = (int)(sizeof(dims) / sizeof(dims[0]));
 
     /* Independent seed pairs per (variant, sig_dim, trial). */
