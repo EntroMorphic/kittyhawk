@@ -72,6 +72,41 @@ void m4t_mtfp_ternary_matmul_bt(
     int M, int K, int N
 );
 
+/* Ternary × ternary → MTFP19 via SDOT.
+ *
+ * Both activations and weights are unpacked ternary trits. This is the
+ * canonical kernel for substrate consumers projecting ternary signatures
+ * through ternary projection matrices (gesh's hot path).
+ *
+ * Implementation: delegates to `m4t_mtfp4_sdot_matmul_bt`. Ternary
+ * mantissas {-1, 0, +1} are a strict subset of MTFP4's range ±40, so
+ * the SDOT path applies without scope reach. Both inputs are `int8_t`
+ * at the bit level; the SDOT instruction (`vdotq_s32`) processes
+ * 16-lane int8 × int8 → int32 accumulate per cycle on Apple Silicon.
+ *
+ * Use this rather than `m4t_mtfp_ternary_matmul_bt` when activations
+ * are ternary; that kernel's packed-trit-weight decode (~30 NEON ops
+ * per 16 trits) is overkill for ternary × ternary, which the SDOT
+ * kernel computes in a single 1-cycle instruction.
+ *
+ * Y[M, N] = X[M, K] @ W^T[K, N], all ternary.
+ *
+ * Output is `m4t_mtfp_t` (int32). Per-row max |acc| ≤ K, so for
+ * K ≤ M4T_SDOT_K_MAX_EXACT no clamp is possible — the output is
+ * exact integer dot product.
+ *
+ * Preconditions:
+ *   K ≤ M4T_SDOT_K_MAX_EXACT (HARD: bound from m4t_mtfp4.h)
+ *   X, W contain only valid trit codes {-1, 0, +1}
+ *   Y must not alias X or W
+ */
+void m4t_ternary_dot_matmul_bt(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const m4t_trit_t* W,
+    int M, int K, int N
+);
+
 #ifdef __cplusplus
 }
 #endif

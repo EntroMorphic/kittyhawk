@@ -93,6 +93,17 @@ static inline m4t_mtfp4_t m4t_mtfp4_clamp(int32_t v) {
  *   K <= M4T_SDOT_K_MAX_EXACT  (HARD: substrate-invariant violation if exceeded)
  *   Y, X, W non-NULL when M·N·K > 0
  *   |X[i,k]| <= MAX_VAL_4
+ *
+ *     **Accepted-input-class extension:** ternary activations (X[i,k] ∈
+ *     {-1, 0, +1}, semantically `m4t_trit_t`) are also accepted, since
+ *     `m4t_trit_t` and `m4t_mtfp4_t` share the underlying int8_t and
+ *     ternary values are a strict subset of MTFP4's mantissa range.
+ *     Callers in the ternary × ternary regime should prefer the
+ *     dedicated wrapper `m4t_ternary_dot_matmul_bt` (m4t_ternary_matmul.h)
+ *     which exposes ternary × ternary as a first-class API with a
+ *     compile-time bit-compatibility static_assert. The SDOT path
+ *     itself is identical for both input classes.
+ *
  *   W[j,k] in {-1, 0, +1}
  *     The substrate trusts the caller at the boundary; debug builds
  *     spot-check W[0] and the last cell of W[N-1] only — exhaustive

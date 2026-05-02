@@ -28,6 +28,7 @@
  */
 
 #include "m4t_ternary_matmul.h"
+#include "m4t_mtfp4.h"
 #include "m4t_trit_pack.h"
 #include "m4t_mtfp.h"
 #include "m4t_internal.h"
@@ -172,6 +173,33 @@ static int64_t ternary_dot(
 }
 
 /* ── Public entry ──────────────────────────────────────────────────────── */
+
+/* Ternary × ternary → MTFP19 via SDOT.
+ *
+ * Bit-compatibility: m4t_trit_t and m4t_mtfp4_t are both int8_t
+ * underneath. Ternary values {-1, 0, +1} are a strict subset of MTFP4's
+ * mantissa range ±40, so the SDOT kernel computes the correct dot
+ * product without overflow or scope reach.
+ *
+ * The static_assert here documents the deliberate type-pun: if the
+ * underlying types ever diverge, the cast becomes unsafe and the build
+ * fails. This is the substrate-discipline hook that catches a future
+ * type drift.
+ */
+void m4t_ternary_dot_matmul_bt(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const m4t_trit_t* W,
+    int M, int K, int N)
+{
+    _Static_assert(sizeof(m4t_trit_t) == sizeof(m4t_mtfp4_t),
+                   "m4t_trit_t and m4t_mtfp4_t must share underlying width "
+                   "for the SDOT delegation to be bit-safe");
+    /* Both inputs are int8 at the bit level; SDOT applies. The cast
+     * is identity at runtime; the kernel's int8 × int8 → int32 path
+     * is bit-exact for values in {-1, 0, +1}. */
+    m4t_mtfp4_sdot_matmul_bt(Y, (const m4t_mtfp4_t*)X, W, M, K, N);
+}
 
 void m4t_mtfp_ternary_matmul_bt(
     m4t_mtfp_t* Y, const m4t_mtfp_t* X, const uint8_t* W_packed,

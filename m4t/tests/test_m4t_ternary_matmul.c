@@ -395,16 +395,63 @@ static int test_determinism(void) {
     return 0;
 }
 
+/* Ternary × ternary via the SDOT-delegating wrapper. Verifies
+ *   m4t_ternary_dot_matmul_bt(Y, X, W, M, K, N)
+ * produces the same int32 dot product as the reference open-coded
+ * loop, across diverse shapes and seeds. */
+static int test_ternary_dot_random_vs_reference(void) {
+    g_rng = 0xa5a5a5a5u;
+    for (int trial = 0; trial < 200; trial++) {
+        int M = rand_int(1, 8);
+        int N = rand_int(1, 8);
+        int K = rand_int(1, 200);
+
+        m4t_trit_t* X = malloc((size_t)M * K);
+        m4t_trit_t* W = malloc((size_t)N * K);
+        int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+        int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+
+        for (int i = 0; i < M*K; i++) X[i] = rand_trit();
+        for (int i = 0; i < N*K; i++) W[i] = rand_trit();
+
+        m4t_ternary_dot_matmul_bt(Y, X, W, M, K, N);
+
+        /* Reference: int32 sum of int8 × int8. */
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < N; j++) {
+                int32_t acc = 0;
+                for (int k = 0; k < K; k++) {
+                    acc += (int32_t)X[i*K + k] * (int32_t)W[j*K + k];
+                }
+                Yref[i*N + j] = acc;
+            }
+        }
+
+        for (int i = 0; i < M*N; i++) {
+            if (Y[i] != Yref[i]) {
+                printf("FAIL ternary_dot trial %d cell %d: "
+                       "got=%d ref=%d (M=%d K=%d N=%d)\n",
+                       trial, i, Y[i], Yref[i], M, K, N);
+                free(X); free(W); free(Y); free(Yref);
+                return 1;
+            }
+        }
+        free(X); free(W); free(Y); free(Yref);
+    }
+    return 0;
+}
+
 int main(void) {
-    if (test_small_golden())          return 1;
-    if (test_random_vs_reference())   return 1;
-    if (test_long_k())                return 1;
-    if (test_saturation_clamp())      return 1;
-    if (test_saturation_flags())      return 1;
-    if (test_partial_block())         return 1;
-    if (test_invalid_trit_code())     return 1;
-    if (test_zero_dim())              return 1;
-    if (test_determinism())           return 1;
-    printf("m4t_ternary_matmul: all 9 tests passed\n");
+    if (test_small_golden())                       return 1;
+    if (test_random_vs_reference())                return 1;
+    if (test_long_k())                             return 1;
+    if (test_saturation_clamp())                   return 1;
+    if (test_saturation_flags())                   return 1;
+    if (test_partial_block())                      return 1;
+    if (test_invalid_trit_code())                  return 1;
+    if (test_zero_dim())                           return 1;
+    if (test_determinism())                        return 1;
+    if (test_ternary_dot_random_vs_reference())    return 1;
+    printf("m4t_ternary_matmul: all 10 tests passed\n");
     return 0;
 }

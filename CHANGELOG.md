@@ -159,18 +159,20 @@ Both kernels are substrate-legal. The packed-trit one is for general MTFP19×pac
 
 ### Speedup (bit-equivalent, all numbers unchanged)
 
-| measurement | open-coded (pre-clean) | packed-trit kernel | SDOT kernel |
-|-------------|-------------------------|---------------------|--------------|
+| measurement | open-coded* | packed-trit kernel | SDOT kernel |
+|-------------|--------------|---------------------|--------------|
 | MNIST ablation total | 210s | 1740s | **156s** |
 | MNIST Cell A | 7.5s | 84.6s | **5.8s** |
 | MNIST Cell B (10× budget) | 124s | 1033s | **90.4s** |
 | MNIST Cell C (10× n_train) | 12s | 121s | **11.4s** |
 | MNIST Cell D | 64s | 499s | **48.2s** |
-| sig_dim sweep total | 515s | 2658s | ~500s (pending) |
-| `test_gesh_train` | 0.84s | 3.5s | **1.14s** |
+| sig_dim sweep total | 515s | 2658s | **631s** |
+| `test_gesh_train` | 0.84s | 3.5s | 1.14s |
 | `gesh_denoise_probe` | ~1s | ~1s | **0.3s** |
 
-The SDOT path is **faster than the open-coded compiler-vectorized loop** AND fully on-substrate. Auto-vectorized open-coded MAC was effectively doing what SDOT does explicitly; the dedicated SDOT kernel matches it and beats it slightly.
+*The "open-coded" column was measured **before** the substrate-discipline cleanup, on a code path that no longer exists. The "packed-trit" and "SDOT" columns are measured on the same checkout; the "open-coded ↔ SDOT" comparison is **cross-branch** and approximate. To make it strictly apples-to-apples we would have to revive the open-coded path temporarily for benchmark — not done.
+
+**Regime split (per Phase-B-redteam H5):** the SDOT path is faster than open-coded on **matmul-large** workloads (MNIST D=784, sig=128, batch=128: 1.3× faster). On **matmul-small** workloads (synthetic-test scale: D=64, sig=16, batch=64), the per-call threshold-extract widen + unpack overhead can flip the comparison — `test_gesh_train` is 1.4× *slower* than the pre-cleanup open-coded measurement. Both regimes are bit-equivalent and substrate-routed. A scratch-aware threshold-extract would close the small-scale gap; not done since small scale isn't a substrate-claim hot path.
 
 ### Bit-equivalence verified
 - `test_gesh_project`: 33/33 cells pass — kernel and reference open-coded loop produce zero differing trits.
@@ -214,7 +216,7 @@ The finding3 probe uses permille (`(correct * 1000) / n_test`, divided by 10 at 
 - `gesh/bench/finding3_probe.c` — 30-seed probe at sig_dim ∈ {2, 4, 8}.
 - `gesh/docs/finding3_high_seed_results.md` — results doc.
 
-## [2026-05-02 — Substrate-discipline cleanup: 100% on-substrate via libm4t kernels]
+## [2026-05-02 — Substrate-discipline cleanup: every MAC and sign-threshold runs through libm4t kernels]
 
 A kernel-use audit caught that the gesh consumer library and bench code re-implemented ternary projection and sign-threshold by hand in **9 places**, when libm4t had `m4t_mtfp_ternary_matmul_bt` and `m4t_route_threshold_extract` for exactly those operations. Every prior substrate-claim measurement was running through hand-written loops, not the substrate kernels we built and tested. **Substrate-claim integrity required full kernel routing**; this cycle delivers it.
 

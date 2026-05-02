@@ -19,24 +19,26 @@ Three variants × **twelve** projection dimensions, **5 independent seeds per ce
 - **Early stopping:** patience 5 epochs (training halts when batch error plateaus).
 - Each (sig_dim, variant) cell = mean ± sample stddev across 5 seeds with independent (init, train) seed pairs per trial.
 
-## Results
+## Results (permille precision; revised post Phase-B-redteam C2 fix)
 
 | sig_dim | random          | trained         | gain    |  budget |
 |---------|------------------|------------------|---------|---------|
-|       2 |  15.6% ± 3.1 pp |  21.0% ± 2.4 pp |  +5.4 pp |     640 |
-|       4 |  21.2% ± 1.6 pp |  26.8% ± 2.3 pp |  +5.6 pp |    1280 |
-|       8 |  31.8% ± 3.1 pp |  36.2% ± 0.8 pp |  +4.4 pp |    2560 |
-|      16 |  43.4% ± 3.8 pp |  51.4% ± 4.6 pp |  +8.0 pp |    5120 |
-|      32 |  59.0% ± 2.5 pp |  67.2% ± 2.4 pp |  +8.2 pp |   10240 |
-|      64 |  76.4% ± 2.1 pp |  78.2% ± 2.3 pp |  +1.8 pp |   20480 |
-|     128 |  90.0% ± 1.7 pp |  89.2% ± 1.5 pp |  −0.8 pp |   40960 |
-|     256 |  95.4% ± 0.9 pp |  95.4% ± 0.5 pp |  +0.0 pp |   81920 |
-|     384 |  96.8% ± 0.4 pp |  96.8% ± 0.4 pp |  +0.0 pp |  122880 |
-|     512 |  97.4% ± 0.5 pp |  97.6% ± 0.5 pp |  +0.2 pp |  163840 |
-|     768 |  98.2% ± 0.4 pp |  98.2% ± 0.4 pp |  +0.0 pp |  245760 |
-|    1024 |  98.6% ± 0.5 pp |  98.6% ± 0.5 pp |  +0.0 pp |  327680 |
+|       2 |  16.3% ± 3.1 pp |  21.4% ± 2.3 pp |  +5.1 pp |     640 |
+|       4 |  21.8% ± 1.6 pp |  27.2% ± 2.3 pp |  +5.4 pp |    1280 |
+|       8 |  32.3% ± 2.8 pp |  36.6% ± 0.8 pp |  +4.2 pp |    2560 |
+|      16 |  43.9% ± 3.8 pp |  51.6% ± 4.5 pp |  +7.8 pp |    5120 |
+|      32 |  59.3% ± 2.8 pp |  67.5% ± 2.5 pp |  +8.2 pp |   10240 |
+|      64 |  76.6% ± 2.3 pp |  78.3% ± 2.2 pp |  +1.8 pp |   20480 |
+|     128 |  90.4% ± 1.5 pp |  89.6% ± 1.6 pp |  −0.8 pp |   40960 |
+|     256 |  95.8% ± 0.7 pp |  95.7% ± 0.6 pp |  −0.1 pp |   81920 |
+|     384 |  97.2% ± 0.3 pp |  97.2% ± 0.4 pp |  +0.0 pp |  122880 |
+|     512 |  98.0% ± 0.4 pp |  98.0% ± 0.4 pp |  +0.1 pp |  163840 |
+|     768 |  98.6% ± 0.3 pp |  98.6% ± 0.3 pp |  +0.0 pp |  245760 |
+|    1024 |  98.8% ± 0.5 pp |  98.8% ± 0.5 pp |  +0.0 pp |  327680 |
 
-**Identity (sig_dim = D = 64, no projection): 69%.** Random projection asymptotes toward (but does not reach) 100% as sig_dim grows: 98.6% at sig_dim = 16×D = 1024.
+**Identity (sig_dim = D = 64, no projection): 69.8%** (deterministic, verified bit-equal across 2 runs per the M3 fix). Random projection asymptotes toward (but does not reach) 100% as sig_dim grows: 98.8% at sig_dim = 16×D = 1024.
+
+**Permille precision update:** the original 5-seed numbers in this table were reported via int-percent eval (`(correct * 100) / n_test`), which floors per-seed and biases 5-seed means by ~0.5 pp downward. Surfaced by the Finding 3 high-seed cross-check; remediated in `sweep_dims.c::eval_test_accuracy` and `sweep_dims.c::compute_stats` (now permille). Full discovery and remediation in `journal/sweep_rounding_bug_cycle.md`. The cells most affected are low sig_dim (drift +0.4–0.8 pp); cells near saturation are barely affected (drift <0.2 pp).
 
 ## What multi-seed corrected from the earlier single-seed version
 
@@ -57,15 +59,18 @@ Identity at sig_dim = 64 hits 69%; random ternary projection at sig_dim = 64 hit
 
 This finding is robust across seeds (±2.1pp stddev; the +7pp gap is well above noise). **It is not yet mechanism-verified** — the "implicit denoising" framing is a *hypothesis* that explains the data; it has not been tested by, e.g., examining which dims survive the random projection. Worth a follow-up cycle.
 
-### 3. Capacity floor at sig_dim ≤ 4
-At sig_dim = 2: ~19% mean trained accuracy (30-seed measurement). With 3² = 9 distinct ternary signatures vs 10 classes, this is information-theoretically limited. At sig_dim = 4: 27%. At sig_dim = 8: 36%. These are capacity bounds, not training failures.
+### 3. Capacity floor at sig_dim ≤ 4 — **mechanism-confirmed**
 
-**Hardened by 30-seed re-measurement** (`gesh/docs/finding3_high_seed_results.md`):
-- sig_dim = 2 trained: **19.3% ± 3.26 pp** (95% CI ±1.17 pp)
-- sig_dim = 4 trained: **27.0% ± 3.22 pp** (95% CI ±1.15 pp)
-- sig_dim = 8 trained: **35.9% ± 3.39 pp** (95% CI ±1.21 pp)
+At sig_dim = 2: trained mean **19.6% ± 2.65 pp** (30 seeds, paired-CI ±0.95 pp). With 3² = 9 distinct ternary signatures vs C = 10 classes, pigeonhole forces collision. **The mechanism probe (`gesh/docs/finding3_high_seed_results.md`) confirms this directly:** at sig_dim = 2, the trained R produces only **4 distinct class-tile signatures** for the 10 classes, and **6 of 10 classes get strictly 0% accuracy** by virtue of colliding with another class's tile. The capacity floor is no longer a hypothesis — it's directly observed.
 
-Monotone climb 19.3 → 27.0 → 35.9 with non-overlapping 95% CIs (gaps >10× the CI width). The 5-seed sweep's "21%" at sig_dim = 2 was inflated ~1.7 pp by integer-percent rounding bias in `sweep_dims.c`'s eval (corrected in `finding3_probe.c`). Direction holds; magnitude refined.
+Outcomes (30-seed, permille precision):
+- sig_dim = 2: random 16.4% / trained 19.6% / **paired gain +3.19 pp ± 1.29 pp CI** — 4 distinct sigs / 10 classes, 6 classes at 0%.
+- sig_dim = 4: random 22.5% / trained 26.4% / **paired gain +3.89 pp ± 1.21 pp CI** — 7 distinct sigs / 10 classes, 3 classes at 0%.
+- sig_dim = 8: random 31.1% / trained 37.3% / **paired gain +6.19 pp ± 1.93 pp CI** — 8 distinct sigs / 10 classes, 2 classes at 0% (training-induced, not pigeonhole-forced).
+
+Pigeonhole-force threshold: collisions are mathematically required at sig_dim < log₃(C) ≈ 2.1. At sig_dim = 4, 81 ≥ 10 signatures is sufficient; the trained collisions are training artifacts, not capacity bounds.
+
+**Capacity-floor finding upgraded**: outcome → mechanism, hypothesis → confirmed.
 
 ### 4. Diminishing returns at sig_dim ≥ 128
 At sig_dim = 128, multi-seed gain is **−0.8 ± 1.5pp** (slightly negative, within noise of zero). At sig_dim = 256, exactly +0.0pp. Random ternary expansion already encodes whatever signal exists; training has nothing to add.

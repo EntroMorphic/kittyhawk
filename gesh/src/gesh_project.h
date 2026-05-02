@@ -93,8 +93,11 @@ void gesh_project_one_packed(
  */
 
 typedef struct {
-    uint8_t*    R_packed;     /* [sig_dim × M4T_TRIT_PACKED_BYTES(input_dim)] */
-    m4t_mtfp_t* X_mtfp;       /* [n_max × input_dim] */
+    /* SDOT path needs only the matmul output buffer, the per-row int64
+     * widening scratch, and the per-row packed-trit buffer. R is read
+     * directly as int8 (no packing); X is read directly as int8 (no
+     * widening). The packed-trit kernel's R_packed and X_mtfp scratch
+     * was removed during the SDOT cleanup (M4 fix). */
     m4t_mtfp_t* Y_mtfp;       /* [n_max × sig_dim] */
     int64_t*    row64;        /* [sig_dim] */
     uint8_t*    row_packed;   /* [M4T_TRIT_PACKED_BYTES(sig_dim)] */
@@ -113,10 +116,9 @@ void gesh_project_scratch_init(
 void gesh_project_scratch_free(gesh_project_scratch_t* sc);
 
 /* Same operation as gesh_project_batch_unpacked, but uses caller-supplied
- * scratch — no per-call malloc. R is re-packed into sc->R_packed every
- * call (callers in hot loops where R changes need this; a future
- * scratch_pack_R_row helper could amortize when only a single trit
- * changed). x widening into sc->X_mtfp is done per call.
+ * scratch — no per-call malloc. The SDOT path needs only the matmul
+ * output buffer + per-row int64 widening + per-row packed-trit buffer;
+ * R and x are read directly as int8 (no packing, no widening).
  *
  * Preconditions: sc was initialized with sig_dim ≥ this call's sig_dim,
  * input_dim ≥ this call's input_dim, n_max ≥ n. */

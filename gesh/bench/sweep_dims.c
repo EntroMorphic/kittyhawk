@@ -92,7 +92,10 @@ static int eval_test_accuracy(
         if (preds[i] == test_lbl[i]) correct++;
     }
     free(preds);
-    return (correct * 100) / n_test;
+    /* Permille precision (per the Phase B red-team C2 + the rounding-bug
+     * cycle): integer percent flooring biased 5-seed means by up to ~1.7pp.
+     * Permille gives 0.1pp resolution; the print path divides by 10. */
+    return (correct * 1000) / n_test;
 }
 
 static void build_bank_from_projection(
@@ -189,18 +192,19 @@ static int run_identity(const fixture_t* f) {
 
 /* ── Stats over an array of percentages ─────────────────────────────────── */
 
+/* Inputs are permille; outputs are percent (mean) and pp (stddev). */
 static void compute_stats(const int* vals, int n, double* out_mean, double* out_stddev) {
     double sum = 0.0;
     for (int i = 0; i < n; i++) sum += (double)vals[i];
-    double mean = sum / (double)n;
+    double mean_pm = sum / (double)n;
     double sq = 0.0;
     for (int i = 0; i < n; i++) {
-        double d = (double)vals[i] - mean;
+        double d = (double)vals[i] - mean_pm;
         sq += d * d;
     }
     double var = (n > 1) ? sq / (double)(n - 1) : 0.0;
-    *out_mean = mean;
-    *out_stddev = sqrt(var);
+    *out_mean = mean_pm / 10.0;        /* permille → percent */
+    *out_stddev = sqrt(var) / 10.0;    /* permille → pp */
 }
 
 /* ── Main sweep ─────────────────────────────────────────────────────────── */
@@ -257,11 +261,21 @@ int main(void) {
         fflush(stdout);
     }
 
-    int id_pct = run_identity(&f);
+    int id_pm = run_identity(&f);
+    /* Determinism cross-check (M3): identity is deterministic; running
+     * twice must produce bit-identical output. */
+    int id_pm_2 = run_identity(&f);
+    if (id_pm != id_pm_2) {
+        fprintf(stderr,
+                "FAIL identity determinism: %d vs %d permille\n",
+                id_pm, id_pm_2);
+        return 2;
+    }
     double total_s = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("\n");
-    printf("Identity (sig_dim=D=%d, no projection): %d%% (single trial; deterministic)\n",
-           f.D, id_pct);
+    printf("Identity (sig_dim=D=%d, no projection): %.1f%% "
+           "(single trial; deterministic, verified bit-equal across 2 runs)\n",
+           f.D, id_pm / 10.0);
     printf("\nTotal sweep runtime: %.1fs (%d sig_dims × %d seeds × 2 variants)\n",
            total_s, n_dims, N_SEEDS);
 

@@ -32,7 +32,7 @@
 
 #include "synth_proto.h"
 #include "gesh_train.h"
-#include "m4t_mtfp4.h"
+#include "m4t_ternary_matmul.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
 
@@ -92,17 +92,8 @@ static int per_dim_spread_permille(
     return (int)(max_v - min_v);
 }
 
-/* Ternary × ternary → MTFP19 via SDOT. Both inputs are int8 already;
- * the MTFP4 SDOT kernel is the right tool (vdotq_s32 1-cycle 16-lane
- * MAC, no decode, no widening). */
-static inline void ternary_matmul_sdot(
-    m4t_mtfp_t* Y,
-    const m4t_trit_t* X,
-    const m4t_trit_t* W,
-    int M, int K, int N)
-{
-    m4t_mtfp4_sdot_matmul_bt(Y, (const m4t_mtfp4_t*)X, W, M, K, N);
-}
+/* Ternary × ternary uses the substrate's first-class
+ * `m4t_ternary_dot_matmul_bt` API (delegates to SDOT internally). */
 
 int main(void) {
     synth_proto_config_t cfg = synth_proto_default();
@@ -154,8 +145,8 @@ int main(void) {
         /* Substrate-routed via SDOT (1-cycle 16-lane int8 MAC).
          *   Y_proto   = P     @ R^T   (C    × SIG_DIM) — x scores
          *   projected = train @ R^T   (NTR  × SIG_DIM) — y scores */
-        ternary_matmul_sdot(Y_proto, protos, R, C, D, SIG_DIM);
-        ternary_matmul_sdot(projected, train, R, N_TRAIN, D, SIG_DIM);
+        m4t_ternary_dot_matmul_bt(Y_proto, protos, R, C, D, SIG_DIM);
+        m4t_ternary_dot_matmul_bt(projected, train, R, N_TRAIN, D, SIG_DIM);
 
         for (int j = 0; j < SIG_DIM; j++) {
             double x = col_stddev(Y_proto, C, SIG_DIM, j);
