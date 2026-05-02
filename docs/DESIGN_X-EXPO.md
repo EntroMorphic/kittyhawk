@@ -1,8 +1,8 @@
 ---
 title: Cross-exponent MTFP add — design
-date: 2026-05-01 (revised 2026-05-01 per xexpo_design_closeout.md)
-status: DESIGN EXPLORATION (pre-cycle). Not a commitment to build. The discipline (no primitive without measured consumer demand) gates implementation behind tier 3a + 3b in `REMEDIATION_PLAN.md`. This document specifies what the kernel *would* be if a consumer qualifies — and what the consumer-discovery cycle needs to test against. Revised after external review surfaced (a) a too-tight error bound and (b) the accumulator-vs-pairwise API question; both folded in below.
-companions: REMEDIATION_PLAN.md · m4t/docs/M4T_SUBSTRATE.md (§14.2) · NORTH_STAR.md · journal/xexpo_design_closeout.md
+date: 2026-05-01 (revised 2026-05-01 per xexpo_design_closeout.md; implemented same day)
+status: IMPLEMENTED. The kernel ships in m4t/src/m4t_mtfp.{h,c} with property tests at 10,000 samples × 6 properties × bit-exact int64 reference. Owner authorized direct build (skipping the consumer-discovery cycle) under the codified discipline rule (principle 5 — named consumer demand, not measured). Spec re-read of `M4T_SUBSTRATE.md` §14.2 + §8.2 drove two design changes from the original synthesize phase: rounding rule is base-3 round-to-nearest (§8.2) instead of truncate-toward-zero, and the flag layout carries both SATURATED and ROUNDED bits (§14.2 + §14.4). Both changes are reflected below.
+companions: REMEDIATION_PLAN.md · m4t/docs/M4T_SUBSTRATE.md (§14.2, §8.2, §14.4) · NORTH_STAR.md · journal/xexpo_design_closeout.md · m4t/src/m4t_mtfp.{h,c} · m4t/tests/test_m4t_mtfp_accum_aligning.c
 ---
 
 # `m4t_mtfp_vec_accum_aligning` — design
@@ -71,116 +71,86 @@ The accumulator's invariant: at any moment between calls, `|running[i]| ≤ MAX_
 Four case branches per call:
 
 ```
-Case e_new == e_running:
+Case addend_exp == running_exp:
     /* Same-block-exp add. Degenerates to vec_add_inplace semantics. */
-    for i: running[i] = clamp(running[i] + new[i])
+    for i: running[i] = clamp(running[i] + addend[i])
 
-Case e_new > e_running:
-    /* Grow running_exp upward to e_new. Running mantissa rescales down. */
-    Δ = e_new - e_running
+Case addend_exp > running_exp:
+    /* Grow running_exp upward. Running mantissa rescales down. */
+    Δ = addend_exp - running_exp
     s = pow3(Δ)
-    for i: running[i] = clamp((running[i] / s) + new[i])
-    running_exp = e_new
+    for i: running[i] = clamp(round_nearest(running[i], s) + addend[i])
+    running_exp = addend_exp
 
-Case e_new < e_running:
-    /* New contribution rescales down to running_exp. running_exp unchanged. */
-    Δ = e_running - e_new
+Case addend_exp < running_exp:
+    /* Addend rescales down to running_exp. running_exp unchanged. */
+    Δ = running_exp - addend_exp
     s = pow3(Δ)
-    for i: running[i] = clamp(running[i] + (new[i] / s))
+    for i: running[i] = clamp(running[i] + round_nearest(addend[i], s))
 
-Pre-add saturation (any case):
-    /* If after rescale the to-be-added side already overflows, the add
-     * cannot recover. Flag and saturate at the rescaled-but-unadded value. */
+Degenerate (|Δ| ≥ 20):
+    /* Smaller side rounds to zero by the math; pass the larger side
+     * through. Mark ROUNDED for any cell where the rescaled side was
+     * non-zero. */
 ```
 
-Exactly one rescale happens per call (or zero in the same-block case). The integer division uses C truncate-toward-zero — substrate-consistent with `m4t_mtfp_clamp64` and `signature_update`'s `means /= T`.
+Exactly one rescale happens per call (or zero in the same-block case). The rescale uses **base-3 round-to-nearest** (§8.2). Powers of 3 are odd, so the "halfway" point `s/2` is never an integer remainder; round-to-nearest is unambiguous and the worst-case truncation in mantissa units is `(s−1)/(2s) < 1/2`.
 
-The pairwise primitive `vec_add_aligning(dst, a, e_a, b, e_b)` is implemented as a thin wrapper that initializes `dst = a, e_running = e_a` and then calls accumulate once with `(b, e_b)`. It ships only as a convenience; the accumulator is the canonical primitive.
+The pairwise primitive `vec_add_aligning(dst, &out_e, a, e_a, b, e_b)` is implemented as a thin wrapper that copies `a → dst`, sets `e = e_a`, calls the accumulator with `(b, e_b)`, and writes back `*out_e`. It ships only as a convenience; the accumulator is the canonical primitive.
 
 ## Saturation semantics (precise)
 
-Two places saturation can happen in the accumulator: (1) post-add overflow at the current `running_exp`, (2) the pre-add edge where the rescaled smaller side already saturates to ±MAX_VAL even before the add (rare but possible at extreme Δ).
+Per-call rescale rounding error is bounded **bit-exactly** by `(s−1)/(2s) < 1/2` mantissa units at the result exponent, with `s = 3^Δ`. In real numbers: at most `(3^e_result − 3^e_smaller) / 2 < (1/2) · 3^e_result`.
 
-For the accumulator's per-call contract, with C truncate-toward-zero division of any rescaled operand:
+For the accumulator's per-call contract, with **base-3 round-to-nearest**:
 
 ```
-if !saturated[i] for this call:
-    require |decode(running_after[i], e_result)
-             − (decode(running_before[i], e_running)
-                + decode(new[i], e_new))|
-             < 3^e_result                     /* strict */
-    /* The error comes entirely from C integer truncation when dividing
-     * the smaller-exponent side's mantissa by 3^Δ. Truncation toward
-     * zero loses at most (3^Δ − 1)/3^Δ mantissa units at e_result, which
-     * is strictly less than 1 mantissa unit, which decodes to strictly
-     * less than 3^e_result in real numbers. */
+For each cell i:
+  let unsat = (rescaled larger operand mantissa) + (rescaled smaller operand mantissa)
+              computed in int64
 
-if saturated[i] for this call:
-    require sign(running_after[i]) ==
-            sign(decode(running_before[i], e_running)
-                 + decode(new[i], e_new))
-    require running_after[i] ∈ {+MAX_VAL, −MAX_VAL}
-    require sat_flags[i] == 1   /* if sat_flags non-NULL */
+  if |unsat| ≤ MAX_VAL:
+      running_after[i] == clamp(unsat) == unsat
+      flags[i] |= ROUNDED iff this call's rescale produced a non-zero remainder
+                              for cell i
+
+  if |unsat| > MAX_VAL:
+      running_after[i] ∈ {+MAX_VAL, −MAX_VAL}
+      sign(running_after[i]) == sign(unsat)
+      flags[i] |= SATURATED
+      flags[i] |= ROUNDED if rescale rounded
 ```
 
-The bound is **strictly** less than `3^e_result`, paired with the truncate-toward-zero rule. Round-to-nearest would give `≤ ½ · 3^e_result`, but the substrate uses truncate everywhere else; consistency wins.
+The property test verifies this **bit-exactly** against an int64 reference implementation — no floating-point oracle, no tolerance. Any kernel deviation from the reference produces a different `running[i]`, which fails the test.
 
-This is the **substrate's saturation contract for cross-exponent accumulation**. The substrate spec amendment (post-cycle, if the kernel ships) records this formally as Case S extended to accumulator semantics.
+This is the **substrate's saturation contract for cross-exponent accumulation** under §8.2 and §14.2. Case S (saturate, fixed output type) per §8.5; Case W (widen output to MTFP39) is a future kernel that has not been built.
 
-## API
+## API (as implemented in `m4t_mtfp.h`)
 
 ```c
-/* Accumulate a new contribution into a running MTFP19 buffer when the
- * two may carry different block exponents. The running buffer's exponent
- * may grow upward across calls; it never shrinks.
- *
- * Path A alignment with C truncate-toward-zero rescale. The smaller-
- * exponent side loses precision; the larger preserves dynamic range.
- *
- * Saturation: per-cell, post-add (and rare pre-add) per Case S.
- * sat_flags is per-cell (1 byte per cell, 0 or 1); pass NULL to skip.
- *
- * Aliasing: running and new must NOT alias each other (the kernel may
- * read new[i] after writing running[i]). running may equal sat_flags's
- * underlying buffer iff the consumer does not need the flags — but the
- * recommended usage is distinct buffers.
- *
- * Preconditions:
- *   n >= 0
- *   running, new non-NULL when n > 0
- *   running_exp non-NULL
- *   |running[i]|, |new[i]| <= M4T_MTFP_MAX_VAL  (MTFP19 substrate invariant)
- *
- * Documented degenerate behavior (NOT a precondition violation):
- *   |*running_exp − new_exp| > 19 — the smaller-exponent side truncates
- *   to zero by the math; the result is the larger side passed through
- *   (modulo saturation). The kernel does not error; this is well-defined,
- *   if uninformative.
- */
+#define M4T_FLAG_SATURATED  ((uint8_t)0x01)
+#define M4T_FLAG_ROUNDED    ((uint8_t)0x02)
+
 void m4t_mtfp_vec_accum_aligning(
     m4t_mtfp_t*       running,
     int8_t*           running_exp,    /* in-out */
-    const m4t_mtfp_t* new,
-    int8_t            new_exp,
-    uint8_t*          sat_flags,      /* nullable, length n */
-    int               n);
+    const m4t_mtfp_t* addend,
+    int8_t            addend_exp,
+    uint8_t*          flags,          /* nullable, length n; bits sticky-OR'd */
+    int               n
+);
 
-/* Convenience pairwise wrapper. Equivalent to:
- *   memcpy(dst, a, n * sizeof(m4t_mtfp_t));
- *   int8_t e = e_a;
- *   m4t_mtfp_vec_accum_aligning(dst, &e, b, e_b, sat_flags, n);
- *   *out_e = e;
- *
- * The accumulator is the canonical primitive; this wrapper exists for
- * call sites that genuinely have two distinct buffers and one shot. */
 void m4t_mtfp_vec_add_aligning(
     m4t_mtfp_t*       dst,
     int8_t*           out_e,           /* result exponent, written */
     const m4t_mtfp_t* a, int8_t        e_a,
     const m4t_mtfp_t* b, int8_t        e_b,
-    uint8_t*          sat_flags,
-    int               n);
+    uint8_t*          flags,
+    int               n
+);
 ```
+
+The header carries the full preconditions, sticky-flag semantics, and aliasing contract. Parameter `addend` is used (not `new`) to preserve C++ portability of the `extern "C"` block.
 
 ### Why the running exponent is in-out
 
@@ -209,118 +179,35 @@ Within each logical tensor, scale is uniform. **Per-block sidecar exponents woul
 
 **Decision:** MVP is per-tensor. Per-block becomes a separate kernel only if the consumer-discovery cycle surfaces a tensor whose internal scale legitimately varies across blocks. The plan's open question is provisionally answered.
 
-## `sat_flags` layout
+## Flag layout (§14.4 status array)
 
-For MVP: **one `uint8_t` per cell**. Values `0` or `1`. Total length `n` bytes.
+**One `uint8_t` per cell**, with two sticky bits defined:
 
-For accumulator semantics: a cell's flag is set if saturation occurred during *any* call in the sequence reaching that cell. The flag is sticky — the consumer either clears it deliberately or accepts that one saturating call contaminates that cell's history.
+| Bit | Symbol | Meaning |
+|---|---|---|
+| 0 | `M4T_FLAG_SATURATED` | Post-add overflow occurred for this cell in some prior call |
+| 1 | `M4T_FLAG_ROUNDED`   | Rescale produced a non-zero remainder for this cell in some prior call |
+| 2-7 | reserved | Must be zero on input from caller |
 
-Pros: simplest to read, simplest to test.
+Bits OR'd in across calls; never cleared by the kernel. Caller initializes via `memset(flags, 0, n)` and clears manually as needed. Pass `NULL` to disable tracking entirely.
 
-Cons: 4× the storage of a bit-packed alternative. Acceptable for tier 3 (this kernel runs in accumulation phases, not signature-distance loops).
-
-If the cycle measures saturation rate <0.1%, layout migrates to a single `uint64_t` aggregate counter in a future cycle. Not now.
+§14.4 sanctions both per-cell and per-block layouts; the per-cell choice trades 25% memory for simpler test/debug. A future kernel may migrate to per-block (1 byte per 4-cell MTFP19 block, 4 bits used) if observability becomes a bottleneck.
 
 ## Aliasing
 
-`running` and `new` **must not alias** in the accumulator API. The kernel may read `new[i]` after writing `running[i]` (depending on which operand needs rescale), so aliasing is unsafe.
+`running` and `addend` **must not alias** in the accumulator API. The kernel may read `addend[i]` after writing `running[i]` (depending on which operand needs rescale), so aliasing is unsafe.
 
 The pairwise wrapper enforces aliasing safety internally via the `dst = a` initialization step. If the consumer needs `dst == a`, the wrapper handles it; if `dst == b`, it does not (a separate wrapper variant could, but is not built until requested).
 
-The property test exercises:
-- Distinct `running` and `new` buffers (canonical case).
-- `running == sat_flags` underlying buffer with `sat_flags` declared NULL (degenerate but permitted).
+The property test verifies determinism by running two parallel kernel invocations with identical inputs and confirming bit-identical results (catching any nondeterministic state leak through the kernel's internal accumulator path).
 
-## Implementation sketch (scalar MVP)
+## Implementation
 
-```c
-#include "m4t_mtfp.h"
-#include "m4t_internal.h"
+Scalar MVP. Source: `m4t/src/m4t_mtfp.c`. ~150 lines, no NEON, no fp.
 
-/* Powers of 3 up to 3^19. Indexed by Δ ∈ [0, 19].
- * Δ > 19 → degenerate behavior; smaller side truncates to zero. */
-static const int32_t M4T_POW3_TABLE[20] = {
-    1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683,
-    59049, 177147, 531441, 1594323, 4782969, 14348907,
-    43046721, 129140163, 387420489, 1162261467
-};
+The implementation includes a static `M4T_POW3_TABLE[20]` (powers of 3 from 3^0 through 3^19) and a `m4t_pow3_round_div(M, s, &had_remainder)` helper that performs base-3 round-to-nearest. The accumulator switches on `(addend_exp − running_exp)` sign and handles four branches (same-exp, grow up, addend rescales down, degenerate edge).
 
-void m4t_mtfp_vec_accum_aligning(
-    m4t_mtfp_t* running, int8_t* running_exp,
-    const m4t_mtfp_t* new, int8_t new_exp,
-    uint8_t* sat_flags,
-    int n)
-{
-    assert(n >= 0);
-    assert(n == 0 || (running && new));
-    assert(running_exp);
-
-    int8_t e_run = *running_exp;
-
-    if (new_exp == e_run) {
-        /* Same-block-exp accumulation. */
-        for (int i = 0; i < n; i++) {
-            int64_t sum = (int64_t)running[i] + (int64_t)new[i];
-            m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
-            if (sat_flags && sum != (int64_t)out) sat_flags[i] = 1;
-            running[i] = out;
-        }
-        return;
-    }
-
-    if (new_exp > e_run) {
-        /* Grow running_exp upward; rescale running's mantissas down. */
-        int delta = (int)new_exp - (int)e_run;
-        if (delta >= 20) {
-            /* Degenerate: running side truncates to zero; result is `new`. */
-            for (int i = 0; i < n; i++) running[i] = new[i];
-            *running_exp = new_exp;
-            return;
-        }
-        int32_t s = M4T_POW3_TABLE[delta];
-        for (int i = 0; i < n; i++) {
-            int64_t aa = (int64_t)running[i] / s;        /* truncate toward 0 */
-            int64_t sum = aa + (int64_t)new[i];
-            m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
-            if (sat_flags && sum != (int64_t)out) sat_flags[i] = 1;
-            running[i] = out;
-        }
-        *running_exp = new_exp;
-        return;
-    }
-
-    /* new_exp < e_run: rescale new down; running_exp unchanged. */
-    int delta = (int)e_run - (int)new_exp;
-    if (delta >= 20) {
-        /* Degenerate: new side truncates to zero; running unchanged. */
-        return;
-    }
-    int32_t s = M4T_POW3_TABLE[delta];
-    for (int i = 0; i < n; i++) {
-        int64_t bb = (int64_t)new[i] / s;                 /* truncate toward 0 */
-        int64_t sum = (int64_t)running[i] + bb;
-        m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
-        if (sat_flags && sum != (int64_t)out) sat_flags[i] = 1;
-        running[i] = out;
-    }
-}
-
-/* Pairwise wrapper. */
-void m4t_mtfp_vec_add_aligning(
-    m4t_mtfp_t* dst, int8_t* out_e,
-    const m4t_mtfp_t* a, int8_t e_a,
-    const m4t_mtfp_t* b, int8_t e_b,
-    uint8_t* sat_flags,
-    int n)
-{
-    if (dst != a) {
-        for (int i = 0; i < n; i++) dst[i] = a[i];
-    }
-    int8_t e = e_a;
-    m4t_mtfp_vec_accum_aligning(dst, &e, b, e_b, sat_flags, n);
-    if (out_e) *out_e = e;
-}
-```
+The kernel runs at `O(n × 1 division-and-add)` per call. No primitive is called more than once per cell per call.
 
 ### NEON consideration (deferred)
 
@@ -331,75 +218,50 @@ ARM NEON has no integer-divide instruction. A vectorized version would either:
 
 **MVP is scalar.** Vectorization is its own cycle, gated on profile evidence from a real consumer.
 
-## Property tests (sequence-shaped)
+## Property tests (bit-exact, sequence-shaped)
 
-The accumulator's contract is across-call invariant maintenance, not single-call output. Tests must therefore be sequence-shaped: drive the kernel with a sequence of `(new, e_new)` calls and verify properties hold throughout.
+Located in `m4t/tests/test_m4t_mtfp_accum_aligning.c`. The tests use a **bit-exact int64 reference implementation** of the kernel as the oracle — no fp, no tolerances. Any kernel deviation produces a different `int32` result, which fails the comparison. 10 000 random sequences per property × 6 properties.
 
-Built on the property-based harness specified in `REMEDIATION_PLAN.md` "Test infrastructure":
+The original synthesize phase specified a `double` decode oracle with a real-number tolerance bound; the bit-exact reference replaces it because (a) the decode oracle hit fp precision walls at large mantissas (~10^12) and (b) bit-exact catches more than real-number bound checks (e.g., off-by-one rounding-rule bugs, sign-of-zero handling).
 
-### `prop_accum_aligning_correctness`
+| Property | Sample shape | Check |
+|---|---|---|
+| `prop_accum_aligning_correctness` | 10 000 sequences × 1–16 calls × 1–64 cells | Every post-call `running[i]` and `running_exp` matches the int64 reference exactly |
+| `prop_accum_aligning_invariant` | Same sample shape | `|running[i]| ≤ MAX_VAL` after every call |
+| `prop_accum_aligning_aliasing` | Same sample shape, two parallel kernel invocations | Both invocations produce bit-identical results — catches nondeterministic state leak |
+| `prop_accum_aligning_flags` | Same sample shape, with `flags` non-NULL | Sticky-OR'd `flags[i]` matches reference's per-call truth (SATURATED + ROUNDED bits) |
+| `prop_add_aligning_via_wrapper` | 10 000 pairwise `(a, b, e_a, e_b)` | Pairwise wrapper bit-identical to manual setup + accumulator |
+| `prop_add_aligning_roundtrip` | 10 000 random `(x, e)` | `add_aligning(dst, &e, x, e0, -x, e0)` produces `dst[i] = 0` |
 
-- **Sample:** 10 000 random sequences. Each sequence has `n ∈ [1, 64]` cells and `K ∈ [1, 32]` accumulation calls. Per call: random `new[]` with `|new[i]| ≤ MAX_VAL`, random `e_new` with `|e_new − running_exp_at_call_time| ≤ 19`. Initial running buffer random within MAX_VAL.
-- **Reference:** parallel "oracle" running sum maintained as `double[]` (sanctioned per `M4T_SUBSTRATE.md` §12 — test path, not runtime kernel) using `mtfp_decode_to_double`.
-- **Check:** at each call's completion, for every non-saturated cell `i`,
-  `|decode(running[i], running_exp) − oracle[i]| < 3^running_exp`. Strict bound. For saturated cells, the saturation contract holds.
-- **Pass:** all checks pass at every call across 10 000 sequences.
+All six pass at 10 000 / 10 000 on the build.
 
-### `prop_accum_aligning_invariant`
+## Open questions (now post-implementation; cycle becomes a usage study)
 
-- **Sample:** 10 000 random sequences as above.
-- **Check:** at every call's completion, `|running[i]| ≤ MAX_VAL` for all `i`. The accumulator's defining invariant must hold across the entire sequence — not just the first call.
-- **Pass:** invariant holds at every call across 10 000 sequences.
+The kernel ships. The questions the consumer-discovery cycle was going to test are now usage-study questions instead — the kernel's behavior is fixed, the question is which consumer call patterns hit which branches:
 
-### `prop_accum_aligning_aliasing`
+1. **What `Δ` distribution do real consumers produce?** Determines whether the kernel's accuracy promises are tight or slack on real data.
+2. **Is the saturation rate non-trivial?** Determines whether `M4T_FLAG_SATURATED` is informative or dead infrastructure.
+3. **Is the rounding rate non-trivial?** Same question for `M4T_FLAG_ROUNDED`.
+4. **Pairwise vs accumulator usage at real call sites.** The wrapper is a convenience; if consumers always go through the wrapper, the accumulator API is over-engineered for the typical call pattern.
+5. **Does any consumer want downward exponent migration?** Currently unsupported. If a consumer needs it, separate kernel.
 
-- **Sample:** 10 000 random sequences.
-- **Check:** running aliasing the underlying memory of `sat_flags` (with `sat_flags` declared NULL) produces results bit-identical to the non-aliased case. Distinct `running` and `new` is required (precondition); the test does not exercise the forbidden case.
-- **Pass:** identical results across 10 000 sequences.
+These are study questions, not decision gates. The kernel is built.
 
-### `prop_accum_aligning_sat_flags`
+## What this kernel does not decide
 
-- **Sample:** 10 000 sequences drawn from a *saturation-targeted* distribution — operands deliberately near MAX_VAL at compatible exponents, plus the boundary case `|running[i]| + |rescaled_new[i]| = MAX_VAL` (no saturation expected).
-- **Check:** for each cell, `sat_flags[i] == 1` if and only if at least one call in the sequence saturated that cell. Sticky semantics; once set, remains set.
-- **Pass:** false positives and false negatives both fail; 10 000 / 10 000.
+- **Per-block exponent variant.** Per-tensor only. Per-block is a separate kernel if a consumer ever asks.
+- **Case-W variant.** `vec_accum_aligning_widening` with output in MTFP39 (no saturation) is a separate kernel.
+- **Downward exponent migration.** Upward-only.
+- **NEON vectorization.** Scalar. Vectorize on profile evidence.
+- **MTFP4 / MTFP9 variants.** Tier 3 also-deferred surfaces.
+- **Subtraction.** `vec_sub_aligning` is a trivial extension; build when asked.
 
-### Pairwise wrapper tests (one property each)
+## Spec amendment
 
-- **`prop_add_aligning_correctness_via_wrapper`** — 10 000 random `(a, b, e_a, e_b)`; pairwise wrapper produces same `dst[]` and `out_e` as a scalar oracle would.
-- **`prop_add_aligning_roundtrip`** — `add_aligning(dst, &e, x, e0, neg(x), e0)` produces `dst[i] == 0` for all `i`.
+`m4t/docs/M4T_SUBSTRATE.md` §14.2 is updated alongside this build to:
 
-## Open questions for the consumer-discovery cycle
-
-The design assumes consumers will benefit from cross-exponent accumulation. The cycle's instrumentation must verify this on real data. The questions are now sharper than the original design's three:
-
-1. **Does any consumer's accumulation site see `e_new ≠ e_running`?** If multi-table SUM only ever combines distances at one shared exponent, the kernel reduces to the existing `vec_add_inplace` and earns nothing. **Cycle's per-call exponent log directly tests this.**
-2. **What `Δ` distribution do real consumers produce?** `Δ ≤ 1` in 99% of calls means precision loss is small (at most one trit). `Δ ≥ 5` regularly means the smaller side genuinely vanishes — and the design's framing matters.
-3. **Is the saturation rate non-trivial?** If <0.1%, `sat_flags` becomes dead infrastructure and may downgrade to a counter.
-4. **NEW: Does the consumer's natural call pattern match the accumulator API, or is it pairwise?** This is the question the closeout review surfaced. Evidence sources (per `REMEDIATION_PLAN.md`):
-   - Static analysis of archived `mnist_routed_bucket_multi.c`.
-   - API-shape sketch under both designs at each identified call site.
-   - Verdict by majority + hot-path-site weight.
-5. **NEW: Does any consumer's `running_exp` legitimately need to decrease across calls?** The accumulator design specifies upward-only growth. If a consumer would benefit from downward migration (e.g., to recover precision after a temporary spike), that's a different primitive.
-
-The cycle's RAW phase records these five measurements directly. The SYNTHESIZE phase decides which design hypotheses hold and which need amending before the kernel ships.
-
-## What this design does not decide
-
-- **Per-block exponent variant.** Deferred until a consumer asks. MVP is per-tensor.
-- **Case-W variant.** A separate kernel `m4t_mtfp_vec_accum_aligning_widening` that lands the running buffer in MTFP39 and avoids saturation entirely. Only if the cycle surfaces a consumer that legitimately needs both precision and dynamic range simultaneously.
-- **Downward exponent migration.** If a consumer needs it, that's a separate cycle and a separate primitive. The design here is upward-only.
-- **NEON vectorization.** Scalar MVP; vectorize only on profile evidence.
-- **MTFP4 or MTFP9 variants.** Tier 3 also-deferred surfaces.
-- **Subtraction.** `vec_sub_aligning` mirrors the design with `new[i] = -new[i]` substituted. Trivial extension; not built until asked.
-
-## Spec amendment (post-cycle, if kernel ships)
-
-`m4t/docs/M4T_SUBSTRATE.md` §14.2 is updated to:
-
-- Replace named-but-unbuilt status with the kernel's actual semantics (the saturation contract above).
-- Note Path A as the chosen alignment strategy and Path B as explicitly rejected.
-- Document the per-tensor exponent granularity and the truncate-toward-zero rounding rule.
-- Document the accumulator-as-primary, pairwise-as-wrapper API choice (a departure from the original §14.2 sketch).
-- Cross-reference both `journal/xexpo_design_*` and the consumer-discovery cycle's findings as the discipline gate.
-
-If the cycle does not qualify a consumer, §14.2 is updated with the cycle's null result and this design (along with the LMM cycle) is preserved as a vetted artifact: a design that did not earn its implementation. Per discipline, that is a real outcome, not a failure.
+- Replace the DEFERRED status with IMPLEMENTED, pointing to `m4t_mtfp.h` and the property-test file.
+- Confirm Path A alignment (max-exponent target) as the choice.
+- Confirm base-3 round-to-nearest as the rule (§8.2 default).
+- Document the per-tensor exponent granularity choice.
+- Cross-reference `journal/xexpo_design_*` as the LMM cycle that scoped the design.

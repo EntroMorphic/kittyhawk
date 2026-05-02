@@ -336,8 +336,21 @@ Substrate-level questions where hardware does not dictate the answer. The origin
 ### 14.1 Logical block size (OPEN — empirical)
 Hardware says 16 B for the mantissa-block. Whether a *logical block* — the unit at which we group for prefetch tuning and scheduling — should be 1, 2, 4, or 8 hardware blocks is a cache/workload question with no theoretical derivation. **Decision:** logical block = hardware block (1:1) as the rebuild default. Revisit only when a running consumer shows prefetch or cache stress. This is the one genuinely open item in §14.
 
-### 14.2 Cross-block add policy (DEFERRED)
-No routing primitive we kept (`apply_signed`, `signature_update`, `distance_batch`) exercises cross-block add across different block exponents; accumulation happens within exponent-uniform blocks established at write time. **Decision:** do not implement until a consumer drives it. If one emerges, provide a named opt-in variant `m4t_mtfp_vec_add_aligning` with an explicit rounding flag, never as a default path. The "widen, don't round" invariant (§8.5) stands; cross-block alignment is the only legitimate lossy path and must be requested by name.
+### 14.2 Cross-block add policy (IMPLEMENTED 2026-05-01)
+Originally deferred until a consumer drove it. Built ahead of measured demand under owner authorization (named-consumer-demand reading of principle 5; see `journal/xexpo_design_*.md` for the LMM cycle that scoped the design).
+
+The kernel ships in `m4t/src/m4t_mtfp.{h,c}`:
+
+- **`m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)`** — canonical accumulator. Stateful: `running_exp` is in-out and may grow upward across calls. Path A alignment (`e_result = max(e_running, e_addend)`); smaller-exp side rescales by `3^Δ` with **base-3 round-to-nearest** (§8.2). Per-cell saturation at `±MAX_VAL` (Case S, §8.5). Flags carry `M4T_FLAG_SATURATED` (bit 0) and `M4T_FLAG_ROUNDED` (bit 1); sticky-OR'd across calls; opt-in via non-NULL `flags` (§14.4 status array).
+- **`m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)`** — pairwise convenience wrapper over the accumulator.
+
+Aliasing: `running` and `addend` must not alias. Wrapper allows `dst == a` (handles the copy internally); not `dst == b`.
+
+Storage granularity: per-tensor exponent for the MVP. Per-block is a separate kernel when a consumer asks.
+
+Property-tested at 10 000 random sequences × 6 properties (correctness, invariant, aliasing/determinism, flags, wrapper, roundtrip) using a bit-exact `int64` reference. No fp in the test path (§12 test sanction not invoked; no double oracle needed).
+
+The "widen, don't round" invariant (§8.5) still stands as the *default* — this kernel is the named lossy exception and must be requested by name.
 
 ### 14.3 Tail-block padding (DECIDED: zero-pad)
 Tensors whose dimensions aren't multiples of a block's cell count have a partial last block. **Decision:** zero-pad the unused mantissas. A zero mantissa is the additive and multiplicative identity for any block exponent (`0 × 3^e = 0`), so zero-padding inserts identity elements rather than altering values — the §8.5 invariant is preserved. Tensors carry a cell-count field so length-aware reducers can ignore the tail.
@@ -394,7 +407,7 @@ For readers tracing a spec section back to the code that realizes it.
 | 6 | SoA storage layout | Implicit in all vec-op APIs (mantissa arrays; exponent arrays deferred until a consumer drives them) |
 | 7 | Per-block exponent encoding | Default-block-exponent convention documented in `m4t_types.h`; per-block sidecar deferred (M2 in `docs/REMEDIATION_PLAN.md`) |
 | 8.1 | Same-block add | `m4t/src/m4t_mtfp.c` (`m4t_mtfp_block_add` + vec composition) |
-| 8.2 | Cross-block add | Deferred (§14.2) |
+| 8.2 | Cross-block add | IMPLEMENTED — see §14.2 (round-to-nearest, named opt-in) |
 | 8.3 | Multiply (Case W widen) | Currently only scalar `m4t_mtfp_clamp64` in `m4t_mtfp.h`; full widening mul lands with a consumer |
 | 8.4 | SDOT ternary matmul (exact by contract) | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_sdot_matmul_bt`); MTFP19 variant in `m4t/src/m4t_ternary_matmul.c` |
 | 8.5 | Widen / saturate / round resolutions | Case S saturation: `m4t_mtfp_block_add`/`_sub`, `m4t_mtfp_clamp64`, `m4t_mtfp4_clamp`, ternary_matmul store. Case W widen: SDOT path (§8.4). Case R: not implemented (§14.2). |
@@ -404,7 +417,7 @@ For readers tracing a spec section back to the code that realizes it.
 | 12 | What is NOT in M4T | `archive/` (see `archive/README.md`) |
 | 13 | File organization | `m4t/src/`, `m4t/tests/`, `m4t/tools/` — see `m4t/README.md` |
 | 14.1 | Logical block size (OPEN) | Deferred; logical block = hardware block (1:1) |
-| 14.2 | Cross-block add policy (DEFERRED) | No code; caller uses same-block ops or requests opt-in by name |
+| 14.2 | Cross-block add policy (IMPLEMENTED 2026-05-01) | `m4t_mtfp_vec_accum_aligning` + pairwise wrapper; round-to-nearest; SATURATED+ROUNDED flag bits; named opt-in retains "widen-don't-round" as the default |
 | 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |
 | 14.4 | Exponent status tracking (DECIDED) | No status array allocated until consumer requests |
 | 18 | Base-3 native criterion (emission coverage + review gate) | `journal/base3_native_criterion_*.md` + `journal/updated_model_scrutiny_*.md` (LMM cycles, 2026-04-14) |

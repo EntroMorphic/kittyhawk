@@ -84,4 +84,11 @@ if(M4T_BUILD_TESTS)
     add_executable(test_m4t_route tests/test_m4t_route.c)
     target_link_libraries(test_m4t_route PRIVATE m4t)
     add_test(NAME m4t_route COMMAND test_m4t_route)
+
+    # Property tests for the §14.2 cross-exponent accumulator. Bit-exact
+    # int64 reference; no fp in the test path. 10000 random sequences per
+    # property × 6 properties.
+    add_executable(test_m4t_mtfp_accum_aligning tests/test_m4t_mtfp_accum_aligning.c)
+    target_link_libraries(test_m4t_mtfp_accum_aligning PRIVATE m4t)
+    add_test(NAME m4t_mtfp_accum_aligning COMMAND test_m4t_mtfp_accum_aligning)
 endif()

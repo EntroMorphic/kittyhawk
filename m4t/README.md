@@ -10,7 +10,8 @@ The substrate is being rebuilt in tiers (see [`../docs/REMEDIATION_PLAN.md`](../
 
 - **Tier 1 — pure base-3 layer — ONLINE.** Trit types, packing, element-wise ops, reductions. Zero MTFP entanglement.
 - **Tier 2 — route primitives + MTFP19 mantissa arithmetic — ONLINE.** Five route primitives (`threshold_extract`, `distance_batch`, `topk_abs`, `apply_signed`, `signature_update`) plus same-block-exponent block / vec add/sub on MTFP19 mantissas. Emission-coverage helper (`m4t_route_decisions_emit_coverage`) makes the §18 input-class contract testable at the call site.
-- **Tier 3 — cross-exponent kernel + MTFP4 + ternary matmul — pending consumer.** All three return only when the consumer-discovery cycle surfaces a measured consumer. Until then the substrate is *MTFP-capable, fixed-point-in-practice*.
+- **Tier 3a — cross-exponent accumulator — ONLINE.** `m4t_mtfp_vec_accum_aligning` (canonical) + `m4t_mtfp_vec_add_aligning` (pairwise wrapper). Path A alignment, base-3 round-to-nearest (§8.2), SATURATED+ROUNDED status flags (§14.4). Property-tested bit-exact at 10,000 samples × 6 properties. The substrate is now **genuinely floating in base 3** — the cross-exponent kernel that distinguishes MTFP from fixed-point is built.
+- **Tier 3b — MTFP4 SDOT + ternary matmul — pending consumer.** Both return only when a routing consumer demands them.
 
 ## Numerical system
 
@@ -45,6 +46,17 @@ Masked-VCNT reductions: `signed_sum`, `sparsity`, `counts`. ~14 NEON instruction
 
 Block-native mantissa primitives at one shared block exponent: `block_add`, `block_sub` (exactly one NEON vector each), composed into `vec_add_inplace` / `vec_sub_inplace` / `vec_zero` with scalar tails. Saturating clamp `clamp64` for accumulator stores. Case S (§8.5) saturation; **same-block contract** — caller asserts inputs share one block exponent.
 
+### Cross-exponent accumulator (`m4t_mtfp.h`) — Tier 3a
+
+Two functions for combining MTFP19 mantissa buffers carrying different `block_exp` values:
+
+- `m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)` — canonical accumulator. `running_exp` is in-out and may grow upward across calls. Path A alignment (max-exponent target); smaller side rescales by `3^Δ` with **base-3 round-to-nearest** (§8.2).
+- `m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)` — pairwise convenience wrapper.
+
+Status flags (`flags` byte per cell, opt-in via non-NULL): `M4T_FLAG_SATURATED` (bit 0) and `M4T_FLAG_ROUNDED` (bit 1). Sticky-OR'd across calls.
+
+`m4t_route_apply_signed` (tier 2) is the same-block-exp degenerate case of this primitive. Architectural reframing per `journal/xexpo_design_closeout.md`.
+
 ### Routing primitives (`m4t_route.h`) — Tier 2
 
 Five primitives composing into a k-of-T ternary routing pass:
@@ -69,9 +81,9 @@ ctest --test-dir build
 
 Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets fail at CMake configure. `-Werror` is enabled.
 
-## Tests — Tiers 1 + 2
+## Tests — Tiers 1 + 2 + 3a
 
-Five test binaries, all with hand-derived integer golden values. Zero float in the test suite.
+Six test binaries. The first five use hand-derived integer golden values. The cross-exponent test uses a bit-exact `int64` reference at 10,000 samples × 6 properties. Zero float in any test path.
 
 | Binary | Coverage |
 |---|---|
@@ -80,12 +92,12 @@ Five test binaries, all with hand-derived integer golden values. Zero float in t
 | `test_m4t_trit_reducers` | `signed_sum`, `sparsity`, `counts` across zero/pos/neg/mixed inputs |
 | `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
 | `test_m4t_route` | threshold_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass, `decisions_emit_coverage` |
+| `test_m4t_mtfp_accum_aligning` | accumulator correctness, invariant, aliasing, flags; pairwise wrapper correctness; pairwise roundtrip; all bit-exact vs reference at 10,000 samples each |
 
 ## What's not here
 
-Tier 3 surfaces — return only when the consumer-discovery cycle surfaces a measured consumer:
+Tier 3b surfaces — return only when a routing consumer demands them:
 
-- `m4t_mtfp_vec_add_aligning` — cross-exponent MTFP19 add kernel (named in `M4T_SUBSTRATE.md` §14.2 but unbuilt). The thing that makes the substrate genuinely floating-point in base 3.
 - `m4t_mtfp4.*` — SDOT-native MTFP4 routing cell + ternary matmul.
 - `m4t_ternary_matmul.*` — MTFP19 × packed-ternary matmul.
 
