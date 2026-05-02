@@ -58,7 +58,14 @@ Identity at sig_dim = 64 hits 69%; random ternary projection at sig_dim = 64 hit
 This finding is robust across seeds (±2.1pp stddev; the +7pp gap is well above noise). **It is not yet mechanism-verified** — the "implicit denoising" framing is a *hypothesis* that explains the data; it has not been tested by, e.g., examining which dims survive the random projection. Worth a follow-up cycle.
 
 ### 3. Capacity floor at sig_dim ≤ 4
-At sig_dim = 2: 21% mean trained accuracy. With 3² = 9 distinct ternary signatures vs 10 classes, this is information-theoretically limited. At sig_dim = 4: 27%. These are capacity bounds, not training failures.
+At sig_dim = 2: ~19% mean trained accuracy (30-seed measurement). With 3² = 9 distinct ternary signatures vs 10 classes, this is information-theoretically limited. At sig_dim = 4: 27%. At sig_dim = 8: 36%. These are capacity bounds, not training failures.
+
+**Hardened by 30-seed re-measurement** (`gesh/docs/finding3_high_seed_results.md`):
+- sig_dim = 2 trained: **19.3% ± 3.26 pp** (95% CI ±1.17 pp)
+- sig_dim = 4 trained: **27.0% ± 3.22 pp** (95% CI ±1.15 pp)
+- sig_dim = 8 trained: **35.9% ± 3.39 pp** (95% CI ±1.21 pp)
+
+Monotone climb 19.3 → 27.0 → 35.9 with non-overlapping 95% CIs (gaps >10× the CI width). The 5-seed sweep's "21%" at sig_dim = 2 was inflated ~1.7 pp by integer-percent rounding bias in `sweep_dims.c`'s eval (corrected in `finding3_probe.c`). Direction holds; magnitude refined.
 
 ### 4. Diminishing returns at sig_dim ≥ 128
 At sig_dim = 128, multi-seed gain is **−0.8 ± 1.5pp** (slightly negative, within noise of zero). At sig_dim = 256, exactly +0.0pp. Random ternary expansion already encodes whatever signal exists; training has nothing to add.

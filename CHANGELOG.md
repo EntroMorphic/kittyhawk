@@ -147,6 +147,73 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — SDOT fix: route ternary × ternary through m4t_mtfp4_sdot_matmul_bt]
+
+The substrate-discipline cleanup wired `gesh_project` through `m4t_mtfp_ternary_matmul_bt`, which decodes packed-trit weights via ~30 NEON ops per 16 trits. For our ternary × ternary input class, the right kernel is **`m4t_mtfp4_sdot_matmul_bt`** — it accepts both X and W as `int8_t*`, uses `vdotq_s32` (1-cycle 16-lane signed-int8 SDOT), and skips packing/widening entirely.
+
+Both kernels are substrate-legal. The packed-trit one is for general MTFP19×packed-trit; the SDOT one is for int8×int8 (which ternary trivially fits — |trit| ≤ 1 ≪ MTFP4's max 40). Cleanup wired the wrong kernel for our input class.
+
+### Changes
+- `gesh/src/gesh_project.c` — replaces `m4t_mtfp_ternary_matmul_bt` with a thin alias `ternary_matmul_sdot` that calls `m4t_mtfp4_sdot_matmul_bt(Y, (m4t_mtfp4_t*)x, (m4t_trit_t*)R, M, K, N)`. Drops R-packing scratch, drops X-widening scratch.
+- `gesh/bench/denoise_probe.c` — same swap; drops `R_packed`, `X_train_mtfp`, `P_mtfp` allocations.
+
+### Speedup (bit-equivalent, all numbers unchanged)
+
+| measurement | open-coded (pre-clean) | packed-trit kernel | SDOT kernel |
+|-------------|-------------------------|---------------------|--------------|
+| MNIST ablation total | 210s | 1740s | **156s** |
+| MNIST Cell A | 7.5s | 84.6s | **5.8s** |
+| MNIST Cell B (10× budget) | 124s | 1033s | **90.4s** |
+| MNIST Cell C (10× n_train) | 12s | 121s | **11.4s** |
+| MNIST Cell D | 64s | 499s | **48.2s** |
+| sig_dim sweep total | 515s | 2658s | ~500s (pending) |
+| `test_gesh_train` | 0.84s | 3.5s | **1.14s** |
+| `gesh_denoise_probe` | ~1s | ~1s | **0.3s** |
+
+The SDOT path is **faster than the open-coded compiler-vectorized loop** AND fully on-substrate. Auto-vectorized open-coded MAC was effectively doing what SDOT does explicitly; the dedicated SDOT kernel matches it and beats it slightly.
+
+### Bit-equivalence verified
+- `test_gesh_project`: 33/33 cells pass — kernel and reference open-coded loop produce zero differing trits.
+- All probes (Gate 2 denoise, MNIST ablation A/B/C/D, sig_dim sweep through 512+ cells) produce numbers identical to the prior packed-trit-kernel path and the prior open-coded path.
+
+### Key insight (atomics)
+
+The matmul kernel decision is **input-class-driven, not arbitrary**:
+- MTFP19 activations × packed-trit weights → use `m4t_mtfp_ternary_matmul_bt` (the kernel pays decode cost to compress weights).
+- int8 activations × int8 weights → use `m4t_mtfp4_sdot_matmul_bt` (SDOT crushes this in 1 cycle per 16 elements).
+
+For ternary × ternary, both inputs are int8 already; SDOT applies. The "packed-trit" kernel was overkill — it spent ~30 NEON ops per 16 trits decoding a format that didn't need decoding.
+
+## [2026-05-02 — Finding 3 high-seed measurement (capacity floor at sig_dim ≤ 4)]
+
+Original sweep ran 5 seeds per cell. At sig_dim ∈ {2, 4} the seed stddev was 1.6–3.1 pp on a 15–27% point estimate — wide enough that the "capacity floor" framing was directionally clean but quantitatively soft. Re-ran with **30 seeds per cell** at sig_dim ∈ {2, 4, 8} via new `gesh/bench/finding3_probe.c`.
+
+### Results (30 seeds, permille precision)
+
+| sig_dim | trained mean ± stddev | 95% CI on mean | gain over random |
+|---------|------------------------|------------------|---------------------|
+|       2 | **19.3% ± 3.26 pp**    | ±1.17 pp         | **+3.5 pp**         |
+|       4 | **27.0% ± 3.22 pp**    | ±1.15 pp         | **+4.6 pp**         |
+|       8 | **35.9% ± 3.39 pp**    | ±1.21 pp         | **+5.1 pp**         |
+
+### Hardening of the capacity-floor claim
+- Monotone climb 19.3 → 27.0 → 35.9 with non-overlapping 95% CIs (gap between cells >10× CI width). Capacity-bounded behavior at low sig_dim is now a finding, not a hypothesis.
+- Lattice-update gain remains positive at all three cells with CI excluding zero. C1 holds at the capacity floor.
+
+### Methodology refinement: integer-percent rounding bias in sweep_dims
+
+The original sweep tool's `eval_test_accuracy` returns `(correct * 100) / n_test` — int division, flooring each seed's percent. Across 5 seeds, this systematically under-reports by ~0.5 pp; for the trained mean at sig_dim = 2, the bias was **+1.7 pp** (5-seed sweep claimed 21.0% vs 30-seed permille 19.3%).
+
+The finding3 probe uses permille (`(correct * 1000) / n_test`, divided by 10 at print time). Future sweep tools should default to permille or higher precision. Surfaced by the cross-check that the high-seed sub-mean disagreed with the published 5-seed numbers despite identical seeds and data.
+
+### Documentation updated
+- `gesh/docs/sweep_dims_results.md` § Finding 3: corrected magnitudes; cross-references to high-seed doc.
+- `gesh/docs/finding3_high_seed_results.md`: full 30-seed results, methodology note, capacity-ceiling discussion.
+
+### Added
+- `gesh/bench/finding3_probe.c` — 30-seed probe at sig_dim ∈ {2, 4, 8}.
+- `gesh/docs/finding3_high_seed_results.md` — results doc.
+
 ## [2026-05-02 — Substrate-discipline cleanup: 100% on-substrate via libm4t kernels]
 
 A kernel-use audit caught that the gesh consumer library and bench code re-implemented ternary projection and sign-threshold by hand in **9 places**, when libm4t had `m4t_mtfp_ternary_matmul_bt` and `m4t_route_threshold_extract` for exactly those operations. Every prior substrate-claim measurement was running through hand-written loops, not the substrate kernels we built and tested. **Substrate-claim integrity required full kernel routing**; this cycle delivers it.

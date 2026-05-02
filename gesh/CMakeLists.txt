@@ -87,3 +87,9 @@ target_link_libraries(gesh_mnist_probe PRIVATE gesh gesh_image_canon m)
 # Phase B Gate 2: H1 mechanism test (implicit denoising hypothesis).
 add_executable(gesh_denoise_probe bench/denoise_probe.c)
 target_link_libraries(gesh_denoise_probe PRIVATE gesh gesh_bench m)
+
+# Finding 3 high-seed probe (capacity floor at sig_dim ≤ 4 from
+# sweep_dims_results.md). 30 seeds vs original sweep's 5; tightens the
+# confidence interval on the capacity-floor claim.
+add_executable(gesh_finding3_probe bench/finding3_probe.c)
+target_link_libraries(gesh_finding3_probe PRIVATE gesh gesh_bench m)
