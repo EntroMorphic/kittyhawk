@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Substrate spec
+    url: https://github.com/anjaustin/glyph/blob/main/m4t/docs/M4T_SUBSTRATE.md
+    about: The canonical numeric-system contract.
+  - name: NORTH_STAR
+    url: https://github.com/anjaustin/glyph/blob/main/NORTH_STAR.md
+    about: Why base-3, why routing, what the end-game is not.

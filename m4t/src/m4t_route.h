@@ -180,6 +180,35 @@ void m4t_route_signature_update(
     int D
 );
 
+/* ── Emission-coverage helper (§18 testability) ────────────────────────── */
+
+/* Inspect a decisions[] array and report which sign states actually appeared.
+ *
+ * Outputs three booleans (any non-NULL pointer is written; NULL skips):
+ *   *out_has_pos  ← true iff some decision has sign == +1
+ *   *out_has_neg  ← true iff some decision has sign == -1
+ *   *out_has_zero ← true iff some decision has sign ==  0 (sentinel)
+ *
+ * Consumer integration tests use this to demonstrate that the §18 input-
+ * class contract is honored *at the call site* — i.e., that the routing
+ * pass actually exercises all three sign states across representative
+ * inputs. A test that calls apply_signed and asserts
+ * (has_pos && has_neg && has_zero) has positively demonstrated emission
+ * coverage; the contract is no longer an unstated assumption.
+ *
+ * Pure inspection — does not allocate, does not modify decisions.
+ *
+ * Preconditions:
+ *   decisions is non-NULL when k > 0
+ *   k >= 0 */
+void m4t_route_decisions_emit_coverage(
+    const m4t_route_decision_t* decisions,
+    int k,
+    int* out_has_pos,
+    int* out_has_neg,
+    int* out_has_zero
+);
+
 #ifdef __cplusplus
 }
 #endif

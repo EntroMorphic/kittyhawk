@@ -1,545 +1,324 @@
 ---
-title: Remediation Plan — First-Light Red-Team Findings
-opened: 2026-04-14
-scope: commit 95f5bab ("First light — minimal MTFP core")
-source: red-team conducted 2026-04-14 against the first-light increment
+title: Substrate Remediation Plan — Tiers 2 & 3
+date: 2026-05-01
+scope: m4t kernel rebuild after the ground-zero reset
+status: REVISED — red-team findings folded in (see REMEDIATION_PLAN_REDTEAM.md)
+companions: 01MAY26_archived/REVIEWED.md · docs/REMEDIATION_PLAN_REDTEAM.md · m4t/docs/M4T_SUBSTRATE.md · NORTH_STAR.md
 ---
 
 # Remediation Plan
 
-Tracks findings from the red-team of the first-light rebuild increment. Each item has a severity, specific remediation, and completion criterion.
+The 2026-05-01 audit (preserved as `01MAY26_archived/REVIEWED.md`) categorized the m4t kernels into three tiers by substrate trustworthiness:
 
-Severity: **H** (high — blocks real spec progress), **M** (medium — correctness or claim integrity), **L** (low — hygiene).
+- **Tier 1 — Lift verbatim.** `m4t_types.h`, `m4t_internal.h`, `m4t_trit_pack`, `m4t_trit_ops`, `m4t_trit_reducers`. Pure base-3, no MTFP entanglement, no design debt. **DONE 2026-05-01 (3/3 ctest binaries green under `-Werror`).**
 
----
+- **Tier 2 — Hygiene pass + route primitives.** The five `m4t_route` primitives (`threshold_extract`, `distance_batch`, `topk_abs`, `apply_signed`, `signature_update`) plus the same-block-exponent MTFP19 mantissa arithmetic (`m4t_mtfp.{h,c}`) that `apply_signed` consumes. **DONE 2026-05-01 (5/5 ctest binaries green under `-Werror`).** Contract blocks header-resident; input asserts in place; `m4t_route_decisions_emit_coverage` helper makes §18 contract testable at the call site.
 
-## H1. The rebuild didn't rebuild the shape — it rebuilt the documentation
+- **Tier 3 — The cross-exponent kernel and the consumer-gated MTFP surface.** `m4t_mtfp_vec_add_aligning` (named in `M4T_SUBSTRATE.md` §14.2 but not built), plus the consumer-gated returns of `m4t_mtfp4.*` (SDOT-native MTFP4 matmul + conversions) and `m4t_ternary_matmul.*` (MTFP19 × packed-ternary matmul). All three return only when a measured consumer demands them.
 
-**Finding.** The spec's load-bearing novelty is per-block exponent as sidecar metadata, with the 16-byte block as the atomic unit. First-light has no block type, no block-native primitives, no SoA tensor abstraction. `m4t_mtfp_t` is still `int32_t` operated on in cell-native vector ops.
+  The cross-exponent kernel is what makes the substrate genuinely MTFP rather than fixed-point-with-conversions. Until it lands and a consumer drives it, the substrate's "F" lives only in the cell-width conversions and the SDOT case-W output widening — operationally fixed-point with a configurable global scale.
 
-**Remediation.**
-- [x] Define block-native atomic primitives `m4t_mtfp_block_add` / `_sub` that operate on exactly `M4T_MTFP_CELLS_PER_BLOCK` cells (one NEON vector).
-- [x] Rewrite `vec_add_inplace` / `_sub_inplace` as compositions: loop of block ops + scalar tail.
-- [x] Add `_Static_assert(sizeof(m4t_mtfp_t) * M4T_MTFP_CELLS_PER_BLOCK == M4T_BLOCK_BYTES, ...)`.
+  **Tier 3 has a structural prerequisite the original framing missed:** all three candidate consumers are currently archived. The consumer-discovery cycle cannot run on a consumer that doesn't exist. The first phase of tier 3 is a consumer-side rebuild — minimum surface needed to drive a real-data measurement.
 
-**Complete when.** Block-native primitives exist as the substrate's atomic unit; vec ops are compound.
+This document plans tiers 2 and 3. Tiers 1 and 2 are done.
 
 ---
 
-## H2. The new primitives have zero direct tests
+## Tier 2 — Hygiene pass
 
-**Finding.** `vec_zero`, `vec_add_inplace`, `vec_sub_inplace`, `clamp64` exercised only transitively through `test_m4t_route.c`. No direct tests for boundary saturation, n=0, scalar-tail, aliasing, NEON/scalar equivalence.
+### Surface
 
-**Remediation.**
-- [x] Create `m4t/tests/test_m4t_mtfp.c`.
-- [x] Test `clamp64` at ±MAX_VAL, ±(MAX_VAL+1), 0, INT64 extremes.
-- [x] Test `vec_zero` at n=0, 1, 4, 7, 16, 1024.
-- [x] Test `block_add` / `_sub`: positive saturation, negative saturation, all-zero, mixed-sign, identity, aliasing.
-- [x] Test `vec_add_inplace` / `_sub_inplace`: NEON-only (n=4), scalar-only (n=3), mixed (n=5, 7), empty (n=0), large (n=1024), aliasing.
-- [x] Register in CMake, confirm pass.
+`m4t_route.{threshold_extract, distance_batch, topk_abs, apply_signed, signature_update}` plus their MTFP19 mantissa-arithmetic dependency (`m4t_mtfp.{h,c}` — `block_add`, `block_sub`, `vec_add_inplace`, `vec_sub_inplace`, `vec_zero`, `clamp64`).
 
-**Complete when.** New binary passes with ≥15 distinct assertions.
+### Problem
 
----
+The §18 emission-coverage contracts and the same-block-exponent assumption are documented in the substrate spec, not in the headers consumers actually read. Two specific risks:
 
-## H3. §8.5 "widen, don't round" silently doesn't apply to fixed-output vec ops
+1. **Silent two-state degradation.** A consumer constructs decisions or feeds packed buffers without honoring the input-class contract; the primitive's three-state behavior degrades to two states without raising an error. This is exactly the failure mode `threshold_extract` was carved out from `sign_extract` to prevent — and the carve-out is documented in the spec, not the header.
 
-**Finding.** `vec_add_inplace` outputs MTFP19; widening to MTFP39 would break the output type. Current code saturates. Saturation is neither widening nor rounding — the spec didn't name this case.
+2. **Block-exponent drift.** A consumer mixes mantissas from different block exponents under `apply_signed`. The primitive sums the mantissas as integers; the result is meaningless unless the exponents matched. There is currently no header-resident statement of this requirement.
 
-**Remediation.**
-- [x] Edit `m4t/docs/M4T_SUBSTRATE.md` §8.5 to distinguish three cases: widen (output admits wider cell), saturate (fixed output), round (named cross-block opt-in only).
-- [x] Specify saturation is *informative* (sets status flag under §14.4 opt-in), not silent.
-- [x] Cross-reference §8.5 from the new block-primitive headers.
+### Approach
 
-**Complete when.** Spec names saturation explicitly; code matches spec without contradiction.
+1. **Promote each contract from spec-pointer to header-resident `@requires` block.** Every header gets a precondition section that says, in two or three lines, what the caller must guarantee — no more spec-§-pointers as the only documentation.
 
----
+2. **Add per-primitive runtime asserts under `M4T_DEBUG`.** Active in dev builds, compiled out in release. Specifically:
+   - `threshold_extract`: assert `tau >= 0`, `n >= 0`.
+   - `distance_batch`: assert `T >= 0` and `sig_dim >= 0`.
+   - `topk_abs`: assert `T <= M4T_ROUTE_MAX_T`, `0 <= k <= T`.
+   - `apply_signed`: assert each `decisions[i].tile_idx >= -1` and `decisions[i].sign ∈ {-1, 0, +1}` and `dim >= 0`. (The upper-bound on `tile_idx` is implicit in the caller's `tile_outs` buffer; checking it would require a `T` parameter the prior signature does not have. Per red-team T4: keep the signature stable.)
+   - `signature_update`: assert `T >= 1`, `H >= 1`, `D >= 1`.
 
-## H4. Consumer-inference instead of consumer-choice
+3. **Add an emission-coverage helper** (`m4t_route_decisions_emit_coverage`): given a `m4t_route_decision_t[]`, return three booleans for whether `+1`, `0`, and `-1` sign states all appeared. Consumers' integration tests use this helper to demonstrate the input-class contract is honored *at the call site*. This makes coverage a positive obligation on the consumer, not an unstated assumption.
 
-**Finding.** Primitives selected by grep of kept-file callers, not by naming a consumer. Same failure mode as the prior dev's drift.
+### Decision endpoints
 
-**Remediation.**
-- [x] Edit `docs/THESIS.md` §3 to name `tools/mnist_trit_lattice.c` as the provisional primary consumer.
-- [x] Add a `consumer-demand` line to each new block-primitive header citing the consumer.
-- [x] Update `feedback_working_style.md` memory: "primitive selection by grep" is a failure mode.
+- All five primitives have header-resident contracts AND (under M4T_DEBUG) runtime asserts AND the coverage helper exists with at least one consumer-test using it: **tier 2 done**.
+- Any contract is genuinely under-specified (the spec text is ambiguous and the right behavior is unclear): **pause, open a journal cycle.**
+- API change to `apply_signed` (adding `T` parameter) breaks an active consumer: address in the consumer rather than weakening the assert.
 
-**Complete when.** Current consumer named; every new primitive cites consumer demand.
+### Cost estimate
+
+Half a day, capped at one day. Deltas are documentation + asserts + one helper; no algorithmic change. If a contract is genuinely under-specified, pause at the cap and open a journal cycle.
 
 ---
 
-## M1. Block-geometry constants are orphaned
+## Tier 3 — Cross-exponent kernel + consumer-gated MTFP surface
 
-**Remediation.**
-- [x] Use `M4T_MTFP_CELLS_PER_BLOCK` in block-primitive signatures (array size).
-- [x] Use `M4T_BLOCK_BYTES` in a `_Static_assert`.
-- [x] `_Static_assert(M4T_MTFP_CELLS_PER_BLOCK == 4)` in `test_m4t_mtfp.c`.
+### Surface
 
-**Complete when.** No added constant unused.
+`m4t_mtfp.*`, `m4t_mtfp4.*`, `m4t_ternary_matmul.*`, plus the new `m4t_mtfp_vec_add_aligning`.
+
+### Problem
+
+Every active arithmetic kernel runs at one shared block exponent. The "F" in MTFP currently lives in three places:
+
+1. Cell-width conversions (`mtfp19↔mtfp4`) carry an explicit ×6561 / ÷6561 scale shift.
+2. The SDOT matmul's case-W output widening (MTFP4·trit → MTFP19) is exact by construction.
+3. The mantissa types support per-block exponent metadata — *if the consumer manages it*.
+
+What's missing: any kernel that takes two MTFP tensors at different block exponents and produces an aligned result. Until this kernel exists and a consumer drives it, the substrate is operationally fixed-point with a configurable global scale.
+
+### Prerequisite — consumer-side rebuild
+
+The consumer-discovery cycle below requires a *measurable* consumer. All three candidate consumers are currently archived in `01MAY26_archived/`:
+
+- `libglyph` (bucket index, multi-probe, resolvers) — archived.
+- `libtrain` (`tlinear`, `rroute_*` autodiff primitives) — archived.
+- The tools that drive `apply_signed` end-to-end — archived.
+
+**The cycle cannot proceed until at least one consumer is back online.** The original tier-3 framing skipped this dependency; this revision makes it explicit and load-bearing.
+
+#### Three rebuild options, ranked by lift cost
+
+| Option | Surface | Lines | Real-data? | Notes |
+|---|---|---|---|---|
+| **A. Multi-table SUM resolver** | Subset of libglyph (`glyph_bucket`, `glyph_multiprobe`, `glyph_resolver`, minimal `glyph_dataset` for MNIST) plus `mnist_routed_bucket_multi` | ~1.5k | Yes (MNIST) | No SGD, no float latents, just signature-driven retrieval and integer-mantissa accumulation. Easiest path to a real-data measurement. |
+| **B. Multi-tile routed accumulation tool** | A small benchmark that drives `apply_signed` with intentionally heterogeneous tile outputs | ~200 | No (synthetic) | Smallest code, but the cycle's gate ("demand must be measurable on real data") may not consider this real enough. |
+| **C. Routed autodiff** | Lift `libtrain` + `trained_classifier` consumer | ~600 | Yes | Highest cost. Prior cycle measured nothing about precision loss from collapsed `block_exp`, so the question is open but expensive to answer. |
+
+**Recommendation: Option A — multi-table SUM.** Real data, real benchmark, modest lift, instrumentable per-table. B and C stay as later options if the SUM measurement is inconclusive.
+
+#### What "rebuilding multi-table SUM" means concretely
+
+- Verbatim lift from `01MAY26_archived/src/`: `glyph_rng.{h,c}`, `glyph_bucket.{h,c}`, `glyph_multiprobe.{h,c}`, `glyph_probe.{h,c}`, `glyph_resolver.{h,c}`, `glyph_dataset.{h,c}` (only the MNIST loader path), `glyph_sig.{h,c}` (only the random-projection path needed by the legacy consumer).
+- Verbatim lift of `01MAY26_archived/tools/mnist_routed_bucket_multi.c`. This is the tool that hit 97.24% on deskewed MNIST.
+- Wire libglyph into top-level `CMakeLists.txt`. Re-enable the legacy random-projection consumer flag (`GLYPH_BUILD_LEGACY_RP`) for this one tool. **Discipline note:** random projections in libglyph land for measurement only; they do not become part of the substrate's claim. The flag stays opt-in.
+- Smoke gate: regression test that reproduces the prior `97.24%` byte-for-byte at the same seed and config.
+
+Cost: 1-2 days for the lift, including build wiring and the regression smoke test.
+
+### Discipline check (the gate before any kernel design)
+
+Per red-team T2: a *named* consumer is not enough; the demand must be measurable. Tier 3 begins with a **consumer-discovery cycle** running on a rebuilt consumer (per the prerequisite above), not a design memo.
+
+Candidate consumers — each is a hypothesis until measured:
+
+1. **Multi-table SUM resolver** where per-table distance scores are accumulated (rebuild option A). The prior `mnist_routed_bucket_multi` hit 97.24% with single-block-exponent arithmetic; the question is whether harder benchmarks (or even MNIST itself) pay a measurable cost from collapsing per-table magnitudes.
+
+2. **Multi-tile routed accumulation** where per-tile activation magnitudes legitimately differ (rebuild option B, synthetic). `apply_signed` assumes all tile outputs share one block exponent; the question is whether real routed classifiers exhibit per-tile magnitude heterogeneity that costs precision.
+
+3. **Routed autodiff gradient accumulation** across tiles whose scales differ (rebuild option C). The prior libtrain MVP collapsed to one `block_exp`; the question is whether gradient precision suffered measurably.
+
+The cycle's deliverable: for the first candidate that has a rebuilt consumer (per the prerequisite), a measurement that establishes whether the same-block-exponent assumption costs anything on real data. **A candidate becomes a "named consumer" only when a measurement shows it pays a real cost.** If no candidate measures positive, tier 3 stays at "MTFP-capable, fixed-point-in-practice" and the documentation reflects that.
+
+### Consumer-discovery cycle — measurement protocol
+
+The cycle runs as a standard LMM cycle (`raw → nodes → reflect → synthesize`). Concretely, on the rebuilt multi-table SUM consumer:
+
+#### Instrumentation
+
+Add per-table distance-distribution logging to `mnist_routed_bucket_multi`. For each query:
+
+- Log `min_dist[t]`, `max_dist[t]`, `mean_dist[t]`, `std_dist[t]` for each table `t` ∈ [0, M).
+- Log the *spread ratio* across tables: `max_t(max_dist[t]) / max(min_t(max_dist[t]), 1)`. Larger ratios mean per-table magnitudes are heterogeneous.
+
+If logging shows distances within ~2× of each other across all tables (low spread), per-table block_exp drift is small and the same-block-exponent assumption costs nothing — independent of the accuracy comparison below. If the spread is >10×, the assumption may collapse useful magnitude information; the accuracy comparison is the deciding measurement.
+
+#### Comparison
+
+Run the consumer in two modes on the same benchmark:
+
+- **Mode A (current substrate):** all per-table distances accumulated at one shared `block_exp`. Saturating clamp where individual cells overflow.
+- **Mode B (oracle):** identical accumulation, computed in `int64` *outside* the substrate (test-only path; the test's binary-int64 math is sanctioned because tests are not runtime kernels per `M4T_SUBSTRATE.md` §12). No saturation; full precision.
+
+The accuracy delta `Δ = acc(Mode B) − acc(Mode A)` is the cost of the same-block-exponent assumption on this consumer. Run on MNIST first; if the prior `data/cifar10` and `data/fashion-mnist` directories are restored, run those too.
+
+#### Pass thresholds
+
+| Δ | Verdict |
+|---|---|
+| < 0.5pp | **No qualifying consumer.** Substrate stays MTFP-capable, fixed-point-in-practice. |
+| 0.5–2.0pp | **Marginal consumer.** Document the cost; design memo conditional on Δ being reproducible across ≥3 seeds. |
+| > 2.0pp | **Qualifying consumer.** Cross-exponent kernel earns its design. Open §14.2 review + design memo. |
+
+Thresholds match the discipline used in prior cycles (e.g., the substrate-distance-refinement image-pipeline gate's NEGATIVE verdict at Δ = −2.65pp on Fashion-MNIST).
+
+#### Call-pattern measurement (added 2026-05-01 per `xexpo_design_closeout.md`)
+
+Beyond the accuracy delta, the cycle must decide whether the kernel's primary API is **pairwise** (one-shot, two distinct buffers) or **accumulator** (running buffer reused across iterations, exponent may drift). The closeout review identified this as load-bearing for the design and architecturally deeper than a signature change — the accumulator is a stateful primitive with the renormalize step embedded.
+
+**Evidence sources (BOTH required, not either-or):**
+
+1. **Static analysis of archived consumers.** Read `01MAY26_archived/tools/mnist_routed_bucket_multi.c` (and any other rebuild-option-A consumer that lifts) and trace every site that combines two or more MTFP19 buffers. Categorize each site:
+   - **Pairwise** — one shot, two distinct input buffers, no temporal dependency, result consumed once.
+   - **Accumulator** — running buffer reused across iterations, with the iteration count `k > 2` typical, and the running's exponent could legitimately drift if cross-exp arithmetic were available.
+
+2. **API-shape sketch.** For each identified site, write the call expression under both APIs (pairwise and accumulator). The criterion: which API requires fewer working-buffer manipulations to express the consumer's natural computation? Specifically, count the lines of caller code per site under each API. Lower line count is the more natural fit.
+
+**Verdict rule:**
+
+| Pattern | Decision |
+|---|---|
+| Accumulator is the more natural reading at >50% of sites | Accumulator is the primary API; pairwise is the n=1-add convenience wrapper |
+| Accumulator wins at <50% of sites BUT at any hot-path site (per profile) | Accumulator is still the primary API — hot-path naturalness dominates |
+| Accumulator wins at <50% of sites AND no hot-path site is accumulator-natural | Pairwise stays as primary |
+| Mixed evidence between sources 1 and 2 | Pause. Do not commit; record the disagreement in the cycle's REFLECT phase and reconsider |
+
+**Architectural anchor.** The tier-2 primitive `m4t_route_apply_signed` is *already an accumulator*, restricted to `e_running == e_new`. The cross-exp kernel is its generalization. Sites that look like apply_signed loops are accumulator-shaped by definition. This anchor narrows the analysis: if a consumer's combine-multiple-MTFP-buffers site looks like apply_signed's loop body, it is already evidence for the accumulator.
+
+#### Spec re-read prerequisite
+
+Per `CONTRIBUTING.md` principle 7 (substrate-level specs are upstream of kernel designs), the cycle's RAW phase MUST include a re-read of `m4t/docs/M4T_SUBSTRATE.md` §14.2. The cycle records:
+
+- What §14.2 actually says about cross-exp arithmetic semantics.
+- Which assumptions the design (`docs/DESIGN_X-EXPO.md`) honored vs. quietly amended.
+- Whether any §14.2 constraint contradicts the design as written.
+
+Spec contradictions block the design memo until resolved (either the design changes or the spec amends through a journal cycle).
+
+### Design (sketch — full design lives in a journal cycle, not this plan)
+
+```c
+/* dst[i] = decode(a[i], a_block_exp) + decode(b[i], b_block_exp),
+ * re-encoded at result_block_exp. The smaller-exponent operand is
+ * rescaled by 3^Δ before the add; the larger exponent is preserved.
+ * Saturation at ±MAX_VAL is per-cell and informative (Case S).
+ *
+ * If 3^Δ × |smaller_operand[i]| would overflow MAX_VAL even before the
+ * add, the cell saturates pre-add. With sat_flags non-NULL, the
+ * corresponding cell flag is set (§14.4 saturation tracking opt-in).
+ */
+void m4t_mtfp_vec_add_aligning(
+    m4t_mtfp_t* dst,
+    int8_t* result_block_exp,           /* out */
+    const m4t_mtfp_t* a, int8_t a_block_exp,
+    const m4t_mtfp_t* b, int8_t b_block_exp,
+    uint8_t* sat_flags,                 /* nullable */
+    int n);
+```
+
+Open design questions (each answered in the cycle, not here):
+
+- **Block-exponent storage granularity.** Per-block (one int8 per 4-cell block) or per-tensor (one int8 per call)? The cycle's instrumentation reveals which one the consumer actually needs. Per-block is the spec's intent; per-tensor is what most plausible consumers want for the MVP.
+- **`block_exp` integer width.** int8 covers exponents in `[−128, 127]`. MTFP19's mantissa range corresponds to exponents up to ~9 in scientific notation; int8 is comfortable. If the consumer's distribution surfaces exponents beyond ±19, revisit.
+- **Δ overflow.** If `Δ = max(a_block_exp, b_block_exp) − min(...)` is large (>19), the smaller operand effectively becomes zero post-rescale. Document as expected loss; do not raise an error.
+- **Saturation strategy.** Case S (saturate, fixed output type) is the substrate's current default. Confirm Case S is right, or identify when Case W (output widening to MTFP39) earns the wider buffer.
+
+### Test infrastructure (genuinely new)
+
+The current m4t test suite is golden-value: hand-derived expected outputs, exact integer comparison, zero float in tests. Property-based testing for `vec_add_aligning` is a new pattern; this section specifies what the infrastructure looks like before it is built.
+
+#### Decode oracle (test-only, binary float sanctioned per §12)
+
+```c
+/* Test-only. NOT linked into libm4t. Lives in m4t/tests/ alongside
+ * test_m4t_mtfp_vec_add_aligning.c. Uses double per §12 sanction
+ * (test path; not a runtime kernel; not per-query consumer code). */
+static double mtfp_decode_to_double(m4t_mtfp_t mantissa, int8_t block_exp) {
+    return (double)mantissa * pow(3.0, (double)block_exp);
+}
+```
+
+#### "Within saturation tolerance" — precise definition
+
+For inputs `(a, e_a, b, e_b)` and result `(d, e_d)` produced by the kernel:
+
+```
+real_sum  = decode(a, e_a) + decode(b, e_b)
+substrate = decode(d, e_d)
+saturated = the kernel reports any sat_flag bit set for this cell
+
+if !saturated:
+    require |real_sum − substrate| ≤ 3^(e_d − 1)         /* half-trit precision */
+if saturated:
+    require sign(substrate) == sign(real_sum)
+    require |substrate| == M4T_MTFP_MAX_VAL × 3^e_d      /* clamped to bound */
+```
+
+Half-trit precision at the result block_exp is the tightest bound the kernel can promise without Case-W widening. The substrate-spec amendment (if any) records this formally.
+
+#### Sample-count gate
+
+10 000 random `(a, b, e_a, e_b)` per property, drawn from operand distributions matching the consumer's instrumentation (don't test exponents the consumer never emits). Pass the gate if **10 000 / 10 000** satisfy the tolerance. Anything less is a failed test, not a flaky test.
+
+#### CI integration
+
+Property tests run slower than golden-value (millisecond → tens of milliseconds per test). Five property tests at <100ms each grow the `ctest` budget by <1 second — tolerable. Run them inline with the existing suite; revisit if the count grows past ~20.
+
+### Validation (the four properties)
+
+1. **`prop_add_aligning_correctness`** — for 10 000 random `(a, b, e_a, e_b)` within the consumer-instrumented operand space, the result satisfies the saturation-tolerance bound above. Tightest correctness gate.
+2. **`prop_add_aligning_roundtrip`** — `add_aligning(x, e, neg(x), e)` produces `dst = 0` for any `x, e`. Tightens against asymmetric saturation bugs.
+3. **`prop_add_aligning_aliasing`** — `dst` aliasing `a` or `b` produces results identical (to the bit) to the non-aliased call. Each random sample run twice, compared.
+4. **`prop_add_aligning_sat_flags`** — saturating inputs set the corresponding `sat_flags` bits; non-saturating inputs leave them clear. False-positive flag and false-negative flag both fail.
+
+### Decision endpoints
+
+- Kernel passes all four validations AND consumer-discovery cycle Δ > 2.0pp at the cycle's gate: **tier 3 done**; substrate is genuinely MTFP.
+- Kernel passes validations but cycle showed Δ < 0.5pp on every measured consumer: **stays at synthetic-only.** Substrate documented as MTFP-capable, fixed-point-in-practice. Real result, not failure.
+- Cycle showed 0.5pp ≤ Δ < 2.0pp: **marginal verdict.** Document the cost and the consumer; design + implement only if a 3-seed re-run confirms the delta is reproducible. Do not promote on a single noisy measurement.
+- Kernel cannot pass property-based test without unbounded saturation: **open a journal cycle** on Case S vs Case W. Do not work around with hidden float math.
+
+### Cost estimate (revised — includes the prerequisite)
+
+| Phase | Days | Conditional? |
+|---|---|---|
+| Consumer-side rebuild (multi-table SUM subset of libglyph + `mnist_routed_bucket_multi` lift + 97.24% regression smoke) | 1–2 | No |
+| Consumer-discovery cycle (instrumentation + measurement + journal cycle) | 2–3 | No |
+| §14.2 review + design memo | 1 | Yes — Δ ≥ 0.5pp at cycle's gate |
+| Kernel implementation + property-based tests + consumer integration | 2–3 | Yes — design memo lands |
+
+**Realistic total wall-clock if everything fires: 6–9 days of focused work.** If the cycle says no qualifying consumer (Δ < 0.5pp on every measured consumer): **3–5 days**, ending with the substrate's documented status updated to "MTFP-capable, fixed-point-in-practice."
 
 ---
 
-## M2. Same-block contract is aspirational, not enforced
+## Build order
 
-**Remediation.**
-- [x] Block-native primitives enforce same-block by construction (signature takes exactly one block).
-- [x] Vec primitives document their single-tensor contract in the header.
-- [ ] *Deferred:* block-aware tensor type. Not implemented until a consumer drives it. Note in substrate §14.
+1. **Tier 1 lift** — DONE 2026-05-01. 3/3 ctest binaries green.
+2. **Tier 2 hygiene pass** — DONE 2026-05-01. 5/5 ctest binaries green.
+3. **Tier 3a — consumer-side rebuild** (multi-table SUM subset of libglyph + `mnist_routed_bucket_multi` lift + 97.24% regression smoke). 1–2 days. Lands as one commit. Re-enables `GLYPH_BUILD_LEGACY_RP` (opt-in, measurement-only).
+4. **Tier 3b — consumer-discovery cycle**. 2–3 days. Lands as a journal cycle (`raw → nodes → reflect → synthesize`). Decides whether tier 3 promotes via the Δ thresholds above.
+5. **Tier 3c — §14.2 review + design memo** — *conditional on step 4 producing Δ ≥ 0.5pp*. 1 day. Lands as a substrate-spec amendment + design doc.
+6. **Tier 3d — kernel implementation + property-based tests + consumer integration** — *conditional on step 5*. 2–3 days.
 
----
+Each step lands as a separate commit with the discipline checklist on the PR. CI must stay green between steps (red-team T9).
 
-## M3. Overstated commit claims
+#### Wall-clock summary
 
-**Remediation.**
-- [x] Fix unused-variable warning in `tools/mnist_trit_lattice.c:155`.
-- [x] Add note to `feedback_working_style.md`: commit claims distinguish "builds" / "tests pass" / "measured faster."
-- [ ] *Deferred:* NEON benchmark in `m4t/tools/`. Add when a consumer's performance matters.
+- Best case (no qualifying consumer): steps 1+2 (done) + 3a + 3b = **3–5 days remaining**, ending with substrate status updated to "MTFP-capable, fixed-point-in-practice."
+- Full path (qualifying consumer found, kernel earns its design): **6–9 days remaining**, ending with the first FINDINGS axis: "substrate is genuinely MTFP, with [consumer] driving the cross-exponent kernel at Δ = [n]pp recovered."
 
-**Complete when.** LSH tool compiles with zero warnings; future commits observe the builds/tests/measured distinction.
+## What stays "MTFP-capable, fixed-point-in-practice" looks like
 
----
+If step 3 produces no qualifying consumer, the substrate ships with this documented status:
 
-## M4. `vec_add_inplace` trust-boundary
+- `m4t/README.md`'s status section: "MTFP-capable substrate, fixed-point-in-practice — no consumer has yet driven the cross-exponent kernel. The mantissa types support per-block exponent metadata; the conversion routines (`mtfp19↔mtfp4`) carry explicit ×3^k scale shifts; the SDOT case-W matmul lands MTFP4·trit exactly in MTFP19. Cross-exponent arithmetic at one shared block_exp does not exist as a primitive."
+- `m4t/docs/M4T_SUBSTRATE.md` §14.2 amended with the consumer-discovery cycle's findings.
+- A pinned issue: "MTFP cross-exponent kernel — open until a consumer demands it."
 
-**Remediation.**
-- [x] Document in-range input precondition in the header.
-- [x] `_Static_assert((int64_t)M4T_MTFP_MAX_VAL * 2 < INT32_MAX, ...)`.
-- [ ] *Deferred:* debug-mode bounds-check. Not in this pass.
+This is the substrate's *honest current state*. Calling it complete would be a discipline violation.
 
-**Complete when.** Precondition named; compile-time assert catches config drift.
+## What this plan deliberately does not decide
 
----
+- **Which higher-layer consumers come back online beyond the multi-table SUM rebuild required by tier 3a, and in what order.** Other libglyph surfaces, libtrain, and the broader tools tree are separate plans. The 3a rebuild is scoped narrowly to what the consumer-discovery cycle needs.
+- **Whether to lift the prior libtrain MVP verbatim.** That's a tier-1-style audit on the train tree, not a kernel question. If the multi-table SUM cycle is inconclusive (Δ in the marginal band), libtrain rebuild may follow as cycle-3b.bis on rebuild option C — but only then.
+- **Whether the rebuild adopts a new benchmark.** `docs/THESIS.md` open question 2; addressed there, not here.
+- **MTFP9 status** (red-team T5). MTFP9 (16-bit, 9 trits) is dropped from the active substrate until a consumer asks. The type stays in `m4t_types.h`; no kernels appear until demanded.
+- **Observability** (red-team T12). Aggregating `sat_flags` across a run is a future cycle. The asserts and per-cell flags are sufficient for development; production observability is its own design.
 
-## L1. Aliasing (dst == a) undocumented
+## Memory updates after each step
 
-**Remediation.**
-- [x] Document that `vec_add_inplace(dst, dst, n)` computes `dst[i] *= 2` with saturation; `_sub_inplace` → zeros.
-- [x] Aliasing test case in `test_m4t_mtfp.c`.
-
----
-
-## L2. `clamp64` `static inline` in header
-
-**Resolution.** No action. `static inline` is correct for a 4-instruction function. Logged so it isn't re-raised.
-
----
-
-## L3. Scalar tail and NEON use different clamp implementations
-
-**Remediation.**
-- [x] Test exercising both paths with inputs that hit the saturation boundary (n=5: NEON + scalar tail).
-
----
-
-## Execution order
-
-Doc edits first (fast, low risk), then code + tests:
-
-1. H3 + H4 doc edits.
-2. M3 warning fix.
-3. Memory update.
-4. H1 + M1 + M2 + M4 + L1 + L3: block primitives, vec rewrite, static asserts, header docs.
-5. H2 + L1 test binary.
-6. Build + test + commit.
-
----
-
-## Completion
-
-Check off items as they land. When all unchecked items (non-deferred) are done, the remediation is complete and the increment can be claimed as spec-realizing rather than legacy-compatible.
-
----
-
-# Second red-team round (2026-04-14, full-surface)
-
-A comprehensive red-team of all live code after first-round remediation. All first-round items remained closed; the second round surfaced additional drift and latent cliffs.
-
-## H-RT1. Documentation drift — fixed-point framing in derivative headers
-
-**Finding.** `m4t_types.h` was reframed to mantissa/per-block-exponent, but `m4t_mtfp4.{h,c}`, `m4t_ternary_matmul.h`, and `tools/mnist_trit_lattice.c` still use the rejected "real = cell / SCALE" language. Every reader of those files absorbs the collapsed model.
-
-**Remediation.**
-- [x] Rewrite `m4t_mtfp4.h` top comment in mantissa/block-exponent terms. Drop the "real = cell / 9, range ±4.44" lines.
-- [x] Rewrite `m4t_ternary_matmul.h` header — drop "int32 ternary fixed-point," describe MTFP19 mantissas and Case S saturation on store (reference §8.5).
-- [x] Update `m4t_mtfp4.c` conversion comments to frame `SCALE_RATIO` as an inter-block-exponent offset under the default convention.
-- [x] Add a one-line annotation at `mnist_trit_lattice.c:35` naming the default-block-exponent convention used for the pixel → MTFP mapping.
-
-## H-RT2. `m4t_mtfp4_mul` does silent rounding — §8.5 violation
-
-**Finding.** `m4t_mtfp4.h:60-65` does `((int16)a * (int16)b + SCALE/2) / SCALE` and returns MTFP4. That's Case R (round) without a named opt-in. The scalar mtfp4 primitives (`add`, `sub`, `neg`, `mul`, `mul_trit`) are exercised only by the test binary — no live consumer calls them.
-
-**Remediation.**
-- [x] Delete the unmotivated scalar primitives (`m4t_mtfp4_add`, `_sub`, `_neg`, `_mul`, `_mul_trit`). Keep `m4t_mtfp4_clamp` (used internally by `sdot_matmul_bt` and the conversions).
-- [x] Remove the corresponding tests from `test_m4t_mtfp4.c`.
-- [x] When a real consumer needs MTFP4 scalar arithmetic, it will earn its way back in with spec-compliant semantics (Case W widening to MTFP9 mantissa).
-
-## H-RT3. `m4t_ternary_matmul` header doesn't reference §8.5
-
-**Remediation.**
-- [x] Header commentary on `m4t_mtfp_ternary_matmul_bt` names Case S saturation on store and references §8.5.
-
-## H-RT4. `test_proj_buf[4096]` silent cliff in LSH tool
-
-**Finding.** `mnist_trit_lattice.c:155` has a 16 KB stack array that caps `N_PROJ` at 4096 with no assertion. Current sweep reaches 2048; larger N_PROJ would produce silent stack corruption.
-
-**Remediation.**
-- [x] Replace with a malloc'd buffer sized by N_PROJ, or add an explicit assertion against 4096. Malloc is cleaner.
-
-## H-RT5. `m4t_route_signature_update` truncation on means
-
-**Finding.** `means[d] /= T` at m4t_route.c:167 is integer division (truncation toward zero). On boundary cases where `col_sum == true_mean`, the sign flips. Spec §11 doesn't specify rounding for the compound op. Behavior is consistent but undocumented.
-
-**Remediation.**
-- [x] Document the truncation behavior explicitly in the header and file comment; cross-reference from §11 in the substrate spec as a clarification.
-
-## M-RT1. `m4t_ternary_matmul` uses `vmulq_s32` over {-1, 0, +1} signs
-
-**Finding.** The inner loop at m4t_ternary_matmul.c:100-103 multiplies MTFP19 activations by signs in {-1, 0, +1}. Hardware-native shape is bit-select + conditional negate (`vbslq_s32` / `vnegq_s32`), not multiply. The header claims "zero multiplies" but relies on the compiler to do the reduction.
-
-**Remediation.**
-- [x] Replace `vmulq_s32` with explicit `vbslq_s32`-based zero selection plus `vnegq_s32` for the -1 case, so the hardware-native shape is expressed in source. Measured speedup deferred; correctness must be preserved.
-
-## M-RT3. `M4T_ROUTE_MAX_T` hard-coded internally
-
-**Remediation.**
-- [x] Promote `MAX_T = 64` to a public constant in `m4t_route.h` alongside `M4T_ROUTE_MAX_DIM`.
-
-## M-RT4. `m4t_route_signature_update` has a 4 KB stack buffer
-
-**Remediation.**
-- [x] Replace `m4t_trit_t row_buf[4096]` with `malloc(D)`. Remove the `M4T_ROUTE_MAX_DIM` assertion on this path; the caller owns upper bound.
-- [x] `M4T_ROUTE_MAX_DIM` becomes informational (documents the previous stack cap as a historical reference) or gets removed if no other path uses it.
-
-## M-RT7. `SCALE_RATIO` safety proof not enforced
-
-**Remediation.**
-- [x] Add `_Static_assert((int64_t)M4T_MTFP4_MAX_VAL * SCALE_RATIO <= (int64_t)M4T_MTFP_MAX_VAL, ...)` in `m4t_mtfp4.c`.
-
-## M-RT8. `trit_to_code` silently maps out-of-range inputs to 0
-
-**Finding.** `m4t_trit_pack.c:28`: values outside {-1, 0, +1} become code 0 (zero trit) without warning. Could hide bugs in trit generators.
-
-**Remediation.**
-- [x] Add an `assert(t >= -1 && t <= 1)` at the top of `trit_to_code`. This is a debug-mode check only; `NDEBUG` releases skip it. Fails loudly when a generator is broken.
-
-## L-RT4. Unused `glyph_mtfp_w_t` alias
-
-**Remediation.**
-- [x] Remove from `src/glyph_types.h`. If a consumer needs it, it re-emerges with a named demand.
-
-## L-RT5 / L-RT7. Orphan tools not in CMake
-
-**Remediation.**
-- [x] Add `m4t_trit_golden` as a dev-only executable in `m4t/CMakeLists.txt` (gated by a `M4T_BUILD_TOOLS` option, default OFF).
-- [x] Do the same for `m4t_lut_gen` — it is the sanctioned build-time-float tool; it should build cleanly when requested.
-
-## L-RT6. No `-Werror`
-
-**Remediation.**
-- [x] Add `-Werror` to the m4t CMake compile options. Warnings become build failures.
-
-## Deferred (second round)
-
-- [x] **M-RT10.** LSH regression test. Tracked — lands when a cheap synthetic smoke test can exercise the full pipeline without MNIST data.
-- [x] **T-RT2 / T-RT3.** Broader `signature_update` edge cases and ternary_matmul near-saturation tests. Lands in a dedicated test-expansion pass.
-- [x] **T-RT4.** End-to-end LSH regression (same as M-RT10).
-- [x] **T-RT5.** Explicit §8.5 Case-semantic assertions in tests. Annotate existing tests with Case labels rather than adding new ones.
-
-## Execution order (second round)
-
-1. Documentation sweep: H-RT1, H-RT3, H-RT5, N-RT* (single pass).
-2. Delete unmotivated primitives: H-RT2, L-RT4 (and update tests).
-3. Cliffs and asserts: H-RT4, M-RT4, M-RT7, M-RT8.
-4. Expose constant: M-RT3.
-5. Bit-select rewrite: M-RT1.
-6. Build hygiene: L-RT5, L-RT6, L-RT7.
-7. Build + test + commit.
-
----
-
-# Third red-team round (2026-04-14, post sign_extract → threshold_extract)
-
-Red-team of commit `ea0e519` (the sign_extract replacement). Subsequent LMM cycles and doc consolidation. Six new findings.
-
-Severity key unchanged: **H**, **M**, **L**.
-
-## M-RT3A. §18 applies cleanly only to enumerable-output primitives; doesn't say so
-
-**Finding.** §18's "every output state must be emitted non-trivially" is well-defined for primitives whose output space is finite and enumerable (trit codes, decision signs). For primitives with continuous outputs (`distance_batch` returns int32 distances; `apply_signed` returns MTFP mantissa arrays), "every output state" becomes "every int32 value" — nonsense. As written, §18 doesn't say where it applies, so applying it to continuous-output primitives leads either to confusion or to silently skipping the review gate.
-
-**Remediation.**
-- [x] Edit `m4t/docs/M4T_SUBSTRATE.md` §18 to name scope explicitly:
-  - **Enumerable-output primitives** (trit-producing extractors, decision primitives): emission coverage applies to the OUTPUT space.
-  - **Continuous-output primitives whose behavior depends on trit structure at the INPUT** (distance_batch over packed trits, apply_signed consuming decision-sign trits): emission coverage applies to the INPUT space.
-  - **Primitives outside the trichotomy** (pure arithmetic on integer mantissas, conversions, etc.): §18 does not apply.
-- [x] Update §18.1 examples to illustrate both input-side and output-side coverage.
-
-**Complete when.** §18 names its own scope; every live primitive has a clear answer for which side of the criterion (output / input / not applicable) applies.
-
-## M-RT3B. topk_abs and apply_signed docstrings not updated
-
-**Finding.** The scrutiny-cycle synthesize committed to updating docstrings on `topk_abs` and `apply_signed` to name their sanctioned input classes under §18. The commit shipped without these updates. `topk_abs` has a three-state output (sign field); `apply_signed` consumes a three-state input (decision sign). Both want explicit contracts.
-
-**Remediation.**
-- [x] `m4t_route.h::m4t_route_topk_abs` docstring additions: enumerated output space (tile_idx, sign ∈ {+1, -1, 0-sentinel}); sanctioned input class (score arrays with mixed nonzero signs, k ≤ T); coverage-test pointer.
-- [x] `m4t_route.h::m4t_route_apply_signed` docstring additions: enumerated input decision-sign space; sanctioned input class (decisions from `topk_abs` output); coverage-test pointer.
-
-**Complete when.** Both primitives' headers carry the §18 review-gate data: enumerated space, sanctioned input class, coverage-test pointer.
-
-## M-RT3C. Coverage tests are not labeled as such
-
-**Finding.** The tests that serve the §18 review-gate coverage role are not labeled. `test_threshold_extract_tau5` IS the coverage test for threshold_extract's primary sanctioned deployment, but a future auditor has to reverse-engineer that. Same gap for `test_topk_abs_*`, `test_apply_signed_*`, `test_signature_update`. Machine-greppable labels fix this.
-
-**Remediation.**
-- [x] Add `/* §18 coverage test: ... */` header comments above each test function that serves the coverage role in `test_m4t_route.c`.
-- [x] For compound tests (e.g., topk_abs coverage spans multiple test functions), a single group comment at the top of the related tests block.
-
-**Complete when.** Every §18 coverage test is labeled with a comment a `grep "§18 coverage"` can find.
-
-## L-RT4A. Meta: re-audit pass not documented
-
-**Finding.** The scrutiny-cycle synthesize committed to "Re-audit all routing primitives against emission coverage before declaring the architecture correct." I did the audit implicitly (§17 cross-reference includes the §18 row), but did not produce a visible audit trail for each primitive. A future auditor can't see which primitive was evaluated against which side of the criterion.
-
-**Remediation.**
-- [x] Add a subsection to §18 (or a new §18.5) enumerating all live routing primitives and their §18 status: output-side vs input-side vs not-applicable; coverage-test reference for each.
-
-**Complete when.** `m4t/docs/M4T_SUBSTRATE.md` contains an explicit per-primitive §18 audit table.
-
-## L-RT1A. `-tau` UB safety is assertion-dependent
-
-**Finding.** `if (v < -tau)` is undefined behavior if `tau == INT64_MIN`. The `assert(tau >= 0)` catches this in debug; in release, a contract-violating caller gets UB.
-
-**Remediation (accepted risk).**
-- [ ] *Defer.* This is the standard C pattern: runtime assertion in debug, precondition documented, contract-violating callers get UB in release. Fixing it would either add a runtime guard (hides bugs) or require restructuring arithmetic (adds complexity for a hypothetical caller error). The paranoid fix does not improve correctness materially; the contract is stated and the assertion is in place.
-
-## L-RT2A. Test coverage gaps
-
-**Finding.** Threshold_extract tests don't cover: `n = 0`; values near INT64_MAX (large positive); packed-byte boundaries (n = 3, 5, 7, 8 — to exercise the pack-bit OR across byte edges).
-
-**Remediation.**
-- [x] Add `test_threshold_extract_n_zero` — `n = 0` returns cleanly; no writes to dst.
-- [x] Add `test_threshold_extract_pack_boundaries` — n ∈ {3, 5, 7, 8}, verify correct placement across packed-byte edges.
-- [x] Add `test_threshold_extract_extremes` — values including INT64_MAX, INT64_MIN+1 (avoid INT64_MIN itself per L-RT1A); verify sign discrimination.
-
-**Complete when.** All three tests land and pass.
-
-## L-RT3A. glyph_route.h untested (pre-existing)
-
-**Finding.** Pre-existing state. The wrapper test was archived with the dense-path aliases. `glyph_route.h` aliases exist but are never compiled under the current build. Not a regression from recent changes.
-
-**Remediation (deferred).**
-- [ ] *Defer.* Untested glyph wrapper lands back in scope when a glyph consumer emerges. Until then, aliases remain theoretical.
-
----
-
-## Execution order (third round)
-
-1. §18 scope qualifier and per-primitive audit (M-RT3A, L-RT4A). Doc-only.
-2. Docstring updates on `topk_abs` and `apply_signed` (M-RT3B). Doc-only.
-3. Coverage-test labels (M-RT3C). Comments in test file.
-4. Test coverage additions (L-RT2A). New tests + register.
-5. Build + test + commit.
-
-L-RT1A and L-RT3A explicitly deferred with rationale.
-
----
-
-# Fourth red-team round (2026-04-14, post routed-knn 97.31% claim)
-
-Red-team of commit `663c355` (the "routed 97.31% beats dense 97.05% by 10.8×" headline). Findings qualify but don't invalidate the core result. Seven items across three severity levels.
-
-## H-RT1D. Speed comparison is apples-to-oranges (scalar L1 vs NEON popcount)
-
-**Finding.** `mnist_routed_knn.c`'s L1 k-NN baseline uses a scalar `int64_t` inner loop with no SIMD; `m4t_popcount_dist` is hand-NEON. The 10.8× speedup conflates algorithmic win (popcount-over-bits vs abs-diff-sum per dim) with SIMD deployment. The raw claim inflates the algorithmic edge.
-
-**Remediation.**
-- [ ] Rewrite the L1 k-NN inner loop with NEON (`vabdq_s32` + `vaddw_s32` widening accumulate to int64). Lanes: 4 int32 absolute differences per vector, widen-add into two int64x2_t accumulators, horizontal reduce at the end.
-- [ ] Re-run the comparison with the vectorized baseline.
-- [ ] Update the reported speedup — expected ~3-5× once L1 is vectorized (popcount processes 128 bits per VCNT; abs-diff-sum processes 4 int32s per vabdq; algorithmic ratio is ~5-10× but real overhead compresses this).
-
-**Complete when.** L1 baseline is NEON-vectorized; routed vs L1 wall time reflects only the algorithmic difference, not SIMD deployment asymmetry.
-
-## H-RT2D. Accuracy gap is ~1.5σ; single-run, not statistically significant
-
-**Finding.** 97.31% vs 97.05% at n=10 000 is a 26-sample difference. Binomial standard error at p≈0.97, n=10K is ≈0.17%. The 0.26% gap is ~1.5σ — suggestive, not decisive. One RNG seed isn't enough to distinguish "routing really wins" from "this run's random projection happened to favor routing."
-
-**Remediation.**
-- [ ] Run at least 5 RNG seeds per configuration.
-- [ ] Report mean ± stddev for each (N_PROJ, k) cell in the results table.
-- [ ] Apply honest interpretation: if routed's mean minus L1's mean is within one stddev, call it a tie. Otherwise claim the gap as measured.
-
-**Complete when.** Every reported accuracy has a mean ± stddev over multiple seeds; no single-run numbers quoted as headlines.
-
-## M-RT1D. Best-of-six selection bias on the 97.31% headline
-
-**Finding.** 6 configurations ran for routed (2 N_PROJs × 3 k values). 97.31% was the best of 6. Best-of-k from noise-distributions with σ≈0.17% biases the maximum upward by ~0.3-0.5%. The honest out-of-sample routed number is probably ~97.0% ± 0.2%.
-
-**Remediation.**
-- [ ] Report all configurations tested, not just the winner. Include the full grid in the output table.
-- [ ] Caveat the "best" number with explicit selection-bias acknowledgment.
-
-**Complete when.** Every reported accuracy is contextualized with the sweep it was the maximum over.
-
-## M-RT2D + M-RT3D. Dense baseline is too weak; no deskewing tested
-
-**Finding.**
-- The "L1 k-NN (MTFP19 projections)" baseline in the current tool isn't the strongest classical dense baseline. It's L1 over *the same ternary projections* as the routed path — isolates the classifier contribution but isn't "dense ML wins on this task."
-- The stronger dense baseline is k-NN over deskewed pixels (journal: 97.61%). We haven't re-measured this on the rebuilt substrate.
-- Deskewing boosts accuracy by ~1.5-2 points. The routed path hasn't been run on deskewed inputs either.
-
-**Remediation.**
-- [ ] Port `deskew_image` / `deskew_all` from `archive/tools/mnist_knn_lattice.c` into the k-NN tool.
-- [ ] Add a deskewed-pixel dense k-NN baseline (L1 distance over 784-dim MTFP pixel vectors, k ∈ {1, 3, 5}).
-- [ ] Add an optional deskewing pass for the routed path (deskew pixels → project → extract signature → k-NN).
-- [ ] Report all four tracks side-by-side: raw-proj L1, raw-proj routed, deskewed-pixel L1, deskewed-proj routed.
-
-**Complete when.** Results include both deskewed and non-deskewed variants on both the dense (pixel + projection) and routed paths.
-
-## M-RT4D. Zero density verified but not full trit distribution
-
-**Finding.** We verified train %zero = 32.87%, test %zero = 32.58% — close to 33%. We did NOT verify that the nonzero trits split ~50/50 between +1 and -1. If the distribution is skewed (e.g., 33% zeros, 40% +1, 27% -1), §18 passes at emission-coverage but the base-3 distribution isn't symmetric.
-
-**Remediation.**
-- [ ] Instrument to count +1, 0, -1 trits separately.
-- [ ] Report the full three-way distribution on both train and test signatures.
-- [ ] Verify ~33/33/33 split (or document the actual split if asymmetric).
-
-**Complete when.** Output shows %+1, %0, %-1 distributions for each signature population; symmetric-trichotomy confirmed or the asymmetry explicitly documented.
-
-## L-RT1D. Memory 600+ MB at N_PROJ=2048 (hygiene)
-
-**Finding.** `train_proj` alone is 480 MB. With `test_proj` and signatures, peak memory is ~600 MB. Fine on modern hardware but limits the tool on tighter machines.
-
-**Remediation (accepted).**
-- [ ] *Defer.* Acceptable for a research tool; memory is not the binding resource. A streaming-projection variant is straightforward if a tighter consumer arises.
-
-## L-RT2D. Document revised claims everywhere
-
-**Finding.** The prior `journal/routed_knn_mnist.md`, `CHANGELOG.md`, and `README.md` all carry the overclaimed "routing beats dense by 10.8×" framing. Once the remediation measurements are in, every doc that quotes the headline needs correcting.
-
-**Remediation.**
-- [ ] Update `README.md` Results table with multi-seed, vectorized-baseline, deskewed numbers.
-- [ ] Add a correction entry to `CHANGELOG.md` retracting the overclaim with revised measurements.
-- [ ] Append a "Revised after fourth red-team" section to `journal/routed_knn_mnist.md` with the new numbers; keep the prior text for historical record.
-
-**Complete when.** No repo document quotes the 10.8× speedup or 97.31% as "beats dense by X points" without the seed-variance and baseline-fairness qualifiers.
-
----
-
-## Execution order (fourth round)
-
-1. Update `mnist_routed_knn.c`: add vectorized L1, deskewing, multi-seed loop, ±1 trit count, full-sweep output.
-2. Rebuild.
-3. Run the new configuration. Capture full results.
-4. Update docs with honest revised claims (README, CHANGELOG, journal entry).
-5. Commit everything as one cohesive correction.
-
-Deferred: L-RT1D (memory).
-
----
-
-# Fifth red-team round (2026-04-15, audit follow-up)
-
-Scope: the three audit findings raised against the current local repo state.
-
-## H-A1. Repo-root `-Werror` contract is false in practice
-
-**Finding.** `README.md` claims the numeric core compiles clean under `-Werror`, but the repo entrypoint did not apply the warning set to top-level tools. `m4t/CMakeLists.txt` enforced the warning policy only inside the substrate subtree. A root build emitted warnings from `tools/mnist_full_sweep.c` and still succeeded.
-
-**Remediation plan.**
-- [x] Apply the warning policy at the repo root so top-level tools and glyph tests inherit it.
-- [x] Fix the known top-level warning in `tools/mnist_full_sweep.c` instead of weakening the warning policy.
-- [x] Verify with a clean root configure/build, not just a standalone `m4t` build.
-
-**Plan red-team.**
-- Risk: enabling root `-Werror` could uncover unrelated warning debt across the tool layer and turn a small hygiene fix into a large refactor.
-- Counter: keep the change narrow, fix only the warnings exposed by the current tree, and verify with the root CMake entrypoint immediately after the flag change.
-
-**Complete when.** `cmake -S . -B build && cmake --build build` succeeds with the repo-root warning policy in force.
-
-## H-A2. `m4t_mtfp_ternary_matmul_bt` lacks direct automated coverage
-
-**Finding.** The projection kernel is a central live primitive, but the existing test suite covered it only indirectly through consumer tools.
-
-**Remediation plan.**
-- [x] Add `m4t/tests/test_m4t_ternary_matmul.c`.
-- [x] Cover exact small products, all-zero rows, NEON-width `K=16`, NEON+tail `K=20`, and saturating clamp on store.
-- [x] Register the new binary in `m4t/CMakeLists.txt` and include it in `ctest`.
-
-**Plan red-team.**
-- Risk: a shallow test could close the finding cosmetically while still missing the real failure modes (packed-trit decode boundaries, tail handling, or saturation).
-- Counter: make the cases structurally distinct rather than duplicative: one exact scalar-width case, one full-width NEON case, one mixed NEON+tail case, and one explicit saturation case.
-
-**Complete when.** `ctest` includes a dedicated ternary-matmul binary and it passes on the local tree.
-
-## M-A3. Glyph wrapper surface is exported but untested
-
-**Finding.** The top-level `glyph_*` headers are the public consumer surface, but `tests/CMakeLists.txt` still documented wrapper tests as pending.
-
-**Remediation plan.**
-- [x] Rebuild wrapper coverage as `tests/test_glyph_wrapper.c` against the live alias surface.
-- [x] Exercise type aliases, trit-pack aliases, ternary-matmul aliasing, and route aliases.
-- [x] Wire the test into the root `tests/CMakeLists.txt` so it runs through the same `ctest` entrypoint as the rest of the repo.
-
-**Plan red-team.**
-- Risk: a compile-only wrapper test would miss alias drift that still compiles but resolves to the wrong symbol or behavior.
-- Counter: compare glyph-prefixed calls directly against the underlying `m4t_*` functions at runtime for representative operations.
-
-**Complete when.** Root `ctest` runs a glyph-wrapper binary that passes.
-
-## Execution order (fifth round)
-
-1. Fix the root build contract and the warning it exposes.
-2. Add direct ternary-matmul tests and register them.
-3. Rebuild glyph wrapper tests and register them.
-4. Rebuild from the repo root and run `ctest`.
-
----
-
-# Sixth red-team round (2026-04-15, dense-to-routed conversion)
-
-Scope: remove dense decision paths from the live Trit Lattice architecture and its follow-on tools.
-
-## H-R1. `mnist_trit_lattice.c` is routed only in feature generation
-
-**Finding.** The front-end projection is ternary-routed, but the classifier collapses back to projection-space and pixel-space L1. That leaves the flagship Trit Lattice tool architecturally hybrid.
-
-**Remediation plan.**
-- [x] Replace projection-L1 centroid ranking with class-signature routing over packed trits.
-- [x] Remove pixel-space refinement from the live decision path.
-- [x] Keep the projection front-end intact so the conversion isolates the classifier boundary.
-
-**Plan red-team.**
-- Risk: simply swapping in routing without symmetric tau calibration would repeat the old asymmetric-centroid failure mode.
-- Counter: compute `tau_c` from centroid-diff magnitudes and `tau_q` from query/train projection magnitudes, then count actual zero density on both sides.
-
-## H-R2. Amplification tool still escapes to dense pixel fallback
-
-**Finding.** `mnist_routed_amplified.c` uses a routed ensemble, then abandons the routing surface for dense pixel k-NN on uncertain queries.
-
-**Remediation plan.**
-- [x] Replace the dense fallback with a routed-only fallback over the existing per-projection top-k evidence.
-- [x] Preserve the uncertainty-trigger idea, but keep the resolver in ternary signature space.
-
-**Plan red-team.**
-- Risk: a routed fallback that is just a restatement of the ensemble vote adds complexity without adding signal.
-- Counter: make the fallback aggregate finer routed evidence than the coarse per-projection winner, e.g. flattened top-k signature votes or secondary routed ranking.
-
-## H-R3. Cascade tools use a routed filter but dense resolver
-
-**Finding.** `mnist_cascade_*` and `mnist_resolver_sweep.c` all conclude that the filter is good and the resolver is the bottleneck, but the resolver family being tested is still mostly dense (pixel L1/L2, cosine, centroids).
-
-**Remediation plan.**
-- [x] Replace pixel-space resolution with routed secondary resolution: secondary-hash, multi-seed routed rank fusion, or routed per-class signatures.
-- [x] Update comments and reporting strings so the tools describe routed filter + routed resolver, not cascade-to-dense.
-
-**Plan red-team.**
-- Risk: swapping to a weaker routed resolver could lower accuracy and obscure whether the architecture is cleaner but empirically worse.
-- Counter: keep the tool outputs explicit about which resolver is primary and compare against pure-hash top-k baselines so regressions stay visible.
-
-## Execution order (sixth round)
-
-1. Convert `mnist_trit_lattice.c` to routed-only classification.
-2. Convert `mnist_routed_amplified.c` to routed-only fallback.
-3. Convert cascade and resolver tools from dense secondary metrics to routed secondary metrics.
-4. After each file: build, red-team, remediate if needed, commit, then move on.
+- After tier 2: update `m4t/README.md`'s "Live surface" section to link the contract blocks; no FINDINGS axis (housekeeping).
+- After tier 3 consumer-discovery cycle: update `m4t/docs/M4T_SUBSTRATE.md` §14.2 with the cycle's findings; add a journal pointer; update memory `feedback_*.md` with whatever discipline lessons emerge.
+- After tier 3 implementation (if it fires): add the first FINDINGS axis — substrate is genuinely MTFP, with a concrete consumer demonstrating it.

@@ -1,3 +1,6 @@
+# Pre-rebuild reference material — kept on disk, not in git.
+01MAY26_archived/
+
 # Build artifacts
 build/
 build-*/
@@ -6,21 +9,26 @@ m4t/build/
 *.a
 *.d
 *.dylib
+*.so
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 
 # macOS
 .DS_Store
 
-# Editor
+# Editor / IDE
 *.swp
 *~
 .vscode/
 .idea/
 
-# Tools output (binaries)
-/tmp/m4t_*
-
 # Claude Code
 .claude/
 
-# Datasets (downloaded locally)
+# Datasets (downloaded locally; the archive holds reference copies)
 data/

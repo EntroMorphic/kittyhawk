@@ -47,6 +47,7 @@ void m4t_route_distance_batch(
     int T, int sig_dim)
 {
     assert(distances && query_packed && tile_sigs_packed && mask);
+    assert(T >= 0 && sig_dim >= 0);
     int Dp = M4T_TRIT_PACKED_BYTES(sig_dim);
 
     for (int t = 0; t < T; t++) {
@@ -111,10 +112,17 @@ void m4t_route_apply_signed(
     int k, int dim)
 {
     assert(result && tile_outs && decisions);
+    assert(k >= 0 && dim >= 0);
 
     for (int sel = 0; sel < k; sel++) {
         int idx = decisions[sel].tile_idx;
         m4t_trit_t sign = decisions[sel].sign;
+        /* §18 contract — three-state input. tile_idx == -1 is the sentinel
+         * (no tile selected); sign ∈ {-1, 0, +1}. The upper-bound on
+         * tile_idx is implicit in the caller's tile_outs buffer layout
+         * and cannot be checked without an extra parameter. */
+        assert(idx >= -1);
+        assert(sign == -1 || sign == 0 || sign == 1);
         if (idx < 0) continue;
 
         const m4t_mtfp_t* tile = tile_outs + (size_t)idx * dim;
@@ -198,4 +206,28 @@ void m4t_route_signature_update(
         m4t_route_threshold_extract(
             signatures + (size_t)t * Dp, cs, 0, D);
     }
+}
+
+/* ── Emission-coverage helper ─────────────────────────────────────────── */
+
+void m4t_route_decisions_emit_coverage(
+    const m4t_route_decision_t* decisions,
+    int k,
+    int* out_has_pos,
+    int* out_has_neg,
+    int* out_has_zero)
+{
+    assert(k >= 0);
+    assert(k == 0 || decisions != NULL);
+
+    int has_pos = 0, has_neg = 0, has_zero = 0;
+    for (int i = 0; i < k; i++) {
+        m4t_trit_t s = decisions[i].sign;
+        if      (s ==  1) has_pos  = 1;
+        else if (s == -1) has_neg  = 1;
+        else              has_zero = 1;
+    }
+    if (out_has_pos)  *out_has_pos  = has_pos;
+    if (out_has_neg)  *out_has_neg  = has_neg;
+    if (out_has_zero) *out_has_zero = has_zero;
 }

@@ -461,6 +461,57 @@ static int test_route_e2e(void) {
     return 0;
 }
 
+/* ── Emission-coverage helper ──────────────────────────────────────────── */
+
+/* Verifies that decisions_emit_coverage correctly reports which sign states
+ * were realized. This is the §18 testability primitive — consumers integrate
+ * it to demonstrate the input-class contract is honored at the call site. */
+static int test_decisions_emit_coverage(void) {
+    /* All three states present. */
+    {
+        m4t_route_decision_t d[3] = {
+            { .tile_idx = 0,  .sign =  1 },
+            { .tile_idx = 1,  .sign = -1 },
+            { .tile_idx = -1, .sign =  0 },
+        };
+        int has_pos = -1, has_neg = -1, has_zero = -1;
+        m4t_route_decisions_emit_coverage(d, 3, &has_pos, &has_neg, &has_zero);
+        if (!(has_pos == 1 && has_neg == 1 && has_zero == 1)) {
+            printf("FAIL: emit_coverage all-three\n"); return 1;
+        }
+    }
+
+    /* Only positive. */
+    {
+        m4t_route_decision_t d[2] = {
+            { .tile_idx = 0, .sign = 1 },
+            { .tile_idx = 1, .sign = 1 },
+        };
+        int has_pos = -1, has_neg = -1, has_zero = -1;
+        m4t_route_decisions_emit_coverage(d, 2, &has_pos, &has_neg, &has_zero);
+        if (!(has_pos == 1 && has_neg == 0 && has_zero == 0)) {
+            printf("FAIL: emit_coverage pos-only\n"); return 1;
+        }
+    }
+
+    /* k = 0 → all states absent. */
+    {
+        int has_pos = -1, has_neg = -1, has_zero = -1;
+        m4t_route_decisions_emit_coverage(NULL, 0, &has_pos, &has_neg, &has_zero);
+        if (!(has_pos == 0 && has_neg == 0 && has_zero == 0)) {
+            printf("FAIL: emit_coverage empty\n"); return 1;
+        }
+    }
+
+    /* NULL out-pointers are skipped without crashing. */
+    {
+        m4t_route_decision_t d[1] = { { .tile_idx = 0, .sign = 1 } };
+        m4t_route_decisions_emit_coverage(d, 1, NULL, NULL, NULL);
+    }
+
+    return 0;
+}
+
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -478,6 +529,7 @@ int main(void) {
     if (test_apply_signed_sentinel()) return 1;
     if (test_signature_update())      return 1;
     if (test_route_e2e())             return 1;
+    if (test_decisions_emit_coverage()) return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }
