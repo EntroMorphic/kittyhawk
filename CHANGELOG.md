@@ -147,6 +147,66 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Substrate-discipline cleanup: 100% on-substrate via libm4t kernels]
+
+A kernel-use audit caught that the gesh consumer library and bench code re-implemented ternary projection and sign-threshold by hand in **9 places**, when libm4t had `m4t_mtfp_ternary_matmul_bt` and `m4t_route_threshold_extract` for exactly those operations. Every prior substrate-claim measurement was running through hand-written loops, not the substrate kernels we built and tested. **Substrate-claim integrity required full kernel routing**; this cycle delivers it.
+
+### What was open-coded → now kernel-routed
+
+| Site | Was | Now |
+|------|-----|-----|
+| `gesh/src/gesh_forward.c` | open-coded MAC + sign threshold | `gesh_project_one_packed` |
+| `gesh/src/gesh_train.c` rebuild | open-coded MAC + sign | `gesh_project_batch_unpacked_scratch` |
+| `gesh/src/gesh_train.c` count_errors | open-coded MAC + sign per query | `gesh_project_batch_unpacked_scratch` per call |
+| `gesh/src/gesh_bank.c` | open-coded sign threshold | `gesh_threshold_int32_to_trit` |
+| `gesh/bench/sweep_dims.c` | open-coded MAC + sign | `gesh_project_batch_unpacked` |
+| `gesh/bench/mnist_probe.c` | open-coded MAC + sign | `gesh_project_batch_unpacked` |
+| `gesh/bench/denoise_probe.c::project_train_acc` | open-coded MAC | `m4t_mtfp_ternary_matmul_bt` direct |
+| `gesh/bench/denoise_probe.c::prototype_alignment` | open-coded dot product | matmul + `col_stddev` |
+| `gesh/bench/image_canon.c::quantize` | open-coded threshold | `m4t_route_threshold_extract` |
+
+### What was added
+
+- **`gesh/src/gesh_project.{c,h}`** — three substrate-routed wrappers plus a scratch-aware variant for hot loops:
+  - `gesh_project_batch_unpacked` — batch project unpacked → unpacked. Allocates per call.
+  - `gesh_project_one_packed` — single query → packed. Allocates per call.
+  - `gesh_threshold_int32_to_trit` — int32 array → unpacked ternary via `m4t_route_threshold_extract`.
+  - `gesh_project_batch_unpacked_scratch` + `gesh_project_scratch_init/free` — caller-managed scratch for hot loops (no per-call malloc).
+  - All wrappers internally call `m4t_pack_trits_1d` + (for matmul cases) `m4t_mtfp_ternary_matmul_bt` + `m4t_route_threshold_extract` + `m4t_unpack_trits_1d`. Zero open-coded multiply-accumulate or sign threshold.
+
+- **`gesh/tests/test_gesh_project.c`** — bit-equivalence property test:
+  - 7 shapes × 3 seeds = 21 batch-projection equivalence checks vs reference open-coded loop. **Zero differing trits** across all 21 cells.
+  - 4 sizes × 3 seeds = 12 threshold-extract equivalence checks. **Zero differences**, plus emission coverage holds (all three ternary states present per call).
+
+- **`journal/gesh_substrate_discipline_cleanup.md`** — full cycle record.
+
+- **CONTRIBUTING.md** — new methodology rule: *"Kernel use gates the substrate-claim."* Companion to the prior multi-seed and multi-config rules. Pattern: code red-teams catch kernel issues, doc red-teams catch ensemble drift, measurement red-teams catch methodology drift, **kernel-use audits catch substrate-claim drift**.
+
+### Bit-equivalence verification
+
+All measurements re-run post-cleanup produce **bit-identical** results to the pre-cleanup open-coded path:
+
+- **Gate 2 (denoise probe):** Pearson r = +0.8921, t = 157.89 — identical. Stratification 3,649 / 7,451 / 11,404 — identical.
+- **`test_gesh_project`:** 33/33 equivalence checks pass with zero differing trits.
+
+The kernel and the open-coded loop produce identical ternary outputs because both are deterministic integer operations with the same arithmetic semantics. The cleanup is semantically neutral and substrate-claim-positive.
+
+### Implications
+
+- **Substrate-claim integrity:** every measurement supporting "base-3 routing-first" claims now runs through the libm4t kernels we cite as the substrate. Prior hand-written loops are gone from runtime paths.
+- **Performance dishonesty corrected:** prior timing claims (e.g., sweep_dims at sig_dim=1024 in ~515s) were for hand-written loops, not kernels. Future timing claims will be on-substrate.
+- **Discipline rule reciprocated:** principle 5 ("no primitive without named consumer demand") was satisfied when kernels were built. The flip-side (consumer actually uses the kernel) is now also satisfied.
+
+### What was NOT cleaned up (justified non-kernel sites)
+
+- **`image_canon::normalize_one`** — per-image preprocessing with integer isqrt. One-shot, not runtime; sanctioned per `M4T_SUBSTRATE.md` §12.
+- **`gesh_init_random_projection_balanced`** — uniform-random ternary sampling, not a sign threshold.
+- **`image_canon::cmp_i64`** — qsort comparator returning C-convention -1/0/+1. Not a ternary trit emitter.
+- **Float in `compute_stats_pm`, Pearson r, etc.** — reporting only, not runtime.
+
+### Build
+14/14 ctest binaries green from clean rebuild. The new `test_gesh_project` is registered alongside the existing 13.
+
 ## [2026-05-02 — Phase B red-team remediation: ablation falsifies original closeout narrative]
 
 The Phase B red-team's C1+H1+H2 critique flagged the original closeout's "consumer architecture is the bottleneck" claim as unsupported by the 2-cell single-config measurement. A 4-cell ablation isolating budget × n_train at sig_dim=128 plus a 5-cell C2 multi-config sweep was run.

@@ -7,6 +7,8 @@
  */
 
 #include "image_canon.h"
+#include "m4t_route.h"
+#include "m4t_trit_pack.h"
 #include "m4t_types.h"
 
 #include <assert.h>
@@ -224,16 +226,20 @@ void image_canon_quantize_unpacked_batch(const m4t_mtfp_t* x_batch,
                                           int64_t tau,
                                           m4t_trit_t* out_trits) {
     assert((const void*)out_trits != (const void*)x_batch);
+    /* Substrate-routed via m4t_route_threshold_extract. The kernel takes
+     * int64 input; widen MTFP19 (int32) → int64 per row. */
+    int Dp = M4T_TRIT_PACKED_BYTES(n_dims);
+    int64_t* values = malloc((size_t)n_dims * sizeof(int64_t));
+    uint8_t* packed = malloc((size_t)Dp);
     for (int i = 0; i < n; i++) {
         const m4t_mtfp_t* x = x_batch + (size_t)i * n_dims;
         m4t_trit_t* o = out_trits + (size_t)i * n_dims;
-        for (int d = 0; d < n_dims; d++) {
-            int64_t v = (int64_t)x[d];
-            o[d] = (v > tau) ? (m4t_trit_t)1
-                  : (v < -tau) ? (m4t_trit_t)-1
-                  : (m4t_trit_t)0;
-        }
+        for (int d = 0; d < n_dims; d++) values[d] = (int64_t)x[d];
+        m4t_route_threshold_extract(packed, values, tau, n_dims);
+        m4t_unpack_trits_1d(o, packed, n_dims);
     }
+    free(packed);
+    free(values);
 }
 
 void image_canon_free(image_canon_dataset_t* ds) {

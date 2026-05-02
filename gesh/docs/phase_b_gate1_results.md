@@ -99,6 +99,14 @@ The 92% threshold is set because the prior-cycle's archive baseline reached 97.2
 
 The +1pp delta is strict — it forces a substrate-claim contribution rather than just a consumer upgrade.
 
+## Substrate-discipline note (2026-05-02)
+
+After this Gate 1 ablation landed, a kernel-use audit caught that the projection and threshold steps were running through hand-written loops instead of `m4t_mtfp_ternary_matmul_bt` + `m4t_route_threshold_extract`. The cleanup (`journal/gesh_substrate_discipline_cleanup.md`) routes everything through libm4t kernels and verifies bit-equivalence with the prior path via `tests/test_gesh_project.c` (33/33 cells pass with zero differing trits).
+
+**All numbers in this document are bit-identical pre- and post-cleanup** (verified by re-running the probe on the kernel-routed code path). The ablation table, the sig_dim sweep, and the verdict all stand. What changed is not the data; it's that the data was generated through the substrate kernels we cite, not through hand-written loops that re-implemented the same arithmetic.
+
+The kernel path is slower per call due to per-flip-eval setup (R packing, MTFP19 widening). For the n_train=2000 / sig_dim=128 hot loop in Cell A, runtime moved from ~7.5s to ~85s. The scratch-aware variant `gesh_project_batch_unpacked_scratch` removes per-call malloc; further amortization (incremental R-packing on single-trit flips) is a future cycle if performance becomes a constraint.
+
 ## Reproduction
 
 ```bash

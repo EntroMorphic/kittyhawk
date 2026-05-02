@@ -21,6 +21,7 @@
 #include "synth_proto.h"
 #include "gesh_bank.h"
 #include "gesh_forward.h"
+#include "gesh_project.h"
 #include "gesh_train.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
@@ -100,19 +101,11 @@ static void build_bank_from_projection(
     const m4t_trit_t* train, const int* train_lbl,
     int n_train, int sig_dim, int input_dim, int n_classes)
 {
-    m4t_trit_t* projected = malloc((size_t)n_train * (size_t)sig_dim * sizeof(m4t_trit_t));
-    for (int i = 0; i < n_train; i++) {
-        const m4t_trit_t* x = train + (size_t)i * input_dim;
-        m4t_trit_t* s = projected + (size_t)i * sig_dim;
-        for (int oi = 0; oi < sig_dim; oi++) {
-            const m4t_trit_t* r = R + (size_t)oi * input_dim;
-            int32_t acc = 0;
-            for (int j = 0; j < input_dim; j++) {
-                acc += (int32_t)r[j] * (int32_t)x[j];
-            }
-            s[oi] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
-        }
-    }
+    m4t_trit_t* projected = malloc((size_t)n_train * (size_t)sig_dim
+                                     * sizeof(m4t_trit_t));
+    /* Substrate-routed projection. */
+    gesh_project_batch_unpacked(projected, train, n_train,
+                                  R, sig_dim, input_dim);
     gesh_bank_build_class_mean(bank, projected, train_lbl, n_train, n_classes);
     free(projected);
 }

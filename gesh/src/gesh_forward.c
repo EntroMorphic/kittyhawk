@@ -7,32 +7,13 @@
  */
 
 #include "gesh_forward.h"
+#include "gesh_project.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Ternary projection: out[i] = sign( Σ_j R[i,j] · x[j] ) for one row.
- * Inputs are unpacked m4t_trit_t. Output is unpacked m4t_trit_t.
- * Tie at zero sum → 0 trit (matches threshold_extract semantics with
- * tau=0). */
-static void ternary_project_row(
-    m4t_trit_t* out_sig,
-    const m4t_trit_t* R,         /* [sig_dim × input_dim] */
-    const m4t_trit_t* x,         /* [input_dim] */
-    int sig_dim, int input_dim)
-{
-    for (int i = 0; i < sig_dim; i++) {
-        const m4t_trit_t* r = R + (size_t)i * input_dim;
-        int32_t acc = 0;
-        for (int j = 0; j < input_dim; j++) {
-            acc += (int32_t)r[j] * (int32_t)x[j];
-        }
-        out_sig[i] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
-    }
-}
 
 /* Find the indices of the top_k smallest values in `dists[0..T)`.
  * Writes top_k indices to `out_idx`; output order is ascending by value.
@@ -112,8 +93,8 @@ int gesh_forward_classify(
     int T = bank->n_tiles;
     int Dp_sig = M4T_TRIT_PACKED_BYTES(sig_dim);
 
-    /* Per-call scratch. */
-    m4t_trit_t* unpacked_sig = malloc((size_t)sig_dim * sizeof(m4t_trit_t));
+    /* Per-call scratch. unpacked_sig is no longer needed: the
+     * kernel-routed projection writes directly to packed_sig. */
     uint8_t*    packed_sig   = malloc((size_t)Dp_sig);
     uint8_t*    mask_packed  = malloc((size_t)Dp_sig);
     int32_t*    dists        = malloc((size_t)T * sizeof(int32_t));
@@ -148,10 +129,14 @@ int gesh_forward_classify(
     for (int q = 0; q < n_queries; q++) {
         const m4t_trit_t* x = queries + (size_t)q * input_dim;
 
-        /* 1. Project query to signature (or identity if no projection). */
+        /* 1. Project query to signature (or identity if no projection).
+         *    Substrate-discipline: projection is fully kernel-routed via
+         *    gesh_project_one_packed (m4t_mtfp_ternary_matmul_bt +
+         *    m4t_route_threshold_extract). No open-coded MAC or sign
+         *    threshold in this path. */
         if (proj->R != NULL) {
-            ternary_project_row(unpacked_sig, proj->R, x, sig_dim, input_dim);
-            m4t_pack_trits_1d(packed_sig, unpacked_sig, sig_dim);
+            gesh_project_one_packed(packed_sig, x, proj->R,
+                                      sig_dim, input_dim);
         } else {
             m4t_pack_trits_1d(packed_sig, x, sig_dim);
         }
@@ -184,7 +169,6 @@ int gesh_forward_classify(
         out_predictions[q] = best_class;
     }
 
-    free(unpacked_sig);
     free(packed_sig);
     free(mask_packed);
     free(dists);

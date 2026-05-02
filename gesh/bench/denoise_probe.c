@@ -32,6 +32,8 @@
 
 #include "synth_proto.h"
 #include "gesh_train.h"
+#include "m4t_trit_pack.h"
+#include "m4t_ternary_matmul.h"
 #include "m4t_types.h"
 
 #include <limits.h>
@@ -45,28 +47,19 @@
 #define N_TRAIN     2000
 #define SIG_DIM     64
 
-/* x[j] = stddev across classes of (R[j] · P_c). Returns squared sum
- * for variance computation — caller divides by C. */
-static double prototype_alignment_stddev(
-    const m4t_trit_t* R_row,
-    const m4t_trit_t* prototypes,  /* [C × D] */
-    int C, int D)
-{
-    int proj_per_class[64];
+/* x[j] = stddev across classes of Y[c, j] where Y = P @ R^T was already
+ * computed via the kernel. Pure stddev arithmetic on the column j. */
+static double col_stddev(const m4t_mtfp_t* Y_CN, int C, int N, int j) {
     int sum = 0;
+    int per_class[64];  /* C is small (≤ 16 in practice) */
     for (int c = 0; c < C; c++) {
-        const m4t_trit_t* Pc = prototypes + (size_t)c * D;
-        int acc = 0;
-        for (int i = 0; i < D; i++) {
-            acc += (int)R_row[i] * (int)Pc[i];
-        }
-        proj_per_class[c] = acc;
-        sum += acc;
+        per_class[c] = (int)Y_CN[(size_t)c * N + j];
+        sum += per_class[c];
     }
     double mean = (double)sum / (double)C;
     double sq = 0.0;
     for (int c = 0; c < C; c++) {
-        double d = (double)proj_per_class[c] - mean;
+        double d = (double)per_class[c] - mean;
         sq += d * d;
     }
     return sqrt(sq / (double)C);
@@ -76,7 +69,7 @@ static double prototype_alignment_stddev(
  * output dim j (in permille of n_train, to keep precision under integer
  * arithmetic). Per-class-average is computed BEFORE sign-quantization. */
 static int per_dim_spread_permille(
-    const int32_t* projected_accs,  /* [n_train × sig_dim] raw int32 accs */
+    const m4t_mtfp_t* projected_accs,  /* [n_train × sig_dim] MTFP19 accs */
     const int* train_lbl,
     int n_train, int sig_dim, int n_classes, int j)
 {
@@ -99,23 +92,11 @@ static int per_dim_spread_permille(
     return (int)(max_v - min_v);
 }
 
-/* Project the training set; keep RAW int32 accumulators (no quantize). */
-static void project_train_acc(
-    int32_t* out_accs, const m4t_trit_t* R,
-    const m4t_trit_t* train, int n_train,
-    int sig_dim, int input_dim)
+/* Widen ternary trits to MTFP19 mantissas. One-shot pre-matmul step. */
+static void widen_trits_to_mtfp(
+    m4t_mtfp_t* out, const m4t_trit_t* in, size_t n)
 {
-    for (int i = 0; i < n_train; i++) {
-        const m4t_trit_t* x = train + (size_t)i * input_dim;
-        int32_t* s = out_accs + (size_t)i * sig_dim;
-        for (int oi = 0; oi < sig_dim; oi++) {
-            const m4t_trit_t* r = R + (size_t)oi * input_dim;
-            int32_t acc = 0;
-            for (int j = 0; j < input_dim; j++)
-                acc += (int32_t)r[j] * (int32_t)x[j];
-            s[oi] = acc;
-        }
-    }
+    for (size_t i = 0; i < n; i++) out[i] = (m4t_mtfp_t)in[i];
 }
 
 int main(void) {
@@ -140,7 +121,21 @@ int main(void) {
     double sep_lo = 0, sep_mid = 0, sep_hi = 0;
 
     m4t_trit_t* R = malloc((size_t)SIG_DIM * D * sizeof(m4t_trit_t));
-    int32_t* projected = malloc((size_t)N_TRAIN * SIG_DIM * sizeof(int32_t));
+    m4t_mtfp_t* projected = malloc((size_t)N_TRAIN * SIG_DIM * sizeof(m4t_mtfp_t));
+
+    /* Pre-allocated kernel scratch — reused across all N_R_SAMPLES. */
+    int Rp_per_row = M4T_TRIT_PACKED_BYTES(D);
+    uint8_t* R_packed = malloc((size_t)SIG_DIM * (size_t)Rp_per_row);
+    m4t_mtfp_t* X_train_mtfp = malloc((size_t)N_TRAIN * (size_t)D
+                                         * sizeof(m4t_mtfp_t));
+
+    /* For prototype alignment scoring: pre-widen prototypes and training
+     * trits once. Y_proto[c × SIG_DIM] = P @ R^T per R via matmul. */
+    m4t_mtfp_t* P_mtfp = malloc((size_t)C * (size_t)D * sizeof(m4t_mtfp_t));
+    widen_trits_to_mtfp(P_mtfp, protos, (size_t)C * (size_t)D);
+    widen_trits_to_mtfp(X_train_mtfp, train, (size_t)N_TRAIN * (size_t)D);
+    m4t_mtfp_t* Y_proto = malloc((size_t)C * (size_t)SIG_DIM
+                                    * sizeof(m4t_mtfp_t));
 
     printf("# Phase B Gate 2: H1 mechanism test (denoising via random ternary R)\n");
     printf("# D=%d (K=%d informative + %d noise), C=%d, sig_dim=%d, n_train=%d\n",
@@ -159,11 +154,22 @@ int main(void) {
     for (int rs = 0; rs < N_R_SAMPLES; rs++) {
         uint32_t seed = seeds[rs % 8] ^ ((uint32_t)rs * 0x9e3779b9u);
         gesh_init_random_projection(R, SIG_DIM, D, seed);
-        project_train_acc(projected, R, train, N_TRAIN, SIG_DIM, D);
+
+        /* Substrate-routed: pack R once per sample, then run two matmuls
+         * via m4t_mtfp_ternary_matmul_bt.
+         *   Y_proto   = P     @ R^T   (C    × SIG_DIM) — x scores
+         *   projected = X_tr  @ R^T   (NTR  × SIG_DIM) — y scores */
+        for (int oi = 0; oi < SIG_DIM; oi++) {
+            m4t_pack_trits_1d(R_packed + (size_t)oi * Rp_per_row,
+                                R + (size_t)oi * D, D);
+        }
+        m4t_mtfp_ternary_matmul_bt(Y_proto, P_mtfp, R_packed, NULL,
+                                      C, D, SIG_DIM);
+        m4t_mtfp_ternary_matmul_bt(projected, X_train_mtfp, R_packed, NULL,
+                                      N_TRAIN, D, SIG_DIM);
 
         for (int j = 0; j < SIG_DIM; j++) {
-            double x = prototype_alignment_stddev(R + (size_t)j * D,
-                                                    protos, C, D);
+            double x = col_stddev(Y_proto, C, SIG_DIM, j);
             int y = per_dim_spread_permille(projected, train_lbl,
                                               N_TRAIN, SIG_DIM, C, j);
 
@@ -223,6 +229,10 @@ int main(void) {
 
     free(R);
     free(projected);
+    free(R_packed);
+    free(X_train_mtfp);
+    free(P_mtfp);
+    free(Y_proto);
     free(train);
     free(train_lbl);
     free(protos);

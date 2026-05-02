@@ -20,6 +20,7 @@ set_target_properties(gesh_bench PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(gesh STATIC
     src/gesh_bank.c
     src/gesh_forward.c
+    src/gesh_project.c
     src/gesh_train.c
 )
 target_include_directories(gesh PUBLIC
@@ -65,6 +66,13 @@ if(GESH_BUILD_TESTS)
     add_executable(test_image_canon tests/test_image_canon.c)
     target_link_libraries(test_image_canon PRIVATE gesh_image_canon)
     add_test(NAME gesh_image_canon COMMAND test_image_canon)
+
+    # Bit-equivalence test: kernel-routed projection vs reference loop.
+    # Establishes that the substrate-discipline cleanup is semantically
+    # neutral (identical ternary outputs for all sampled shapes/seeds).
+    add_executable(test_gesh_project tests/test_gesh_project.c)
+    target_link_libraries(test_gesh_project PRIVATE gesh)
+    add_test(NAME gesh_project COMMAND test_gesh_project)
 endif()
 
 # Sweep tool (benchmark, not regression test). Builds with the library.

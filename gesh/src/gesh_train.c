@@ -17,6 +17,7 @@
 #include "gesh_train.h"
 #include "gesh_forward.h"
 #include "gesh_bank.h"
+#include "gesh_project.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
@@ -78,7 +79,9 @@ void gesh_init_random_projection_balanced(
 }
 
 /* Project all training samples through R; rebuild bank from the
- * projected signatures. */
+ * projected signatures. Substrate-routed via the scratch-aware wrapper
+ * (m4t_mtfp_ternary_matmul_bt + m4t_route_threshold_extract; no
+ * per-call malloc since scratch is pre-allocated). */
 static void rebuild_bank_from_projection(
     gesh_bank_t* bank,
     const m4t_trit_t* R,
@@ -86,20 +89,12 @@ static void rebuild_bank_from_projection(
     const int* labels,
     int n_samples,
     int sig_dim, int input_dim, int n_classes,
-    m4t_trit_t* scratch_projected)
+    m4t_trit_t* scratch_projected,
+    gesh_project_scratch_t* proj_scratch)
 {
-    for (int i = 0; i < n_samples; i++) {
-        const m4t_trit_t* x = samples + (size_t)i * input_dim;
-        m4t_trit_t* s = scratch_projected + (size_t)i * sig_dim;
-        for (int oi = 0; oi < sig_dim; oi++) {
-            const m4t_trit_t* r = R + (size_t)oi * input_dim;
-            int32_t acc = 0;
-            for (int j = 0; j < input_dim; j++) {
-                acc += (int32_t)r[j] * (int32_t)x[j];
-            }
-            s[oi] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
-        }
-    }
+    gesh_project_batch_unpacked_scratch(scratch_projected, samples,
+                                           n_samples, R, sig_dim, input_dim,
+                                           proj_scratch);
     gesh_bank_build_class_mean(bank, scratch_projected, labels, n_samples, n_classes);
 }
 
@@ -123,7 +118,18 @@ static void resample_batch(
 /* M4 fix: persistent-scratch forward pass for the trainer's hot loop.
  * Allocates everything once outside the loop; reuses across calls. */
 typedef struct {
-    m4t_trit_t* unpacked_sig;     /* [sig_dim] */
+    /* Batch-shaped projection cache. The kernel-routed batch wrapper is
+     * called once per count_errors_scratch invocation, projecting all
+     * batch_size queries through R into batch_sigs in a single matmul.
+     * count_errors_scratch then iterates over the projected sigs to
+     * compute Hamming distances and class votes. */
+    m4t_trit_t* batch_sigs;        /* [batch_size × sig_dim] */
+    /* Persistent kernel scratch — eliminates per-call malloc/free in the
+     * hot loop. count_errors_scratch is called O(epochs × flips × 4)
+     * times; per-call allocation dominated runtime before this scratch. */
+    gesh_project_scratch_t batch_proj_scratch;
+    /* Same scratch sized for the n_train-shaped bank rebuild. */
+    gesh_project_scratch_t bank_proj_scratch;
     uint8_t*    packed_sig;        /* [Dp_sig] */
     uint8_t*    mask_packed;       /* [Dp_sig] */
     int32_t*    dists;             /* [n_tiles] */
@@ -136,10 +142,16 @@ typedef struct {
 
 static void scratch_alloc(
     gesh_train_scratch_t* s,
-    int sig_dim, int n_tiles, int top_k, int n_classes, int batch_size)
+    int sig_dim, int input_dim, int n_samples,
+    int n_tiles, int top_k, int n_classes, int batch_size)
 {
     int Dp_sig = M4T_TRIT_PACKED_BYTES(sig_dim);
-    s->unpacked_sig = malloc((size_t)sig_dim * sizeof(m4t_trit_t));
+    s->batch_sigs   = malloc((size_t)batch_size * (size_t)sig_dim
+                                * sizeof(m4t_trit_t));
+    gesh_project_scratch_init(&s->batch_proj_scratch,
+                                sig_dim, input_dim, batch_size);
+    gesh_project_scratch_init(&s->bank_proj_scratch,
+                                sig_dim, input_dim, n_samples);
     s->packed_sig   = malloc((size_t)Dp_sig);
     s->mask_packed  = malloc((size_t)Dp_sig);
     s->dists        = malloc((size_t)n_tiles * sizeof(int32_t));
@@ -158,7 +170,10 @@ static void scratch_alloc(
 }
 
 static void scratch_free(gesh_train_scratch_t* s) {
-    free(s->unpacked_sig); free(s->packed_sig); free(s->mask_packed);
+    free(s->batch_sigs);
+    gesh_project_scratch_free(&s->batch_proj_scratch);
+    gesh_project_scratch_free(&s->bank_proj_scratch);
+    free(s->packed_sig); free(s->mask_packed);
     free(s->dists); free(s->topk_idx); free(s->vote);
     free(s->preds); free(s->topk_buf_d);
 }
@@ -178,19 +193,16 @@ static int count_errors_scratch(
     int Dp_sig = M4T_TRIT_PACKED_BYTES(sig_dim);
     int errors = 0;
 
-    for (int q = 0; q < batch_size; q++) {
-        const m4t_trit_t* x = batch_samples + (size_t)q * input_dim;
+    /* One batch-shaped kernel matmul + threshold-extract for the entire
+     * batch. Substrate-routed end-to-end via the scratch-aware wrapper —
+     * no malloc/free in the hot loop. */
+    gesh_project_batch_unpacked_scratch(sc->batch_sigs, batch_samples,
+                                           batch_size, R, sig_dim, input_dim,
+                                           &sc->batch_proj_scratch);
 
-        /* Project x through R into a ternary signature. */
-        for (int oi = 0; oi < sig_dim; oi++) {
-            const m4t_trit_t* r = R + (size_t)oi * input_dim;
-            int32_t acc = 0;
-            for (int j = 0; j < input_dim; j++) {
-                acc += (int32_t)r[j] * (int32_t)x[j];
-            }
-            sc->unpacked_sig[oi] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
-        }
-        m4t_pack_trits_1d(sc->packed_sig, sc->unpacked_sig, sig_dim);
+    for (int q = 0; q < batch_size; q++) {
+        const m4t_trit_t* sig_q = sc->batch_sigs + (size_t)q * sig_dim;
+        m4t_pack_trits_1d(sc->packed_sig, sig_q, sig_dim);
 
         /* Hamming distance to each tile. */
         int T = bank->n_tiles;
@@ -293,12 +305,13 @@ int gesh_train_lattice_update(
     int* batch_labels = malloc((size_t)batch * sizeof(int));
 
     gesh_train_scratch_t sc;
-    scratch_alloc(&sc, sig_dim, n_classes, top_k, n_classes, batch);
+    scratch_alloc(&sc, sig_dim, input_dim, n_samples,
+                    n_classes, top_k, n_classes, batch);
 
     /* Initial bank from current R. */
     rebuild_bank_from_projection(out_bank, R, train_samples, train_labels,
                                    n_samples, sig_dim, input_dim, n_classes,
-                                   scratch_proj);
+                                   scratch_proj, &sc.bank_proj_scratch);
 
     int last_train_errors = -1;
     int n_flips_total = 0;
@@ -350,7 +363,8 @@ int gesh_train_lattice_update(
             if (((flip + 1) % bank_refresh) == 0 && (flip + 1) < n_flips) {
                 rebuild_bank_from_projection(
                     out_bank, R, train_samples, train_labels,
-                    n_samples, sig_dim, input_dim, n_classes, scratch_proj);
+                    n_samples, sig_dim, input_dim, n_classes, scratch_proj,
+                    &sc.bank_proj_scratch);
                 /* Re-measure baseline against fresh bank. */
                 base_errors = count_errors_scratch(
                     R, batch_samples, batch_labels, batch, out_bank,
@@ -371,7 +385,7 @@ int gesh_train_lattice_update(
         /* End-of-epoch bank refresh (always, for consistent post-epoch state). */
         rebuild_bank_from_projection(out_bank, R, train_samples, train_labels,
                                        n_samples, sig_dim, input_dim, n_classes,
-                                       scratch_proj);
+                                       scratch_proj, &sc.bank_proj_scratch);
         last_train_errors = base_errors;
 
         if (cfg->log_per_epoch) {

@@ -6,6 +6,7 @@
  */
 
 #include "gesh_bank.h"
+#include "gesh_project.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
@@ -44,17 +45,15 @@ void gesh_bank_build_class_mean(
         }
     }
 
-    /* Sign-threshold the per-class sums. Zero sum (or no samples for
-     * class) → zero trit. Substrate-legal: pure integer. */
+    /* Sign-threshold the per-class sums via the kernel-routed wrapper
+     * (gesh_threshold_int32_to_trit → m4t_route_threshold_extract).
+     * Substrate-discipline: no open-coded sign threshold. Zero sum
+     * (or no samples for class) → zero trit, per the kernel's tau=0
+     * sanctioned input class for integer inputs. */
     m4t_trit_t* tile_unpacked = malloc((size_t)D * sizeof(m4t_trit_t));
     for (int c = 0; c < n_classes; c++) {
         const int32_t* row = class_sums + (size_t)c * D;
-        for (int j = 0; j < D; j++) {
-            int32_t v = row[j];
-            tile_unpacked[j] = (v > 0) ?  1
-                             : (v < 0) ? -1
-                             :            0;
-        }
+        gesh_threshold_int32_to_trit(tile_unpacked, row, D);
         m4t_pack_trits_1d(
             bank->tiles_packed + (size_t)c * Dp,
             tile_unpacked, D);
