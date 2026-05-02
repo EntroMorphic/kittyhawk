@@ -30,3 +30,8 @@ endif()
 
 enable_testing()
 add_subdirectory(m4t)
+
+# Gesh — base-3 native routing layer; substrate's first measured consumer.
+# Phase A.1 ships forward-pass + synthetic benchmark; Phase A.2 will add
+# lattice-update training. See gesh/README.md.
+add_subdirectory(gesh)
