@@ -8,8 +8,8 @@
 # Ground-zero rebuild status (2026-05-01):
 #   Tier 1 — pure base-3 layer — ONLINE.
 #   Tier 2 — route primitives + MTFP19 mantissa arithmetic — ONLINE.
-#   Tier 3 — cross-exponent kernel + MTFP4 + ternary matmul — pending consumer
-#            (see docs/REMEDIATION_PLAN.md, consumer-discovery cycle).
+#   Tier 3 — cross-exponent kernel + MTFP4 SDOT + MTFP19 ternary matmul
+#            — ONLINE.
 #
 # See m4t/docs/M4T_SUBSTRATE.md for the canonical spec.
 
@@ -43,16 +43,15 @@ if(APPLE)
     add_compile_options(-mcpu=native)
 endif()
 
-# Tiers 1 + 2: pure base-3 layer + route primitives + MTFP19 mantissa
-# arithmetic at one shared block exponent. The cross-exponent kernel,
-# MTFP4 SDOT path, and MTFP19×ternary matmul are tier 3 and return only
-# when the consumer-discovery cycle surfaces a measured consumer.
+# All tiers — full substrate surface for routing-first base-3 compute.
 set(M4T_CORE_SRCS
     src/m4t_trit_pack.c
     src/m4t_trit_ops.c
     src/m4t_trit_reducers.c
     src/m4t_mtfp.c
+    src/m4t_mtfp4.c
     src/m4t_route.c
+    src/m4t_ternary_matmul.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -86,9 +85,18 @@ if(M4T_BUILD_TESTS)
     add_test(NAME m4t_route COMMAND test_m4t_route)
 
     # Property tests for the §14.2 cross-exponent accumulator. Bit-exact
-    # int64 reference; no fp in the test path. 10000 random sequences per
-    # property × 6 properties.
+    # int64 reference; no fp in the test path. 14 properties.
     add_executable(test_m4t_mtfp_accum_aligning tests/test_m4t_mtfp_accum_aligning.c)
     target_link_libraries(test_m4t_mtfp_accum_aligning PRIVATE m4t)
     add_test(NAME m4t_mtfp_accum_aligning COMMAND test_m4t_mtfp_accum_aligning)
+
+    # SDOT MTFP4 matmul + cell-width conversions (§8.4 Case W).
+    add_executable(test_m4t_mtfp4 tests/test_m4t_mtfp4.c)
+    target_link_libraries(test_m4t_mtfp4 PRIVATE m4t)
+    add_test(NAME m4t_mtfp4 COMMAND test_m4t_mtfp4)
+
+    # MTFP19 × packed-ternary matmul (§8.5 Case S).
+    add_executable(test_m4t_ternary_matmul tests/test_m4t_ternary_matmul.c)
+    target_link_libraries(test_m4t_ternary_matmul PRIVATE m4t)
+    add_test(NAME m4t_ternary_matmul COMMAND test_m4t_ternary_matmul)
 endif()

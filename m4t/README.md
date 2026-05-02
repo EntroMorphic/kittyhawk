@@ -12,8 +12,9 @@ The substrate is being rebuilt in tiers (see [`../docs/REMEDIATION_PLAN.md`](../
 
 - **Tier 1 — pure base-3 layer — ONLINE.** Trit types, packing, element-wise ops, reductions. Zero MTFP entanglement.
 - **Tier 2 — route primitives + MTFP19 mantissa arithmetic — ONLINE.** Five route primitives (`threshold_extract`, `distance_batch`, `topk_abs`, `apply_signed`, `signature_update`) plus same-block-exponent block / vec add/sub on MTFP19 mantissas. Emission-coverage helper (`m4t_route_decisions_emit_coverage`) makes the §18 input-class contract testable at the call site.
-- **Tier 3a — cross-exponent accumulator — ONLINE.** `m4t_mtfp_vec_accum_aligning` (canonical) + `m4t_mtfp_vec_add_aligning` and `m4t_mtfp_vec_sub_aligning` (pairwise wrappers). Path A alignment, base-3 round-to-nearest-even (§8.2; ties impossible due to odd divisors), per-block status flags (§14.4: 1 byte per MTFP19 block carrying SATURATED + ROUNDED bits for each of 4 cells). Property-tested bit-exact across **14 properties** (correctness, invariant, determinism, flags, partial-block-bits, long-sequence stress, boundary cases, n=0, wrapper, roundtrip, dst==a aliasing, NULL out-e, sub-via-negation, sub-self). The substrate is now **floating-point in base 3 at per-tensor exponent granularity** — the cross-exponent kernel that distinguishes MTFP from fixed-point ships. Per-block exponent storage (§7's stated intent) is a separate kernel deferred until a consumer asks.
-- **Tier 3b — MTFP4 SDOT + ternary matmul — pending consumer.** Both return only when a routing consumer demands them.
+- **Tier 3a — cross-exponent accumulator — ONLINE.** `m4t_mtfp_vec_accum_aligning` (canonical) + `m4t_mtfp_vec_add_aligning` and `m4t_mtfp_vec_sub_aligning` (pairwise wrappers). Path A alignment, base-3 round-to-nearest-even (§8.2; ties impossible due to odd divisors), per-block status flags (§14.4: 1 byte per MTFP19 block carrying SATURATED + ROUNDED bits for each of 4 cells). Property-tested bit-exact across **14 properties**.
+- **Tier 3b — MTFP4 SDOT matmul + cell-width conversions — ONLINE.** `m4t_mtfp4_sdot_matmul_bt` (Case W per §8.4: MTFP4 × ternary → MTFP19, exact by construction for K ≤ ~14.5M), `m4t_mtfp4_to_mtfp19` (widen, exact), `m4t_mtfp19_to_mtfp4` (narrow, base-3 round-to-nearest-even + saturate, with flag tracking).
+- **Tier 3c — MTFP19 × packed-ternary matmul — ONLINE.** `m4t_mtfp_ternary_matmul_bt` (Case S per §8.5: int64 accumulator, MTFP19 saturating store, optional per-block SATURATED flag tracking).
 
 ## Numerical system
 
@@ -60,6 +61,24 @@ Status flags layout (`flags` opt-in via non-NULL pointer): one byte per MTFP19 b
 
 The same-block-exp arithmetic in `m4t_route_apply_signed` (tier 2) is the structurally degenerate case of this primitive — same shape, with `addend_exp == running_exp` always. The cross-exp accumulator generalizes that arithmetic; it does not replicate `apply_signed`'s sign-dispatch / sentinel-skip routing semantics. Per `journal/xexpo_design_closeout.md` and the kernel red-team's L4 finding.
 
+### SDOT MTFP4 matmul (`m4t_mtfp4.h`) — Tier 3b
+
+The substrate's hot path. **NEON-accelerated via `vdotq_s32`** (16 int8 multiply-accumulates per instruction); scalar tail for K not divisible by 16.
+
+- `m4t_mtfp4_sdot_matmul_bt(Y, X, W, M, K, N)` — MTFP4 × ternary → MTFP19. **Case W per §8.4: exact by construction.** Output is MTFP19 (int32 mantissas); since `|X| ≤ 40` and `|W| ≤ 1`, the worst-case sum `K · 40` fits MTFP19 for any K up to ~14.5M.
+- `m4t_mtfp4_to_mtfp19(dst, src, n)` — widen MTFP4 → MTFP19 by ×6561. Exact (static-asserted bound).
+- `m4t_mtfp19_to_mtfp4(dst, src, flags, n)` — narrow MTFP19 → MTFP4. Base-3 round-to-nearest-even divide, then saturate to ±MAX_VAL_4. Per-block flags (ROUNDED / SATURATED) track precision events; opt-in via non-NULL `flags`.
+
+W layout for SDOT is **unpacked int8** in {-1, 0, +1} (not packed trits — SDOT requires int8 operands). 4× memory of packed; zero decode overhead.
+
+### MTFP19 × packed-ternary matmul (`m4t_ternary_matmul.h`) — Tier 3c
+
+For consumers that need full MTFP19 precision on activations (vs the MTFP4 SDOT path's narrower input). **NEON-accelerated** via 16-trit decode + bit-select + conditional negate; int64 accumulator; saturating clamp to MTFP19 on store.
+
+- `m4t_mtfp_ternary_matmul_bt(Y, X, W_packed, flags, M, K, N)` — MTFP19 × packed-trit → MTFP19. **Case S per §8.5: fixed-output saturate.** Optional per-block SATURATED flag tracking (`flags` non-NULL). Accumulator overflow point: K ≈ 1.59e10.
+
+Inner loop uses `vbslq_s32` + `vnegq_s32` over decoded signs in {-1, 0, +1} — no `vmulq_s32`. Multiplying by a sign through a general-purpose multiply opcode is the base-2 shortcut; the base-3-native expression is mask-and-conditional-negate, which is what TBL + bit-select compute directly.
+
 ### Routing primitives (`m4t_route.h`) — Tier 2
 
 Five primitives composing into a k-of-T ternary routing pass:
@@ -96,13 +115,10 @@ Six test binaries. The first five use hand-derived integer golden values. The cr
 | `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
 | `test_m4t_route` | threshold_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass, `decisions_emit_coverage` |
 | `test_m4t_mtfp_accum_aligning` | 14 properties (10k samples per random property + curated boundary cases): correctness, invariant, determinism, per-block flags, trailing-block-bits-zero, long-sequence (K=256), boundary, n=0, wrapper, roundtrip, dst==a aliasing, NULL out_e, sub-via-negation, sub-self. All bit-exact vs an int64 reference. |
+| `test_m4t_mtfp4` | 10 tests: clamp boundaries, SDOT golden 2×4×3, SDOT random vs int64 reference (200 trials at K up to 1024), SDOT extreme bounds, zero-dim, widen exact, narrow round, narrow saturate, narrow flags, widen-narrow roundtrip. |
+| `test_m4t_ternary_matmul` | 6 tests: golden 2×4×3, random vs reference (200 trials), saturation clamp, saturation flags, zero-dim, determinism. |
 
 ## What's not here
-
-Tier 3b surfaces — return only when a routing consumer demands them:
-
-- `m4t_mtfp4.*` — SDOT-native MTFP4 routing cell + ternary matmul.
-- `m4t_ternary_matmul.*` — MTFP19 × packed-ternary matmul.
 
 Deliberately archived (see `01MAY26_archived/`):
 

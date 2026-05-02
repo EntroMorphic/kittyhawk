@@ -162,14 +162,8 @@ static int64_t m4t_pow3_round_div(int64_t M, int64_t s, int* had_remainder) {
     return q;
 }
 
-/* Set the SATURATED and/or ROUNDED bit for cell `i` in the per-block
- * flags array. Layout per m4t_mtfp.h: bits 0-1 cell 0, bits 2-3 cell 1,
- * etc. within each byte; one byte per 4-cell MTFP19 block. */
-static inline void m4t_flag_or(uint8_t* flags, int i, uint8_t event_bits) {
-    int block = i / M4T_MTFP_CELLS_PER_BLOCK;
-    int slot  = i % M4T_MTFP_CELLS_PER_BLOCK;
-    flags[block] |= (uint8_t)(event_bits << (slot * 2));
-}
+/* m4t_flag_or is now shared via m4t_internal.h (used by both this kernel
+ * and the ternary matmul). Per-block layout per m4t_mtfp.h. */
 
 void m4t_mtfp_vec_accum_aligning(
     m4t_mtfp_t* running, int8_t* running_exp,
