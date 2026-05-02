@@ -179,19 +179,22 @@ Within each logical tensor, scale is uniform. **Per-block sidecar exponents woul
 
 **Decision:** MVP is per-tensor. Per-block becomes a separate kernel only if the consumer-discovery cycle surfaces a tensor whose internal scale legitimately varies across blocks. The plan's open question is provisionally answered.
 
-## Flag layout (§14.4 status array)
+## Flag layout (§14.4 status array — per-block)
 
-**One `uint8_t` per cell**, with two sticky bits defined:
+**One `uint8_t` per MTFP19 block** (4 cells per block). For an n-cell tensor, the flags array has `M4T_FLAG_BYTES(n) = ceil(n / 4)` bytes. Each byte encodes two events × four cells:
 
-| Bit | Symbol | Meaning |
+| Bits | Cell within block | Events |
 |---|---|---|
-| 0 | `M4T_FLAG_SATURATED` | Post-add overflow occurred for this cell in some prior call |
-| 1 | `M4T_FLAG_ROUNDED`   | Rescale produced a non-zero remainder for this cell in some prior call |
-| 2-7 | reserved | Must be zero on input from caller |
+| 0–1 | cell 0 | bit 0 SATURATED, bit 1 ROUNDED |
+| 2–3 | cell 1 | bit 2 SATURATED, bit 3 ROUNDED |
+| 4–5 | cell 2 | bit 4 SATURATED, bit 5 ROUNDED |
+| 6–7 | cell 3 | bit 6 SATURATED, bit 7 ROUNDED |
 
-Bits OR'd in across calls; never cleared by the kernel. Caller initializes via `memset(flags, 0, n)` and clears manually as needed. Pass `NULL` to disable tracking entirely.
+Bits OR'd in across calls; never cleared by the kernel. Caller initializes via `memset(flags, 0, M4T_FLAG_BYTES(n))` and clears manually as needed. Pass `NULL` to disable tracking entirely.
 
-§14.4 sanctions both per-cell and per-block layouts; the per-cell choice trades 25% memory for simpler test/debug. A future kernel may migrate to per-block (1 byte per 4-cell MTFP19 block, 4 bits used) if observability becomes a bottleneck.
+Helper: `m4t_flag_test(flags, cell_index, M4T_FLAG_SATURATED | M4T_FLAG_ROUNDED)` returns non-zero iff the corresponding event(s) fired for that cell.
+
+This is the §14.4 spec layout verbatim — "1-byte status array per block." An earlier draft used per-cell bytes (one `uint8_t` per cell); the red-team flagged this as a spec deviation and the per-block layout replaced it.
 
 ## Aliasing
 
@@ -220,20 +223,28 @@ ARM NEON has no integer-divide instruction. A vectorized version would either:
 
 ## Property tests (bit-exact, sequence-shaped)
 
-Located in `m4t/tests/test_m4t_mtfp_accum_aligning.c`. The tests use a **bit-exact int64 reference implementation** of the kernel as the oracle — no fp, no tolerances. Any kernel deviation produces a different `int32` result, which fails the comparison. 10 000 random sequences per property × 6 properties.
+Located in `m4t/tests/test_m4t_mtfp_accum_aligning.c`. The tests use a **bit-exact int64 reference implementation** of the kernel as the oracle — no fp, no tolerances. Any kernel deviation produces a different `int32` result or per-block flag byte, which fails the comparison.
 
-The original synthesize phase specified a `double` decode oracle with a real-number tolerance bound; the bit-exact reference replaces it because (a) the decode oracle hit fp precision walls at large mantissas (~10^12) and (b) bit-exact catches more than real-number bound checks (e.g., off-by-one rounding-rule bugs, sign-of-zero handling).
+After the red-team pass, the test suite expanded from 6 properties to **14**, with saturation-targeted distributions for flag-fire coverage and curated boundary cases for explicit edge-case enumeration.
 
-| Property | Sample shape | Check |
+| # | Property | Coverage |
 |---|---|---|
-| `prop_accum_aligning_correctness` | 10 000 sequences × 1–16 calls × 1–64 cells | Every post-call `running[i]` and `running_exp` matches the int64 reference exactly |
-| `prop_accum_aligning_invariant` | Same sample shape | `|running[i]| ≤ MAX_VAL` after every call |
-| `prop_accum_aligning_aliasing` | Same sample shape, two parallel kernel invocations | Both invocations produce bit-identical results — catches nondeterministic state leak |
-| `prop_accum_aligning_flags` | Same sample shape, with `flags` non-NULL | Sticky-OR'd `flags[i]` matches reference's per-call truth (SATURATED + ROUNDED bits) |
-| `prop_add_aligning_via_wrapper` | 10 000 pairwise `(a, b, e_a, e_b)` | Pairwise wrapper bit-identical to manual setup + accumulator |
-| `prop_add_aligning_roundtrip` | 10 000 random `(x, e)` | `add_aligning(dst, &e, x, e0, -x, e0)` produces `dst[i] = 0` |
+| 1 | `prop_accum_correctness` | 10 000 sequences × 1–16 calls × 1–64 cells; bit-exact vs reference |
+| 2 | `prop_accum_invariant` | Same shape; `|running[i]| ≤ MAX_VAL` after every call |
+| 3 | `prop_accum_determinism` | Two parallel kernel invocations agree bit-exactly (renamed from "aliasing" — the original test was a determinism check) |
+| 4 | `prop_accum_flags` | Saturation-targeted operands; per-block flag bytes match reference exactly |
+| 5 | `prop_accum_partial_block` | Trailing-block bits past `n` stay zero |
+| 6 | `prop_accum_long_sequence` | 200 sequences × 256 calls; invariant + correctness across long sequences |
+| 7 | `prop_accum_boundary` | Curated cases: M ∈ {0, ±MAX_VAL}, Δ ∈ {0, 1, 19, 20}, n ∈ {1, 4} |
+| 8 | `prop_accum_n_zero` | n=0 is a clean no-op (running, exponent unchanged) |
+| 9 | `prop_add_via_wrapper` | Wrapper bit-identical to manual setup + accumulator |
+| 10 | `prop_add_roundtrip` | x + neg(x) at same exp → 0 |
+| 11 | `prop_add_dst_alias_a` | Wrapper with `dst == a` matches non-aliased path (genuine aliasing test) |
+| 12 | `prop_add_out_e_nullable` | Wrapper accepts `out_e == NULL` |
+| 13 | `prop_sub_via_negation` | `sub(a, b)` matches `add(a, neg(b))` at the storage layer |
+| 14 | `prop_sub_self` | `sub(x, x)` at same exp → 0 |
 
-All six pass at 10 000 / 10 000 on the build.
+All 14 pass on the build.
 
 ## Open questions (now post-implementation; cycle becomes a usage study)
 
@@ -254,7 +265,7 @@ These are study questions, not decision gates. The kernel is built.
 - **Downward exponent migration.** Upward-only.
 - **NEON vectorization.** Scalar. Vectorize on profile evidence.
 - **MTFP4 / MTFP9 variants.** Tier 3 also-deferred surfaces.
-- **Subtraction.** `vec_sub_aligning` is a trivial extension; build when asked.
+- **Subtraction.** `m4t_mtfp_vec_sub_aligning` ships alongside the add wrapper. Negates the addend inline (no temporary buffer) by mirroring the four-case structure with sign flips on every read of `b`.
 
 ## Spec amendment
 

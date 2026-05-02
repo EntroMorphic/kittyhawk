@@ -336,19 +336,24 @@ Substrate-level questions where hardware does not dictate the answer. The origin
 ### 14.1 Logical block size (OPEN — empirical)
 Hardware says 16 B for the mantissa-block. Whether a *logical block* — the unit at which we group for prefetch tuning and scheduling — should be 1, 2, 4, or 8 hardware blocks is a cache/workload question with no theoretical derivation. **Decision:** logical block = hardware block (1:1) as the rebuild default. Revisit only when a running consumer shows prefetch or cache stress. This is the one genuinely open item in §14.
 
-### 14.2 Cross-block add policy (IMPLEMENTED 2026-05-01)
-Originally deferred until a consumer drove it. Built ahead of measured demand under owner authorization (named-consumer-demand reading of principle 5; see `journal/xexpo_design_*.md` for the LMM cycle that scoped the design).
+### 14.2 Cross-block add policy (IMPLEMENTED 2026-05-01, hardened post-red-team)
+Originally deferred until a consumer drove it. Built ahead of measured demand under owner authorization (named-consumer-demand reading of principle 5; see `journal/xexpo_design_*.md` for the LMM cycle that scoped the design and `journal/xexpo_kernel_redteam.md` for the post-build adversarial pass that hardened the implementation).
 
 The kernel ships in `m4t/src/m4t_mtfp.{h,c}`:
 
-- **`m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)`** — canonical accumulator. Stateful: `running_exp` is in-out and may grow upward across calls. Path A alignment (`e_result = max(e_running, e_addend)`); smaller-exp side rescales by `3^Δ` with **base-3 round-to-nearest** (§8.2). Per-cell saturation at `±MAX_VAL` (Case S, §8.5). Flags carry `M4T_FLAG_SATURATED` (bit 0) and `M4T_FLAG_ROUNDED` (bit 1); sticky-OR'd across calls; opt-in via non-NULL `flags` (§14.4 status array).
-- **`m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)`** — pairwise convenience wrapper over the accumulator.
+- **`m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)`** — canonical accumulator. Stateful: `running_exp` is in-out and may grow upward across calls. Path A alignment (`e_result = max(e_running, e_addend)`); smaller-exp side rescales by `3^Δ` with **base-3 round-to-nearest-even** (§8.2; ties impossible because powers of 3 are odd, verified by `_Static_assert` on the `M4T_POW3_TABLE`). Per-cell saturation at `±MAX_VAL` (Case S, §8.5).
+- **`m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)`** — pairwise add wrapper.
+- **`m4t_mtfp_vec_sub_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)`** — pairwise sub wrapper. Negates `b` inline within the four-case structure (no temporary buffer).
 
-Aliasing: `running` and `addend` must not alias. Wrapper allows `dst == a` (handles the copy internally); not `dst == b`.
+Flag layout (§14.4): **one byte per MTFP19 block** (4 cells per block). Each byte encodes two events × four cells; bit `(slot * 2 + 0)` is SATURATED for cell `slot`, bit `(slot * 2 + 1)` is ROUNDED. Sticky-OR'd across calls; opt-in via non-NULL `flags`. `M4T_FLAG_BYTES(n)` sizes the array; `m4t_flag_test()` reads bits.
 
-Storage granularity: per-tensor exponent for the MVP. Per-block is a separate kernel when a consumer asks.
+Aliasing: `running` and `addend` must not alias. Add/sub wrappers allow `dst == a` (handles copy internally); `dst == b` is asserted-against in debug builds.
 
-Property-tested at 10 000 random sequences × 6 properties (correctness, invariant, aliasing/determinism, flags, wrapper, roundtrip) using a bit-exact `int64` reference. No fp in the test path (§12 test sanction not invoked; no double oracle needed).
+Storage granularity: per-tensor exponent for the MVP (one int8 exponent per call). Per-block exponent storage (§7's stated intent) is a separate kernel when a consumer asks.
+
+Implementation: scalar (no NEON path; ARM has no integer divide). Vectorization is gated on profile evidence from a real consumer.
+
+Property-tested at **14 properties** with a bit-exact `int64` reference — covering correctness, invariant maintenance, determinism, per-block flag bits, trailing-partial-block bits stay zero, long-sequence stress (K=256), curated boundary cases, n=0 no-op, wrapper correctness/roundtrip/dst-aliasing/NULL-out-e, and sub-via-negation/sub-self for the subtract wrapper. No fp in the test path.
 
 The "widen, don't round" invariant (§8.5) still stands as the *default* — this kernel is the named lossy exception and must be requested by name.
 

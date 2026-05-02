@@ -2,6 +2,8 @@
 
 A routing-first ternary/MTFP compute substrate for aarch64 + NEON. Single-threaded at the opcode level; threading is a consumer concern.
 
+The build requires aarch64 + NEON (the configure step fails otherwise), and most kernels use NEON intrinsics for the inner loop. A few are scalar — notably the cross-exponent accumulator (no NEON integer-divide on ARM) and the route-primitive scalar paths. Each module's docstring states whether its hot path is NEON or scalar.
+
 Canonical spec: [`docs/M4T_SUBSTRATE.md`](docs/M4T_SUBSTRATE.md).
 
 ## Status — ground-zero (2026-05-01)
@@ -10,7 +12,7 @@ The substrate is being rebuilt in tiers (see [`../docs/REMEDIATION_PLAN.md`](../
 
 - **Tier 1 — pure base-3 layer — ONLINE.** Trit types, packing, element-wise ops, reductions. Zero MTFP entanglement.
 - **Tier 2 — route primitives + MTFP19 mantissa arithmetic — ONLINE.** Five route primitives (`threshold_extract`, `distance_batch`, `topk_abs`, `apply_signed`, `signature_update`) plus same-block-exponent block / vec add/sub on MTFP19 mantissas. Emission-coverage helper (`m4t_route_decisions_emit_coverage`) makes the §18 input-class contract testable at the call site.
-- **Tier 3a — cross-exponent accumulator — ONLINE.** `m4t_mtfp_vec_accum_aligning` (canonical) + `m4t_mtfp_vec_add_aligning` (pairwise wrapper). Path A alignment, base-3 round-to-nearest (§8.2), SATURATED+ROUNDED status flags (§14.4). Property-tested bit-exact at 10,000 samples × 6 properties. The substrate is now **genuinely floating in base 3** — the cross-exponent kernel that distinguishes MTFP from fixed-point is built.
+- **Tier 3a — cross-exponent accumulator — ONLINE.** `m4t_mtfp_vec_accum_aligning` (canonical) + `m4t_mtfp_vec_add_aligning` and `m4t_mtfp_vec_sub_aligning` (pairwise wrappers). Path A alignment, base-3 round-to-nearest-even (§8.2; ties impossible due to odd divisors), per-block status flags (§14.4: 1 byte per MTFP19 block carrying SATURATED + ROUNDED bits for each of 4 cells). Property-tested bit-exact across **14 properties** (correctness, invariant, determinism, flags, partial-block-bits, long-sequence stress, boundary cases, n=0, wrapper, roundtrip, dst==a aliasing, NULL out-e, sub-via-negation, sub-self). The substrate is now **floating-point in base 3 at per-tensor exponent granularity** — the cross-exponent kernel that distinguishes MTFP from fixed-point ships. Per-block exponent storage (§7's stated intent) is a separate kernel deferred until a consumer asks.
 - **Tier 3b — MTFP4 SDOT + ternary matmul — pending consumer.** Both return only when a routing consumer demands them.
 
 ## Numerical system
@@ -48,14 +50,15 @@ Block-native mantissa primitives at one shared block exponent: `block_add`, `blo
 
 ### Cross-exponent accumulator (`m4t_mtfp.h`) — Tier 3a
 
-Two functions for combining MTFP19 mantissa buffers carrying different `block_exp` values:
+Three functions for combining MTFP19 mantissa buffers that may carry different `block_exp` values. **Scalar implementation** (no NEON path; ARM has no integer-divide instruction and profiling has not yet shown this kernel as a hot path):
 
-- `m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)` — canonical accumulator. `running_exp` is in-out and may grow upward across calls. Path A alignment (max-exponent target); smaller side rescales by `3^Δ` with **base-3 round-to-nearest** (§8.2).
-- `m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)` — pairwise convenience wrapper.
+- `m4t_mtfp_vec_accum_aligning(running, &running_exp, addend, addend_exp, flags, n)` — canonical accumulator. `running_exp` is in-out and may grow upward across calls. Path A alignment (max-exponent target); smaller side rescales by `3^Δ` with **base-3 round-to-nearest-even** (§8.2; ties impossible because powers of 3 are odd).
+- `m4t_mtfp_vec_add_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)` — pairwise add wrapper.
+- `m4t_mtfp_vec_sub_aligning(dst, &out_e, a, e_a, b, e_b, flags, n)` — pairwise sub wrapper.
 
-Status flags (`flags` byte per cell, opt-in via non-NULL): `M4T_FLAG_SATURATED` (bit 0) and `M4T_FLAG_ROUNDED` (bit 1). Sticky-OR'd across calls.
+Status flags layout (`flags` opt-in via non-NULL pointer): one byte per MTFP19 block (4 cells per block). Each byte encodes 2 events × 4 cells; bit `(slot * 2 + 0)` = SATURATED for cell `slot`, bit `(slot * 2 + 1)` = ROUNDED. Caller sizes via `M4T_FLAG_BYTES(n)` and reads via `m4t_flag_test(flags, cell, event)`. Sticky-OR'd across calls.
 
-`m4t_route_apply_signed` (tier 2) is the same-block-exp degenerate case of this primitive. Architectural reframing per `journal/xexpo_design_closeout.md`.
+The same-block-exp arithmetic in `m4t_route_apply_signed` (tier 2) is the structurally degenerate case of this primitive — same shape, with `addend_exp == running_exp` always. The cross-exp accumulator generalizes that arithmetic; it does not replicate `apply_signed`'s sign-dispatch / sentinel-skip routing semantics. Per `journal/xexpo_design_closeout.md` and the kernel red-team's L4 finding.
 
 ### Routing primitives (`m4t_route.h`) — Tier 2
 
@@ -92,7 +95,7 @@ Six test binaries. The first five use hand-derived integer golden values. The cr
 | `test_m4t_trit_reducers` | `signed_sum`, `sparsity`, `counts` across zero/pos/neg/mixed inputs |
 | `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
 | `test_m4t_route` | threshold_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass, `decisions_emit_coverage` |
-| `test_m4t_mtfp_accum_aligning` | accumulator correctness, invariant, aliasing, flags; pairwise wrapper correctness; pairwise roundtrip; all bit-exact vs reference at 10,000 samples each |
+| `test_m4t_mtfp_accum_aligning` | 14 properties (10k samples per random property + curated boundary cases): correctness, invariant, determinism, per-block flags, trailing-block-bits-zero, long-sequence (K=256), boundary, n=0, wrapper, roundtrip, dst==a aliasing, NULL out_e, sub-via-negation, sub-self. All bit-exact vs an int64 reference. |
 
 ## What's not here
 
