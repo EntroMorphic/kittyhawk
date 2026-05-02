@@ -219,11 +219,152 @@ static int test_top_k_3(void) {
     return 0;
 }
 
+/* M3 — determinism test. Two parallel forward passes on identical
+ * inputs must produce bit-identical outputs (and zero hidden state
+ * across calls). */
+static int test_determinism(void) {
+    synth_proto_config_t cfg = synth_proto_default();
+    int C = cfg.n_classes;
+    int D = cfg.input_dim;
+    int n_train = 1000;
+    int n_test = 200;
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    m4t_trit_t* train = malloc((size_t)n_train * D * sizeof(m4t_trit_t));
+    int* train_lbl = malloc((size_t)n_train * sizeof(int));
+    synth_proto_generate_samples(train, train_lbl, n_train, protos, &cfg, 0xd001u);
+    m4t_trit_t* test = malloc((size_t)n_test * D * sizeof(m4t_trit_t));
+    int* test_lbl = malloc((size_t)n_test * sizeof(int));
+    synth_proto_generate_samples(test, test_lbl, n_test, protos, &cfg, 0xd002u);
+
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+    gesh_bank_t bank;
+    bank.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    bank.labels = malloc((size_t)C * sizeof(int));
+    bank.n_tiles = C;
+    bank.sig_dim = D;
+    gesh_bank_build_class_mean(&bank, train, train_lbl, n_train, C);
+
+    gesh_projection_t id = { .R = NULL, .input_dim = D, .sig_dim = D };
+    int* preds_a = malloc((size_t)n_test * sizeof(int));
+    int* preds_b = malloc((size_t)n_test * sizeof(int));
+    /* Initialize to sentinel so we'd notice if classify left them. */
+    for (int i = 0; i < n_test; i++) { preds_a[i] = -1; preds_b[i] = -1; }
+
+    gesh_forward_classify(preds_a, test, n_test, &bank, &id, 1);
+    gesh_forward_classify(preds_b, test, n_test, &bank, &id, 1);
+
+    int ok = (memcmp(preds_a, preds_b, (size_t)n_test * sizeof(int)) == 0);
+    free(protos); free(train); free(train_lbl); free(test); free(test_lbl);
+    free(bank.tiles_packed); free(bank.labels); free(preds_a); free(preds_b);
+    if (!ok) {
+        printf("FAIL determinism: parallel calls disagree\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* M4 — aliasing safety test. With H1's contract, distinct buffers
+ * for out_predictions / queries / bank tiles are required. This test
+ * verifies that the canonical non-aliased call works correctly with
+ * deliberately-separated allocations (i.e., no implicit aliasing
+ * via tight allocations). */
+static int test_aliasing_safety_distinct_buffers(void) {
+    synth_proto_config_t cfg = synth_proto_default();
+    int C = cfg.n_classes;
+    int D = cfg.input_dim;
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    m4t_trit_t* train = malloc((size_t)1000 * D * sizeof(m4t_trit_t));
+    int* train_lbl = malloc((size_t)1000 * sizeof(int));
+    synth_proto_generate_samples(train, train_lbl, 1000, protos, &cfg, 0xa11au);
+
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+    gesh_bank_t bank;
+    bank.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    bank.labels = malloc((size_t)C * sizeof(int));
+    bank.n_tiles = C;
+    bank.sig_dim = D;
+    gesh_bank_build_class_mean(&bank, train, train_lbl, 1000, C);
+
+    gesh_projection_t id = { .R = NULL, .input_dim = D, .sig_dim = D };
+
+    /* Distinct allocations for queries and out_predictions. */
+    int n_q = 50;
+    m4t_trit_t* queries = malloc((size_t)n_q * D * sizeof(m4t_trit_t));
+    int* labels_unused = malloc((size_t)n_q * sizeof(int));
+    synth_proto_generate_samples(queries, labels_unused, n_q, protos, &cfg, 0xb22bu);
+
+    int* preds = malloc((size_t)n_q * sizeof(int));
+    int rc = gesh_forward_classify(preds, queries, n_q, &bank, &id, 1);
+
+    int ok = (rc == 0);
+    /* Sanity: predictions are valid class indices. */
+    for (int i = 0; i < n_q && ok; i++) {
+        if (preds[i] < 0 || preds[i] >= C) ok = 0;
+    }
+
+    free(protos); free(train); free(train_lbl);
+    free(bank.tiles_packed); free(bank.labels);
+    free(queries); free(labels_unused); free(preds);
+    if (!ok) {
+        printf("FAIL aliasing_safety: rc=%d or invalid predictions\n", rc);
+        return 1;
+    }
+    return 0;
+}
+
+/* M5 — n_queries == 0 edge case. The function must return 0 cleanly
+ * without touching out_predictions. */
+static int test_n_queries_zero(void) {
+    synth_proto_config_t cfg = synth_proto_default();
+    int C = cfg.n_classes;
+    int D = cfg.input_dim;
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    m4t_trit_t* train = malloc((size_t)100 * D * sizeof(m4t_trit_t));
+    int* train_lbl = malloc((size_t)100 * sizeof(int));
+    synth_proto_generate_samples(train, train_lbl, 100, protos, &cfg, 0xee0u);
+
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+    gesh_bank_t bank;
+    bank.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    bank.labels = malloc((size_t)C * sizeof(int));
+    bank.n_tiles = C;
+    bank.sig_dim = D;
+    gesh_bank_build_class_mean(&bank, train, train_lbl, 100, C);
+
+    gesh_projection_t id = { .R = NULL, .input_dim = D, .sig_dim = D };
+
+    /* Sentinel value in out_predictions; classify should not modify. */
+    int sentinel = -42;
+    int rc = gesh_forward_classify(&sentinel, NULL, 0, &bank, &id, 1);
+
+    free(protos); free(train); free(train_lbl);
+    free(bank.tiles_packed); free(bank.labels);
+
+    if (rc != 0) {
+        printf("FAIL n_queries_zero: rc=%d\n", rc);
+        return 1;
+    }
+    if (sentinel != -42) {
+        printf("FAIL n_queries_zero: out_predictions modified to %d\n", sentinel);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
-    if (test_clean_pipeline())               return 1;
-    if (test_noisy_pipeline())               return 1;
-    if (test_random_projection_baseline())   return 1;
-    if (test_top_k_3())                      return 1;
-    printf("gesh_forward: all 4 tests passed\n");
+    if (test_clean_pipeline())                   return 1;
+    if (test_noisy_pipeline())                   return 1;
+    if (test_random_projection_baseline())       return 1;
+    if (test_top_k_3())                          return 1;
+    if (test_determinism())                      return 1;
+    if (test_aliasing_safety_distinct_buffers()) return 1;
+    if (test_n_queries_zero())                   return 1;
+    printf("gesh_forward: all 7 tests passed\n");
     return 0;
 }

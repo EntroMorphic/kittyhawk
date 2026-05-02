@@ -95,10 +95,15 @@ static int test_class_balance(void) {
     int* counts = calloc((size_t)C, sizeof(int));
     for (int i = 0; i < N_SAMPLES; i++) counts[labels[i]]++;
 
-    /* Expect each class ~ N_SAMPLES / C. Allow ±25% tolerance. */
+    /* Expect each class ~ N_SAMPLES / C. Tolerance ±15% — at N=2000,
+     * C=10 (expected=200/class), this is [170, 230]. The std dev for
+     * uniform-random class draws is sqrt(200·0.9·0.1) ≈ 13.4; the
+     * tolerance is ~2.2σ, well above 4σ would let any class drift.
+     * Tightened from the earlier ±25% per the Phase A.1 red-team. */
     int expected = N_SAMPLES / C;
-    int low = expected - expected / 4;
-    int high = expected + expected / 4;
+    int tol = (expected * 15) / 100;
+    int low = expected - tol;
+    int high = expected + tol;
     int ok = 1;
     for (int c = 0; c < C; c++) {
         if (counts[c] < low || counts[c] > high) {

@@ -57,9 +57,12 @@ forward:
 ```
 
 All integer arithmetic. No floats. Uses substrate primitives:
-- `m4t_route_threshold_extract` (after the projection, to ternarize the int sum).
 - `m4t_popcount_dist` (for Hamming).
-- A small in-module top-k-smallest helper (insertion sort over T distances).
+- `m4t_pack_trits_1d` / `m4t_unpack_trits_1d` (between unpacked working buffers and packed tile signatures).
+
+Plus two in-module helpers:
+- Inline ternary sign-extract: per output trit, `(acc > 0) ? +1 : (acc < 0) ? -1 : 0` over the int32 dot-product accumulator. Functionally equivalent to `m4t_route_threshold_extract` with `tau = 0` but inline-friendly and per-cell rather than batch-shaped; promote to substrate if profile demands batch.
+- Top-k-smallest insertion sort over T distances. O(T · top_k); fine for small top_k and moderate T (Phase A: T = C = 10).
 
 Phase A.1 does not use `m4t_route_apply_signed` because there's no MTFP19 accumulation — classification produces a class label, not an MTFP19 vector. That changes when Phase B introduces stage 1 (region selection); `apply_signed` returns there.
 

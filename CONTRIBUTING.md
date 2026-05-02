@@ -59,5 +59,6 @@ Before merging, audit:
 - [ ] **`CHANGELOG.md`** — is the most recent entry complete? Does it cite the journal cycle that produced it?
 - [ ] **Source comments** — do any `/* see m4t/tools/foo.c */` or similar references still resolve? Path-broken comments mislead future readers.
 - [ ] **Spec amendments → journal cycles.** Per principle 7, every substantive `M4T_SUBSTRATE.md` edit needs a `journal/*_spec_amend.md` cycle (lightweight is fine; full RAW→NODES→REFLECT→SYNTHESIZE only when amending substrate semantics).
+- [ ] **Aliasing assertions on every writable output.** Pattern set by the m4t kernel red-teams: any function that writes to a caller-provided buffer asserts the output doesn't alias any const input. `assert((const void*)dst != (const void*)src)`. Cheap, catches a class of silent-corruption bugs at debug time. The Gesh Phase A.1 red-team caught this gap in consumer code; it transfers from substrate to consumer.
 
 This checklist is not a hook (the harness can't run it for you). It's a discipline reminder: code red-teams catch kernel issues; documentation red-teams catch *ensemble* drift. Both are needed.

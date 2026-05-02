@@ -29,9 +29,10 @@ void gesh_bank_build_class_mean(
     int Dp = M4T_TRIT_PACKED_BYTES(D);
 
     /* Per-class per-dim sum. int32 is enough for typical n_samples
-     * (max |sum| = n_samples). */
+     * (max |sum| = n_samples). Sign-thresholding doesn't need
+     * per-class counts, so we don't track them — sum > 0 ⇒ +1, etc.,
+     * regardless of how many samples contributed. */
     int32_t* class_sums = calloc((size_t)n_classes * (size_t)D, sizeof(int32_t));
-    int* class_counts = calloc((size_t)n_classes, sizeof(int));
 
     for (int i = 0; i < n_samples; i++) {
         int c = labels[i];
@@ -41,7 +42,6 @@ void gesh_bank_build_class_mean(
         for (int j = 0; j < D; j++) {
             row[j] += (int32_t)s[j];
         }
-        class_counts[c]++;
     }
 
     /* Sign-threshold the per-class sums. Zero sum (or no samples for
@@ -63,5 +63,4 @@ void gesh_bank_build_class_mean(
 
     free(tile_unpacked);
     free(class_sums);
-    free(class_counts);
 }

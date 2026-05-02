@@ -85,6 +85,9 @@ int gesh_forward_classify(
     assert(n_queries >= 0);
     assert(top_k > 0 && top_k <= bank->n_tiles);
     assert(bank->sig_dim == proj->sig_dim);
+    /* Substrate-discipline assert: sig_dim must be positive (else the
+     * mask construction and popcount_dist semantics are undefined). */
+    assert(bank->sig_dim > 0);
     if (proj->R == NULL) {
         /* Identity projection: input dim must equal signature dim. */
         assert(proj->input_dim == proj->sig_dim);
@@ -93,6 +96,16 @@ int gesh_forward_classify(
     }
     if (n_queries == 0) return 0;
     assert(queries);
+
+    /* Aliasing preconditions. The substrate's writable-output kernels
+     * all assert dst-distinct-from-input; gesh inherits the convention.
+     * out_predictions writes the per-query class label; queries,
+     * bank->tiles_packed, and proj->R are read-only inputs. None may
+     * share storage with out_predictions. */
+    assert((const void*)out_predictions != (const void*)queries);
+    assert((const void*)out_predictions != (const void*)bank->tiles_packed);
+    assert(proj->R == NULL ||
+           (const void*)out_predictions != (const void*)proj->R);
 
     int input_dim = proj->input_dim;
     int sig_dim = bank->sig_dim;
@@ -118,16 +131,19 @@ int gesh_forward_classify(
         mask_packed[Dp_sig - 1] = tail_mask;
     }
 
-    int n_classes_seen = 0;
-    /* Class-id range is [0, max_label). We compute max_label from the
-     * bank's labels. */
+    /* Class-id range derivation: assumes bank->labels are non-negative
+     * and dense from 0 (the convention gesh_bank_build_class_mean
+     * establishes). The assert below catches accidental violations
+     * (sentinel -1, sparse labels) that would silently misbehave —
+     * a future bank constructor with sparse labels needs an explicit
+     * n_classes parameter, not implicit derivation from max(labels). */
     int max_label = 0;
     for (int t = 0; t < T; t++) {
+        assert(bank->labels[t] >= 0);
         if (bank->labels[t] > max_label) max_label = bank->labels[t];
     }
     int n_classes = max_label + 1;
     int* vote = malloc((size_t)n_classes * sizeof(int));
-    (void)n_classes_seen;
 
     for (int q = 0; q < n_queries; q++) {
         const m4t_trit_t* x = queries + (size_t)q * input_dim;

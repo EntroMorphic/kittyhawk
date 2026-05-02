@@ -13,8 +13,16 @@
  *
  * One tile per class; T = C. Substrate-legal (integer arithmetic).
  *
- * Future variants (deferred): k-means with k tiles per class
- * (T = C × k); PCA-derived prototypes; learned bank.
+ * Phase A.2 will add no new bank constructors — Phase A.2's training
+ * operates on the projection R, not the bank. Bank stays class-mean.
+ *
+ * Phase B+ variants (each gated on a measured failure mode):
+ *   - k-means with k tiles per class (T = C × k); needed if
+ *     class-mean is too coarse for the chosen task.
+ *   - PCA-derived prototypes; gated on whether projection learning
+ *     can match the PCA prior anyway.
+ *   - Learned bank (joint optimization with routing); gated on
+ *     whether frozen-bank cost is too high.
  */
 
 #ifndef GESH_BANK_H
@@ -30,10 +38,20 @@ extern "C" {
 /* The frozen bank. tiles_packed is row-major [T × Dp] where
  * Dp = M4T_TRIT_PACKED_BYTES(sig_dim). labels[t] gives the class
  * label for tile t. Both are caller-allocated; bank construction
- * fills them. */
+ * fills them.
+ *
+ * Label convention (CONSUMED BY gesh_forward_classify):
+ *   labels[t] >= 0 for all t
+ *   labels are dense from 0; max(labels) + 1 = number of classes
+ *
+ * The forward pass derives n_classes from max(labels) + 1 and asserts
+ * non-negativity per tile. A future bank constructor with sparse or
+ * sentinel-bearing labels MUST update both this header and the forward
+ * pass — currently the assumption is enforced as an assert at
+ * forward-time, not at bank-construction-time. */
 typedef struct {
     uint8_t* tiles_packed;   /* [T × M4T_TRIT_PACKED_BYTES(sig_dim)] */
-    int*     labels;         /* [T] */
+    int*     labels;         /* [T] — non-negative, dense from 0 */
     int      n_tiles;        /* T */
     int      sig_dim;        /* trits per tile signature */
 } gesh_bank_t;
