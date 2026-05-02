@@ -34,6 +34,11 @@ void m4t_mtfp4_sdot_matmul_bt(
     int M, int K, int N)
 {
     assert(M >= 0 && K >= 0 && N >= 0);
+    /* Hard precondition: K must not exceed M4T_SDOT_K_MAX_EXACT, beyond
+     * which the worst-case output |K · 40| exceeds MTFP19's documented
+     * mantissa range and the substrate-invariant |cell| ≤ MAX_VAL is
+     * violated. Compile-time-derived from the cell-type max values. */
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
     if (M == 0 || N == 0) return;
     assert(Y && (K == 0 || (X && W)));
     /* Aliasing precondition: Y must not alias X or W. */

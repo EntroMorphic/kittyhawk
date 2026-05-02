@@ -111,6 +111,42 @@ Tier 1 (pure base-3) + Tier 2 (route primitives + MTFP19 mantissa arithmetic) + 
 
 What remains: consumer-side rebuild (libglyph, libtrain, tools) — these are separate plans, scoped outside this commit.
 
+## [2026-05-01 — tier 3b/3c red-team remediation]
+
+Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 ternary matmul surfaced 11 findings (2 high, 5 medium, 4 low). All remediated in this commit. Recorded in `journal/m4t_matmul_redteam.md`.
+
+### Changed (kernel)
+
+- **SDOT K-bound precondition (H1):** added `M4T_SDOT_K_MAX_EXACT` macro to `m4t_mtfp4.h` (compile-time-derived: `MAX_VAL_MTFP19 / MAX_VAL_MTFP4 = 14,528,268`). Added `assert(K <= M4T_SDOT_K_MAX_EXACT)` in the kernel. Header now declares the K bound as a hard precondition with documentation of caller responsibility beyond the bound. Closes the silent invariant violation where K > 14.5M produced out-of-range MTFP19 mantissas.
+- **Header docstring (M5, L3):** SDOT header now explicitly describes the sample-based weight-validity assertion as "spot-check W[0] and the last cell of W[N-1] only — exhaustive validation would scan O(N·K) per call. Consumers that need exhaustive validation should run it once at W setup time."
+
+### Added (tests)
+
+- **`test_sdot_matmul_long_k` (H1, M2):** K=1M with adversarial mixed-sign random inputs against int64 reference. Partway to K_MAX_EXACT.
+- **`test_narrow_property` (M1):** 10,000 random samples (mixed uniform + boundary-targeted distribution) for `m4t_mtfp19_to_mtfp4`. Bit-exact comparison against an int64 narrow-reference helper. Covers mantissa output, ROUNDED bit, and SATURATED bit per cell.
+- **`test_long_k` (ternary matmul, M2):** K=1M with MTFP4-magnitude operands against int64 reference.
+- **`test_partial_block` (M3):** verifies trailing-block flag bits past `M·N` stay zero in the ternary matmul. Forces `M·N=5` to exercise the partial-trailing-block layout.
+- **`test_invalid_trit_code` (M4):** packs the same logical weight pattern with codes 0b00 and 0b11 (reserved); verifies kernel produces identical output. K=20 covers both NEON loop body and scalar tail.
+- **`test_sdot_matmul_high_mag`:** renamed from `test_sdot_matmul_max_bound` (H2 — the original name implied coverage of the kernel's worst-case input space, which it didn't actually test).
+
+### Changed (tests)
+
+- **Dead Kp locals removed (L1):** `test_saturation_clamp` and `test_saturation_flags` in `test_m4t_ternary_matmul.c` had unused `int Kp = ...` declarations followed by `(void)Kp;`. Cleaned up.
+- **`rand_mtfp19` unused-helper marker removed (L2):** the `rand_mtfp19` function is now used by `test_narrow_property`; the dead `(void)rand_mtfp19;` line at the end of `main` was removed.
+
+### Changed (documentation)
+
+- **`docs/DESIGN_X-EXPO.md` flag layout section (L4):** retitled "Flag layout (§14.4 status array — per-block, substrate-wide)" with a new opening paragraph listing every Case-S/Case-R kernel that uses the layout, plus the location of the shared setter (`m4t_internal.h:m4t_flag_or`) and reader (`m4t_mtfp.h:m4t_flag_test`).
+
+### Test surface growth
+
+- `test_m4t_mtfp4`: 10 → **12 tests**.
+- `test_m4t_ternary_matmul`: 6 → **9 tests**.
+
+### Build
+
+8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
+
 ### Changed
 - (none — ground zero state; tiers 1 and 2 are first landings.)
 

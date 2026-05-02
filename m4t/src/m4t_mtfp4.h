@@ -59,14 +59,26 @@ static inline m4t_mtfp4_t m4t_mtfp4_clamp(int32_t v) {
 
 /* ── SDOT ternary matmul (§8.4 — Case W, exact) ─────────────────────────── */
 
+/* Maximum K for which m4t_mtfp4_sdot_matmul_bt produces in-range MTFP19
+ * output. Derivation: the worst-case absolute output is
+ *   max|Y[i,j]| = max|Σ_k X[i,k] · W[j,k]| = K · MAX_VAL_MTFP4 · 1 = 40K
+ * which must satisfy 40K ≤ MAX_VAL_MTFP19 = 581 130 733. So:
+ *   K_max_exact = MAX_VAL_MTFP19 / MAX_VAL_MTFP4 = 14 528 268
+ *
+ * Beyond this bound, the kernel produces mantissas that exceed MTFP19's
+ * documented range. The substrate-invariant |cell| ≤ MAX_VAL is violated;
+ * downstream kernels reading those cells will produce garbage. Callers
+ * exceeding K_max_exact must partition into K-sized chunks, accumulate
+ * across chunks via the cross-exponent accumulator, OR use a wider-output
+ * SDOT variant (lands MTFP4 × ternary → MTFP39; not yet built). */
+#define M4T_SDOT_K_MAX_EXACT \
+    ((int)(M4T_MTFP_MAX_VAL / M4T_MTFP4_MAX_VAL))
+
 /* Y[M,N] = X[M,K] @ W^T where X is MTFP4 and W is unpacked ternary (int8
  * in {-1, 0, +1}). Output Y is MTFP19 (int32 mantissas).
  *
  * This is Case W per §8.4: output type widens to MTFP19. Exact by
- * construction — for any |X[i,k]| ≤ MAX_VAL_4 = 40 and W[j,k] ∈ {-1,0,+1},
- *   |Y[i,j]| = |Σ_k X[i,k] · W[j,k]|
- *           ≤ K · 40
- * which fits MTFP19 (max 581 130 733) for K up to ~14.5 million.
+ * construction for K ≤ M4T_SDOT_K_MAX_EXACT (= 14 528 268).
  *
  * NEON path uses vdotq_s32 (16 int8 multiply-accumulates per instruction);
  * scalar tail handles K not divisible by 16.
@@ -78,15 +90,19 @@ static inline m4t_mtfp4_t m4t_mtfp4_clamp(int32_t v) {
  *
  * Preconditions (asserted in debug):
  *   M >= 0, N >= 0, K >= 0
+ *   K <= M4T_SDOT_K_MAX_EXACT  (HARD: substrate-invariant violation if exceeded)
  *   Y, X, W non-NULL when M·N·K > 0
  *   |X[i,k]| <= MAX_VAL_4
- *   W[j,k] in {-1, 0, +1}  (caller's responsibility; substrate trusts
- *                            at the boundary, samples in debug builds)
+ *   W[j,k] in {-1, 0, +1}
+ *     The substrate trusts the caller at the boundary; debug builds
+ *     spot-check W[0] and the last cell of W[N-1] only — exhaustive
+ *     validation would scan O(N·K) per call, too expensive for the
+ *     hot path. Consumers that need exhaustive validation should run
+ *     it once at W setup time, outside the matmul loop.
  *   Y must not alias X or W
  *
  * No flags parameter: by §8.4 contract this kernel does not saturate or
- * round under valid inputs. Consumers that violate the K bound get
- * undefined behavior at the int32 accumulator overflow point. */
+ * round under valid inputs (where "valid" includes K ≤ M4T_SDOT_K_MAX_EXACT). */
 void m4t_mtfp4_sdot_matmul_bt(
     m4t_mtfp_t*       Y,
     const m4t_mtfp4_t* X,

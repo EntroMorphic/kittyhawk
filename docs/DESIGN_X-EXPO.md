@@ -179,7 +179,9 @@ Within each logical tensor, scale is uniform. **Per-block sidecar exponents woul
 
 **Decision:** MVP is per-tensor. Per-block becomes a separate kernel only if the consumer-discovery cycle surfaces a tensor whose internal scale legitimately varies across blocks. The plan's open question is provisionally answered.
 
-## Flag layout (§14.4 status array — per-block)
+## Flag layout (§14.4 status array — per-block, substrate-wide)
+
+**This layout is shared across every Case-S/Case-R kernel in the substrate** — `m4t_mtfp_vec_accum_aligning`, `m4t_mtfp_vec_add_aligning`, `m4t_mtfp_vec_sub_aligning`, `m4t_mtfp_ternary_matmul_bt`, and `m4t_mtfp19_to_mtfp4`. The shared `m4t_flag_or` setter lives in `m4t_internal.h`; the public `m4t_flag_test` reader lives in `m4t_mtfp.h`.
 
 **One `uint8_t` per MTFP19 block** (4 cells per block). For an n-cell tensor, the flags array has `M4T_FLAG_BYTES(n) = ceil(n / 4)` bytes. Each byte encodes two events × four cells:
 

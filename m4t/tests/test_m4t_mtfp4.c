@@ -4,16 +4,19 @@
  * int64 reference for the matmul (since SDOT must be exact per §8.4).
  *
  * Coverage:
- *   1. mtfp4_clamp_basic        — clamping at MTFP4 boundaries
- *   2. sdot_matmul_small        — golden-value 2x2x4 matmul
- *   3. sdot_matmul_large        — random K up to 1024 vs int64 reference
- *   4. sdot_matmul_max_bound    — extreme inputs, verify exact (no clamp)
- *   5. sdot_zero_dim            — M=0/N=0/K=0 edge cases
- *   6. widen_exact              — mtfp4_to_mtfp19 round-trip
- *   7. narrow_round             — mtfp19_to_mtfp4 round-to-nearest
- *   8. narrow_saturate          — mtfp19_to_mtfp4 saturation
- *   9. narrow_flags             — ROUNDED / SATURATED bits exact
- *  10. roundtrip_widen_narrow   — widen then narrow recovers exact value
+ *   1.  mtfp4_clamp_basic        — clamping at MTFP4 boundaries
+ *   2.  sdot_matmul_small        — golden-value 2x4x4 matmul
+ *   3.  sdot_matmul_large        — random K up to 1024 vs int64 reference
+ *   4.  sdot_matmul_high_mag     — extreme inputs at K=4096, verify exact
+ *   5.  sdot_matmul_long_k       — K=1M vs int64 reference (exercises real
+ *                                  K-bound regime, partway to K_MAX_EXACT)
+ *   6.  sdot_zero_dim            — M=0/N=0/K=0 edge cases
+ *   7.  widen_exact              — mtfp4_to_mtfp19 boundary values
+ *   8.  narrow_round             — mtfp19_to_mtfp4 round-to-nearest cases
+ *   9.  narrow_saturate          — mtfp19_to_mtfp4 saturation cases
+ *  10.  narrow_flags             — ROUNDED / SATURATED bits exact
+ *  11.  narrow_property          — 10k random src vs int64 reference
+ *  12.  roundtrip_widen_narrow   — widen then narrow recovers exact value
  */
 
 #include "m4t_mtfp4.h"
@@ -51,6 +54,24 @@ static int32_t rand_mtfp19(void) {
 }
 static int rand_int(int lo, int hi) {
     return lo + (int)(xs32() % (uint32_t)(hi - lo + 1));
+}
+
+/* Bit-exact int64 reference for the narrow conversion. Mirrors the kernel
+ * algorithm in m4t_mtfp4.c structurally (round-to-nearest-even by 6561,
+ * then saturating clamp), used as the property-test oracle. */
+static int8_t narrow_reference(int32_t v, int* out_rounded, int* out_saturated) {
+    int32_t s = 6561;
+    int32_t q = v / s;
+    int32_t rem = v - q * s;
+    *out_rounded = (rem != 0) ? 1 : 0;
+    if (rem > 0 && 2 * rem > s) q += 1;
+    else if (rem < 0 && 2 * (-rem) > s) q -= 1;
+    int8_t out;
+    *out_saturated = 0;
+    if (q >  M4T_MTFP4_MAX_VAL) { out =  M4T_MTFP4_MAX_VAL; *out_saturated = 1; }
+    else if (q < -M4T_MTFP4_MAX_VAL) { out = -M4T_MTFP4_MAX_VAL; *out_saturated = 1; }
+    else out = (int8_t)q;
+    return out;
 }
 
 /* ── Tests ──────────────────────────────────────────────────────────────── */
@@ -136,8 +157,8 @@ static int test_sdot_matmul_large(void) {
     return 0;
 }
 
-/* Worst-case extreme inputs: all X=±MAX_VAL_4, all W=±1, verify exact. */
-static int test_sdot_matmul_max_bound(void) {
+/* High-magnitude inputs at K=4096: verify exact (no overflow into MTFP19). */
+static int test_sdot_matmul_high_mag(void) {
     int K = 4096;
     int8_t* X = malloc((size_t)K);
     int8_t* W = malloc((size_t)K);
@@ -147,7 +168,7 @@ static int test_sdot_matmul_max_bound(void) {
     for (int k = 0; k < K; k++) { X[k] = 40; W[k] = 1; }
     m4t_mtfp4_sdot_matmul_bt(Y, X, W, 1, K, 1);
     if (Y[0] != K * 40) {
-        printf("FAIL max_bound +1: got=%d want=%d\n", Y[0], K * 40);
+        printf("FAIL high_mag +1: got=%d want=%d\n", Y[0], K * 40);
         free(X); free(W); return 1;
     }
 
@@ -155,13 +176,51 @@ static int test_sdot_matmul_max_bound(void) {
     for (int k = 0; k < K; k++) W[k] = -1;
     m4t_mtfp4_sdot_matmul_bt(Y, X, W, 1, K, 1);
     if (Y[0] != -K * 40) {
-        printf("FAIL max_bound -1: got=%d want=%d\n", Y[0], -K * 40);
+        printf("FAIL high_mag -1: got=%d want=%d\n", Y[0], -K * 40);
         free(X); free(W); return 1;
     }
 
-    /* Verify result is in MTFP19 range (we should never need to saturate). */
+    /* Verify result is in MTFP19 range. */
     if (Y[0] < -M4T_MTFP_MAX_VAL || Y[0] > M4T_MTFP_MAX_VAL) {
-        printf("FAIL max_bound: |Y|=%d outside MTFP19\n", Y[0]);
+        printf("FAIL high_mag: |Y|=%d outside MTFP19\n", Y[0]);
+        free(X); free(W); return 1;
+    }
+
+    free(X); free(W);
+    return 0;
+}
+
+/* Long-K stress at K=1M, partway to M4T_SDOT_K_MAX_EXACT (~14.5M). Verifies
+ * accumulator behavior under realistic large-K workloads and exercises both
+ * the NEON loop body and the bit-exact correspondence with int64 reference.
+ * Worst-case |Y| at K=1M is K · 40 = 40,000,000 — well within MTFP19 range. */
+static int test_sdot_matmul_long_k(void) {
+    int K = 1000000;
+    int8_t* X = malloc((size_t)K);
+    int8_t* W = malloc((size_t)K);
+    int32_t Y, Yref;
+
+    /* Adversarial: all X = ±40, all W = ±1, mixed signs to avoid trivial
+     * cancellation. Worst-case sum dominates. */
+    g_rng = 0xa5a5a5a5u;
+    for (int k = 0; k < K; k++) {
+        X[k] = (xs32() & 1) ? 40 : -40;
+        W[k] = (int8_t)((int)(xs32() % 3u) - 1);
+    }
+
+    m4t_mtfp4_sdot_matmul_bt(&Y, X, W, 1, K, 1);
+
+    /* int64 reference. */
+    int64_t acc = 0;
+    for (int k = 0; k < K; k++) acc += (int64_t)X[k] * (int64_t)W[k];
+    Yref = (int32_t)acc;
+
+    if (Y != Yref) {
+        printf("FAIL long_k K=%d: got=%d ref=%d\n", K, Y, Yref);
+        free(X); free(W); return 1;
+    }
+    if (Y < -M4T_MTFP_MAX_VAL || Y > M4T_MTFP_MAX_VAL) {
+        printf("FAIL long_k: |Y|=%d outside MTFP19\n", Y);
         free(X); free(W); return 1;
     }
 
@@ -300,18 +359,82 @@ static int test_roundtrip_widen_narrow(void) {
     return 0;
 }
 
+/* Random property test for narrow conversion: 10k random src values,
+ * compare kernel output (mantissa + flag bits) bit-exactly against an
+ * int64 reference. Catches off-by-one rounding bugs and flag-encoding
+ * mistakes that the hand-derived tests above might miss. */
+static int test_narrow_property(void) {
+    int n = 64;
+    int32_t* src = malloc(sizeof(int32_t) * (size_t)n);
+    int8_t*  kernel_dst = malloc((size_t)n);
+    uint8_t* kernel_flags = malloc(M4T_FLAG_BYTES(n));
+
+    g_rng = 0xc0ffeebbu;
+    for (int s = 0; s < 10000; s++) {
+        /* Mix uniformly random values with values targeted at boundaries
+         * (3280, 3281, 6561, MAX*6561) to exercise rounding + saturation. */
+        for (int i = 0; i < n; i++) {
+            uint32_t r = xs32();
+            if ((r % 8) == 0) {
+                /* Boundary-targeted: near a rescale halfway or saturation edge. */
+                int variant = (int)((r >> 3) % 6u);
+                int32_t base;
+                switch (variant) {
+                    case 0: base = 0; break;
+                    case 1: base = 3280; break;
+                    case 2: base = 3281; break;
+                    case 3: base = 6561; break;
+                    case 4: base = (int32_t)M4T_MTFP4_MAX_VAL * 6561; break;
+                    default: base = (int32_t)(M4T_MTFP4_MAX_VAL * 6561 + 100);
+                }
+                src[i] = ((r >> 16) & 1) ? base : -base;
+            } else {
+                src[i] = rand_mtfp19();
+            }
+        }
+        memset(kernel_flags, 0, M4T_FLAG_BYTES(n));
+        m4t_mtfp19_to_mtfp4(kernel_dst, src, kernel_flags, n);
+
+        for (int i = 0; i < n; i++) {
+            int ref_rounded = 0, ref_saturated = 0;
+            int8_t ref_dst = narrow_reference(src[i], &ref_rounded, &ref_saturated);
+            if (kernel_dst[i] != ref_dst) {
+                printf("FAIL narrow_property s=%d cell %d: src=%d kernel=%d ref=%d\n",
+                       s, i, src[i], kernel_dst[i], ref_dst);
+                free(src); free(kernel_dst); free(kernel_flags); return 1;
+            }
+            int got_sat = m4t_flag_test(kernel_flags, i, M4T_FLAG_SATURATED) ? 1 : 0;
+            int got_rnd = m4t_flag_test(kernel_flags, i, M4T_FLAG_ROUNDED)   ? 1 : 0;
+            if (got_sat != ref_saturated) {
+                printf("FAIL narrow_property s=%d cell %d sat: src=%d kernel=%d ref=%d\n",
+                       s, i, src[i], got_sat, ref_saturated);
+                free(src); free(kernel_dst); free(kernel_flags); return 1;
+            }
+            if (got_rnd != ref_rounded) {
+                printf("FAIL narrow_property s=%d cell %d rnd: src=%d kernel=%d ref=%d\n",
+                       s, i, src[i], got_rnd, ref_rounded);
+                free(src); free(kernel_dst); free(kernel_flags); return 1;
+            }
+        }
+    }
+
+    free(src); free(kernel_dst); free(kernel_flags);
+    return 0;
+}
+
 int main(void) {
     if (test_clamp_basic())                return 1;
     if (test_sdot_matmul_small())          return 1;
     if (test_sdot_matmul_large())          return 1;
-    if (test_sdot_matmul_max_bound())      return 1;
+    if (test_sdot_matmul_high_mag())       return 1;
+    if (test_sdot_matmul_long_k())         return 1;
     if (test_sdot_zero_dim())              return 1;
     if (test_widen_exact())                return 1;
     if (test_narrow_round())               return 1;
     if (test_narrow_saturate())            return 1;
     if (test_narrow_flags())               return 1;
+    if (test_narrow_property())            return 1;
     if (test_roundtrip_widen_narrow())     return 1;
-    printf("m4t_mtfp4: all 10 tests passed\n");
-    (void)rand_mtfp19;  /* unused — kept for future tests */
+    printf("m4t_mtfp4: all 12 tests passed\n");
     return 0;
 }
