@@ -1,100 +1,80 @@
 ---
 title: Phase A.2 — sig_dim sweep
-date: 2026-05-02
+date: 2026-05-02 (multi-seed revision)
 benchmark: synthetic prototype classification
-status: deterministic measurement, single seed
+status: deterministic measurement, 5 seeds per (sig_dim, variant) cell
 ---
 
-# Phase A.2 sig_dim sweep
+# Phase A.2 sig_dim sweep — multi-seed
 
-Three variants × eight projection dimensions, deterministic seeds. Tool: `gesh/bench/sweep_dims.c`. Reproducible via `./build/gesh/gesh_sweep_dims`.
+Three variants × eight projection dimensions, **5 independent seeds per cell**, deterministic. Tool: `gesh/bench/sweep_dims.c`. Reproducible via `./build/gesh/gesh_sweep_dims`.
 
 ## Setup
 
 - D = 64 input dims (K = 16 informative + 48 noise).
 - C = 10 classes, 10% per-trit noise.
 - n_train = 2000, n_test = 500, top_k = 1.
-- Training budget: ~5 flip-evaluations per trit on average, spread over 50 epochs (so larger projections get proportionally more training).
+- Training budget: ~5 flip-evaluations per trit on average, spread over 50 epochs.
+- **Intra-epoch refresh:** bank and batch resampled every (n_flips/4) flips per the H1/H2 red-team remediations.
+- **Early stopping:** patience 5 epochs (training halts when batch error plateaus).
+- Each (sig_dim, variant) cell = mean ± sample stddev across 5 seeds with independent (init, train) seed pairs per trial.
 
 ## Results
 
-| sig_dim | random | trained | gain | flip_budget | rand_s | train_s |
-|---------|--------|---------|------|-------------|--------|---------|
-|       2 |    19% |     23% |  +4  |         640 |   0.00 |    0.02 |
-|       4 |    24% |     30% |  +6  |        1280 |   0.00 |    0.03 |
-|       8 |    35% |     44% |  +9  |        2560 |   0.00 |    0.05 |
-|      16 |    47% |     62% | **+15** |     5120 |   0.00 |    0.10 |
-|      32 |    62% |     75% | +13  |       10240 |   0.00 |    0.30 |
-|      64 |    79% |     77% |  −2  |       20480 |   0.00 |    1.00 |
-|     128 |    89% |     91% |  +2  |       40960 |   0.00 |    3.47 |
-|     256 |    95% |     96% |  +1  |       81920 |   0.00 |   12.68 |
+| sig_dim | random          | trained         | gain    |  budget |
+|---------|------------------|------------------|---------|---------|
+|       2 |  15.6% ± 3.1 pp |  21.0% ± 2.4 pp |  +5.4 pp |     640 |
+|       4 |  21.2% ± 1.6 pp |  26.8% ± 2.3 pp |  +5.6 pp |    1280 |
+|       8 |  31.8% ± 3.1 pp |  36.2% ± 0.8 pp |  +4.4 pp |    2560 |
+|      16 |  43.4% ± 3.8 pp |  51.4% ± 4.6 pp |  +8.0 pp |    5120 |
+|      32 |  59.0% ± 2.5 pp |  67.2% ± 2.4 pp |  +8.2 pp |   10240 |
+|      64 |  76.4% ± 2.1 pp |  78.2% ± 2.3 pp |  +1.8 pp |   20480 |
+|     128 |  90.0% ± 1.7 pp |  89.2% ± 1.5 pp |  −0.8 pp |   40960 |
+|     256 |  95.4% ± 0.9 pp |  95.4% ± 0.5 pp |  +0.0 pp |   81920 |
 
 **Identity (sig_dim = D = 64, no projection): 69%.**
 
-## What this shows
+## What multi-seed corrected from the earlier single-seed version
+
+The single-seed sweep reported:
+- A **+15pp peak at sig_dim = 16**. Multi-seed mean: **+8.0pp**. The peak narrative was a single-seed artifact; the gain is real but smaller.
+- A **−2pp "anomaly" at sig_dim = 64** ("training walks into a worse basin"). Multi-seed mean: **+1.8pp**. **The anomaly evaporates** — within seed noise.
+- A **+13pp gain at sig_dim = 32**. Multi-seed: **+8.2pp**.
+
+Per-seed results were within ±2.5pp of the multi-seed mean at most cells, but the headline numbers (peaks, anomalies) were dominated by single-seed luck. **This is exactly the C1 issue in the Phase A.2 red-team:** a shared-seed single-trial sweep produces narratives that average out under proper variance accounting.
+
+## What survives multi-seed
 
 ### 1. Lattice update earns its complexity in the compression regime
+Compression peak: **+8pp at sig_dim ∈ {16, 32}**. Both significantly above the 1pp stddev floor at sig_dim ≥ 64. The mechanism does meaningful work when the projection has to *select* discriminative dims; it does cosmetic polish (or nothing) when there's room for redundant encoding.
 
-The largest gain (+15pp) is at sig_dim = 16 — exactly the number of informative dims in the data. The projection has to *find* the right 16 dims out of 64; lattice update solves a substantial fraction of that problem. At sig_dim = 32 (still compressed), the gain is +13pp.
+### 2. Random ternary projection at sig_dim = D beats identity
+Identity at sig_dim = 64 hits 69%; random ternary projection at sig_dim = 64 hits **76.4% ± 2.1pp** — **+7pp over identity at the same dimensionality.** The mechanism (hypothesis): random ternary projection mixes the 48 noise dims into incoherent signal that the class-mean bank averages toward zero, while informative dims survive the projection. Identity preserves noise dims directly, where they dilute the class-mean's signal-to-noise ratio.
 
-In the expansion regime (sig_dim > D = 64), random R already encodes almost everything via redundancy; training adds 1–2pp.
+This finding is robust across seeds (±2.1pp stddev; the +7pp gap is well above noise). **It is not yet mechanism-verified** — the "implicit denoising" framing is a *hypothesis* that explains the data; it has not been tested by, e.g., examining which dims survive the random projection. Worth a follow-up cycle.
 
-### 2. Random ternary projection at sig_dim ≥ D outperforms identity
+### 3. Capacity floor at sig_dim ≤ 4
+At sig_dim = 2: 21% mean trained accuracy. With 3² = 9 distinct ternary signatures vs 10 classes, this is information-theoretically limited. At sig_dim = 4: 27%. These are capacity bounds, not training failures.
 
-Identity (sig_dim = 64, raw input → bank) hits 69%. Random ternary projection at sig_dim = 64 hits 79% — **+10pp over identity at the same dimensionality.**
+### 4. Diminishing returns at sig_dim ≥ 128
+At sig_dim = 128, multi-seed gain is **−0.8 ± 1.5pp** (slightly negative, within noise of zero). At sig_dim = 256, exactly +0.0pp. Random ternary expansion already encodes whatever signal exists; training has nothing to add.
 
-The mechanism: random ternary projection of the 48 noise dims produces incoherent signal that the class-mean bank averages toward zero, while informative dims still carry through (each random projection trit is a weighted sum). Identity preserves noise dims directly, where they dilute the signal-to-noise ratio in Hamming distance.
+## Hypotheses (NOT verified findings)
 
-This is interesting on its own — random ternary projection is doing implicit denoising. The substrate's "no random projections in image pipelines" rule was for production deployment of LSH consumers; here, in a routing-layer setup, random ternary projection has a use case.
+These remain conjectures — plausible explanations for the data, not demonstrated mechanisms. Future cycles could pressure-test them:
 
-### 3. Anomaly at sig_dim = 64: trained −2pp vs random
+1. **"Implicit denoising via random ternary projection."** Hypothesis explaining why random R at sig_dim = D beats identity. Mechanism test: project the noise dims through a random ternary matrix, examine the per-dim class-conditional variance of the projected signatures. Predicts: noise-dim signal averages toward zero in projected space.
 
-At sig_dim = 64 (matching D), random R hits 79% but trained R drops to 77%. Within seed noise (test = 500 samples, ±1pp ≈ ±5 samples; ±2pp ≈ ±10 samples) — could be a fluke, or could indicate that lattice update from a random init walks into a worse local basin than random ternary's "implicit regularization" basin.
+2. **"Compression sweet spot near the informative-dim count."** Hypothesis explaining why gain peaks near sig_dim = 16 = K (the informative-dim count of the synthetic benchmark). Mechanism test: vary K (informative dim count) in the data generator and sweep sig_dim; predict peak gain shifts with K.
 
-Worth multi-seed measurement before drawing conclusions. Not a bug; an empirical finding.
+3. **"Random ternary expansion is enough for trivial separation."** Hypothesis explaining the +0pp gain at sig_dim = 256. Mechanism test: increase noise level or class count to force a regime where 256-dim random projection can't separate; check whether training then helps.
 
-### 4. Capacity floor at sig_dim ≤ 4
+## Implications for Phase B+
 
-With sig_dim = 2, the projection space has only 3² = 9 distinct ternary signatures — barely enough for 10 classes. Trained R reaches 23%, well above random chance (10%) but capacity-bounded. At sig_dim = 4, 81 distinct signatures, 30% trained.
-
-These floors aren't training failures; they're information-theoretic capacity limits.
-
-## Phase B+ implications
-
-- **Sub-D compression is where lattice training pays off.** If a downstream consumer wants compact signatures (small sig_dim), lattice update is the discipline-aligned mechanism — it earns its complexity at compression.
-- **At sig_dim ≥ D, training is mostly cosmetic on this benchmark.** Random ternary projection captures most of what training would. This may be benchmark-specific (the synthetic task has clear informative-vs-noise dim separation); harder benchmarks may shift the curve.
-- **Identity projection is dominated.** Anywhere you'd consider identity, random ternary projection at the same sig_dim does better. Worth testing on richer benchmarks.
-- **The sig_dim = 64 anomaly is the most interesting finding to investigate.** Multi-seed sweep would tell us if it's a measurement artifact or a real "training underperforms random" regime that the discipline should know about.
-
-## Curve shape
-
-```
-Accuracy by sig_dim (D = 64):
-
-100% |                                          ████ ████
-     |                                       ████
- 90% |                                  ████
-     |                              ████
- 80% |                          ████
-     |                      ████  ████  ←  random R
- 70% |                  ████      ████  ←  trained R
-     |               ████             [identity 69% ━━ at sig=64]
- 60% |           ████  ████
-     |        ████
- 50% |     ████
-     |   ████
- 40% |  ███
-     | ██
- 30% |█
-     |██
- 20% |█
-     |─────┴──┴───┴────┴────┴────┴─────────┴─────────────┴
-       2   4   8   16   32   64       128             256
-
-  random R nearly tracks trained R at high dim;
-  trained R dominates at compression;
-  +15pp peak gain at sig_dim = 16 (the informative-dim count).
-```
+- **If a downstream consumer wants compact signatures, lattice update is worth the complexity.** Multi-seed +5 to +8pp at sig_dim ≤ 32.
+- **At sig_dim ≥ D, training is mostly cosmetic on this benchmark.** Random ternary projection captures most of what training would. May shift on harder benchmarks; worth testing.
+- **Identity projection is dominated by random ternary projection** at the same sig_dim, robustly across seeds.
+- **No "training underperforms random" regime detected** at the multi-seed level, contra the single-seed sweep's −2pp anomaly. The implementation can claim "training never hurts on average within ±2pp seed noise."
 
 ## Reproduction
 
@@ -103,4 +83,8 @@ cmake -S . -B build && cmake --build build -j
 ./build/gesh/gesh_sweep_dims
 ```
 
-Total runtime ~17 seconds on Apple Silicon. Deterministic given the seeds in `sweep_dims.c::make_fixture` and `run_random` / `run_trained`.
+Total runtime ~22 seconds on Apple Silicon. Deterministic given the seed lists in `sweep_dims.c::main`.
+
+## Methodology note
+
+This sweep was originally run with **single seed** and produced narratives (peak gain, anomaly, anti-pattern) that did not survive multi-seed averaging. The Phase A.2 red-team's C1 finding caught this, prompting the multi-seed rewrite. **Lesson recorded in `CONTRIBUTING.md`:** any benchmark claim with directional language ("peak", "anomaly", "winner") needs multi-seed validation before promotion to a finding. Single-seed measurements are exploratory; multi-seed measurements are evidence.

@@ -49,5 +49,6 @@ if(GESH_BUILD_TESTS)
 endif()
 
 # Sweep tool (benchmark, not regression test). Builds with the library.
+# Links `m` for sqrt (used for stddev computation in multi-seed reporting).
 add_executable(gesh_sweep_dims bench/sweep_dims.c)
-target_link_libraries(gesh_sweep_dims PRIVATE gesh gesh_bench)
+target_link_libraries(gesh_sweep_dims PRIVATE gesh gesh_bench m)

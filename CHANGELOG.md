@@ -147,7 +147,58 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Gesh Phase A.2 red-team: 13 findings, multi-seed methodology promoted]
+
+End-to-end pressure on Phase A.2's code, measurement methodology, and documentation ensemble after the sig_dim sweep landed. Modeled after the m4t kernel red-teams and Phase A.1's red-team. 13 findings; 12 remediated; 1 lifted to project-level methodology rule. Recorded in `journal/gesh_phase_a2_redteam.md`.
+
+The single-seed sweep that the prior CHANGELOG entry described had three single-seed artifacts that **did not survive multi-seed averaging**:
+- "+15pp peak at sig_dim = 16" → multi-seed mean **+8.0pp ± 4.6pp**
+- "+13pp at sig_dim = 32" → multi-seed mean **+8.2pp ± 2.4pp**
+- "−2pp anomaly at sig_dim = 64" → multi-seed mean **+1.8pp ± 2.3pp** (anomaly evaporates)
+
+The qualitative story (compression regime helps, expansion saturates, random ternary at sig_dim=D beats identity) survived. The headline-number narratives did not. The "implicit denoising" framing was demoted from a finding to a hypothesis with a proposed mechanism test.
+
+### Added
+- `journal/gesh_phase_a2_redteam.md` — 13 findings tabled, remediations recorded, methodology lessons promoted.
+- **Multi-seed sweep tool**: `gesh/bench/sweep_dims.c` rewritten to run N_SEEDS=5 with independent (init, train) seed pairs per cell, reporting mean ± stddev. Links `m` for sqrt.
+- **Hot-loop scratch**: `gesh_train_scratch_t` allocated once in `gesh_train_lattice_update`; eliminates per-flip mallocs (M4 fix). ~10× faster sweep.
+- **Intra-epoch refresh**: `bank_refresh_every` and `batch_refresh_every` config knobs in `gesh_train_config_t` (H1, H2 fixes). Bank rebuilt and batch resampled every (n_flips/4) flip-evaluations during sweep runs.
+- **Early stopping**: `early_stop_patience` config (M5 fix). Cuts wasted compute on plateaued epochs.
+- **Budget warning**: `gesh_train_lattice_update` now emits `[gesh_train] warn:` when flip budget is below R's trit count (M6 fix).
+- **Balanced random init**: `gesh_init_random_projection_balanced` (L2 cleanup).
+- **`test_multi_seed_stability`** — 3-seed test, requires avg gain ≥ 3pp (M2 fix).
+- **`test_no_catastrophic_regression`** — requires `trained ≥ random − 5pp` (M3 fix).
+- **CONTRIBUTING.md checklist additions**: "Multi-seed validation for any directional measurement claim" and "Hypothesis vs finding distinction in measurement docs". Both lifted from this red-team's C1 and H3 findings.
+
+### Changed
+- `gesh/docs/sweep_dims_results.md` — full rewrite for multi-seed numbers. Reports mean ± stddev table, retracts the single-seed peak/anomaly narratives, adds a "Hypotheses (NOT verified findings)" section.
+- `gesh/README.md` — Phase A.2 status block reflects multi-seed results (+8pp plateau, +7pp identity-vs-random, hypothesis flagging).
+- `journal/gesh_design_closeout.md` — added a "Post-implementation revision" section distinguishing **STE-shadow refresh** (correctly absent) from **R-derivative refresh** (correctly present, the bank is a derived statistic of R) (L5 fix).
+- `gesh/tests/test_gesh_train.c::test_trains_reduces_loss` — gate tightened from `< batch_size` (trivially-pass) to `< batch_size / 2` (M1 fix).
+- `gesh_train_default()` now sets `bank_refresh_every`, `batch_refresh_every`, `early_stop_patience`, `init_balanced` defaults; documented `seed = 0` as valid (L1 fix; xorshift state mixed with `0x12345678u` to break the all-zero degenerate case).
+
+### Multi-seed sweep table
+
+| sig_dim | random          | trained         | gain    |
+|---------|------------------|------------------|---------|
+|       2 |  15.6% ± 3.1pp |  21.0% ± 2.4pp |  +5.4 pp |
+|       4 |  21.2% ± 1.6pp |  26.8% ± 2.3pp |  +5.6 pp |
+|       8 |  31.8% ± 3.1pp |  36.2% ± 0.8pp |  +4.4 pp |
+|      16 |  43.4% ± 3.8pp |  51.4% ± 4.6pp |  +8.0 pp |
+|      32 |  59.0% ± 2.5pp |  67.2% ± 2.4pp |  +8.2 pp |
+|      64 |  76.4% ± 2.1pp |  78.2% ± 2.3pp |  +1.8 pp |
+|     128 |  90.0% ± 1.7pp |  89.2% ± 1.5pp |  −0.8 pp |
+|     256 |  95.4% ± 0.9pp |  95.4% ± 0.5pp |  +0.0 pp |
+
+Identity (sig_dim = D = 64, no projection): 69%.
+
+### Build
+12/12 ctest binaries green. Sweep tool builds clean under `-Werror`. Total sweep runtime ~22s on Apple Silicon (5 seeds × 8 sig_dims × 2 variants).
+
 ## [2026-05-02 — Gesh Phase A.2: sig_dim sweep across 8 dims × 3 variants]
+
+> **Note (2026-05-02 red-team):** the +15pp / +13pp / −2pp narratives below were single-seed artifacts. Multi-seed numbers in the entry above supersede them. The qualitative story (compression helps, expansion saturates, random ternary at sig_dim=D beats identity) survives.
+
 
 A `gesh/bench/sweep_dims.c` benchmark tool sweeps sig_dim ∈ {2, 4, 8, 16, 32, 64, 128, 256} and runs random R / trained R / identity at each. Deterministic. Results saved to `gesh/docs/sweep_dims_results.md`. Three load-bearing findings:
 

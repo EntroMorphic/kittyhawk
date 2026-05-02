@@ -121,3 +121,17 @@ Worth recording as a discipline rule: when a mechanism is "the standard way" in 
 - **Back to NODES** if Phase A's lattice update rule fails to train at all on induction-head, even with smart move-acceptance. The "lattice update is sufficient" hypothesis would be falsified; STE or some other mechanism returns.
 - **Back to RAW** if the two-G reframing turns out to undercount mechanisms (e.g., something else is needed that wasn't called out).
 - **No loop-back** if Phase A trains via lattice update and the unification claim's gate is met. That's the wood cutting itself; Gesh becomes Lattice-Native Gesh, and the substrate's THESIS Part B has its first measurement.
+
+## Post-implementation revision (2026-05-02)
+
+The closeout asserted "**no periodic refresh** of tile signatures — they don't drift, because there are no continuous shadow parameters to track." That framing was correct about the *cause* (no shadow parameters → no drift between continuous and discrete) but **wrong about the implication** for refresh schedules.
+
+The Phase A.2 implementation refreshes bank tiles **intra-epoch** (every n_flips/4 evaluations), and resamples the training batch on the same cadence. Why? After `k` accepted flips, the bank built from R-before-flips is a stale predictor of error under R-after-flips. A flip evaluated against the stale bank is being scored against a slightly wrong contract. The fix is the same kind of "rebuild the dependent structure" that STE-trained pipelines call refresh — but the *reason* is different: the bank is a derived statistic of R, not a continuous shadow that drifts in float space.
+
+So the rule is:
+- **Tile signatures don't drift in the float-vs-quantized sense.** No refresh needed for *that* reason. The closeout was right.
+- **The bank is recomputed from R, so each accepted flip stales the bank.** Periodic refresh *is* needed for *this* reason. The closeout missed this.
+
+These are distinct issues that both happen to be solved by the same operational primitive ("recompute the bank periodically"). The Phase A.2 red-team's H1/H2 findings caught the second one. The closeout's "no refresh" claim should be read as "no STE-style shadow-parameter refresh," not "no derived-statistic refresh." The implementation has both an `R-derivative bank` and a fresh batch resampled on a configurable schedule.
+
+Recording here for the next cycle: when a mechanism choice eliminates one *reason* for an operation, check whether other reasons remain before claiming the operation is gone.

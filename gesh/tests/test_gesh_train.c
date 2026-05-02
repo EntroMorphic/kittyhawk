@@ -122,12 +122,14 @@ static int test_trains_reduces_loss(void) {
         free(R); free_bank(&bank); free_fixture(&f);
         return 1;
     }
-    /* Loose gate: final batch error count < batch_size (i.e., training
-     * did SOMETHING). With C=10 random chance = ~58/64 errors, and
-     * even a tiny improvement should drive this well below 50. */
-    if (final_errors >= cfg.batch_size) {
-        printf("FAIL trains_reduces_loss: final errors=%d/%d (no learning)\n",
-               final_errors, cfg.batch_size);
+    /* M1 fix: tighter gate. With C=10, random chance ≈ 58/64 errors;
+     * we want training to drive errors well below chance. Require
+     * final_errors < batch_size / 2 = 32. Anything weaker and the
+     * test passes "no learning" silently. */
+    if (final_errors >= cfg.batch_size / 2) {
+        printf("FAIL trains_reduces_loss: final errors=%d/%d "
+               "(below batch_size/2 = %d threshold)\n",
+               final_errors, cfg.batch_size, cfg.batch_size / 2);
         free(R); free_bank(&bank); free_fixture(&f);
         return 1;
     }
@@ -262,10 +264,180 @@ static int test_train_determinism(void) {
     return 0;
 }
 
+/* M2: multi-seed stability. Across 3 seeds, training should beat random
+ * with positive gain ON AVERAGE. Catches single-seed flukes. */
+static int test_multi_seed_stability(void) {
+    fixture_t f = make_fixture(0xdeadbeefu, 0x11111111u, 0x22222222u,
+                                1500, 400, 32);
+
+    uint32_t init_seeds[3]  = { 0xc0ffeebbu, 0xa5a5a5a5u, 0xfeedfaceu };
+    uint32_t train_seeds[3] = { 0x11111111u, 0x22222222u, 0x33333333u };
+
+    int total_gain = 0;
+    int n_seeds = 3;
+    for (int s = 0; s < n_seeds; s++) {
+        /* Random R baseline. */
+        m4t_trit_t* R_rand = malloc((size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+        gesh_init_random_projection(R_rand, f.sig_dim, f.D, init_seeds[s]);
+        gesh_bank_t bank_rand;
+        alloc_bank(&bank_rand, f.C, f.sig_dim);
+        {
+            m4t_trit_t* proj = malloc(
+                (size_t)f.n_train * (size_t)f.sig_dim * sizeof(m4t_trit_t));
+            for (int i = 0; i < f.n_train; i++) {
+                const m4t_trit_t* x = f.train + (size_t)i * f.D;
+                m4t_trit_t* sg = proj + (size_t)i * f.sig_dim;
+                for (int oi = 0; oi < f.sig_dim; oi++) {
+                    const m4t_trit_t* r = R_rand + (size_t)oi * f.D;
+                    int32_t acc = 0;
+                    for (int j = 0; j < f.D; j++) {
+                        acc += (int32_t)r[j] * (int32_t)x[j];
+                    }
+                    sg[oi] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
+                }
+            }
+            gesh_bank_build_class_mean(&bank_rand, proj, f.train_lbl,
+                                        f.n_train, f.C);
+            free(proj);
+        }
+        int rand_pct = eval_test_accuracy(R_rand, &bank_rand,
+                                            f.test, f.test_lbl, f.n_test,
+                                            f.sig_dim, f.D, 1);
+
+        /* Trained from same init. */
+        m4t_trit_t* R_trained = malloc((size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+        memcpy(R_trained, R_rand, (size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+        gesh_bank_t bank_trained;
+        alloc_bank(&bank_trained, f.C, f.sig_dim);
+        gesh_train_config_t cfg = gesh_train_default();
+        cfg.n_epochs = 30;
+        cfg.n_flip_evals_per_epoch = 150;
+        cfg.batch_size = 96;
+        cfg.bank_refresh_every = 75;
+        cfg.batch_refresh_every = 50;
+        cfg.seed = train_seeds[s];
+
+        int rc = gesh_train_lattice_update(
+            R_trained, &bank_trained, f.train, f.train_lbl, f.n_train, f.C,
+            f.sig_dim, f.D, 1, &cfg);
+        if (rc < 0) {
+            printf("FAIL multi_seed_stability: train returned -1 at seed %d\n", s);
+            free(R_rand); free_bank(&bank_rand);
+            free(R_trained); free_bank(&bank_trained); free_fixture(&f);
+            return 1;
+        }
+        int trained_pct = eval_test_accuracy(R_trained, &bank_trained,
+                                               f.test, f.test_lbl, f.n_test,
+                                               f.sig_dim, f.D, 1);
+        int gain = trained_pct - rand_pct;
+        total_gain += gain;
+        printf("INFO multi_seed s=%d: random=%d%% trained=%d%% gain=%+d\n",
+               s, rand_pct, trained_pct, gain);
+
+        free(R_rand); free_bank(&bank_rand);
+        free(R_trained); free_bank(&bank_trained);
+    }
+
+    free_fixture(&f);
+
+    /* Average gain across 3 seeds must be positive AND at least +3pp.
+     * This is a regression bound (M3): catches systematic
+     * "training-doesn't-help" regimes. */
+    int avg_gain = total_gain / n_seeds;
+    if (avg_gain < 3) {
+        printf("FAIL multi_seed_stability: avg gain %d pp < 3 pp threshold\n",
+               avg_gain);
+        return 1;
+    }
+    return 0;
+}
+
+/* M3 / regression: training must not catastrophically degrade. With
+ * intra-epoch refresh enabled, training should produce a valid R (not
+ * one that's strictly worse than random by a large margin). */
+static int test_no_catastrophic_regression(void) {
+    fixture_t f = make_fixture(0xdeadbeefu, 0x77777777u, 0x88888888u,
+                                1000, 300, 16);
+
+    m4t_trit_t* R_rand = malloc((size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+    gesh_init_random_projection(R_rand, f.sig_dim, f.D, 0xb22bu);
+
+    /* Build a rand-baseline bank. */
+    gesh_bank_t bank_rand;
+    alloc_bank(&bank_rand, f.C, f.sig_dim);
+    {
+        m4t_trit_t* proj = malloc(
+            (size_t)f.n_train * (size_t)f.sig_dim * sizeof(m4t_trit_t));
+        for (int i = 0; i < f.n_train; i++) {
+            const m4t_trit_t* x = f.train + (size_t)i * f.D;
+            m4t_trit_t* sg = proj + (size_t)i * f.sig_dim;
+            for (int oi = 0; oi < f.sig_dim; oi++) {
+                const m4t_trit_t* r = R_rand + (size_t)oi * f.D;
+                int32_t acc = 0;
+                for (int j = 0; j < f.D; j++) {
+                    acc += (int32_t)r[j] * (int32_t)x[j];
+                }
+                sg[oi] = (acc > 0) ? 1 : (acc < 0) ? -1 : 0;
+            }
+        }
+        gesh_bank_build_class_mean(&bank_rand, proj, f.train_lbl,
+                                    f.n_train, f.C);
+        free(proj);
+    }
+    int rand_pct = eval_test_accuracy(R_rand, &bank_rand,
+                                        f.test, f.test_lbl, f.n_test,
+                                        f.sig_dim, f.D, 1);
+
+    /* Train. */
+    m4t_trit_t* R_trained = malloc((size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+    memcpy(R_trained, R_rand, (size_t)f.sig_dim * f.D * sizeof(m4t_trit_t));
+    gesh_bank_t bank_trained;
+    alloc_bank(&bank_trained, f.C, f.sig_dim);
+    gesh_train_config_t cfg = gesh_train_default();
+    cfg.n_epochs = 20;
+    cfg.n_flip_evals_per_epoch = 100;
+    cfg.batch_size = 96;
+    cfg.bank_refresh_every = 50;
+    cfg.batch_refresh_every = 50;
+    cfg.seed = 0xc7c7c7c7u;
+
+    int rc = gesh_train_lattice_update(
+        R_trained, &bank_trained, f.train, f.train_lbl, f.n_train, f.C,
+        f.sig_dim, f.D, 1, &cfg);
+    if (rc < 0) {
+        printf("FAIL no_catastrophic_regression: training failed\n");
+        free(R_rand); free_bank(&bank_rand);
+        free(R_trained); free_bank(&bank_trained); free_fixture(&f);
+        return 1;
+    }
+    int trained_pct = eval_test_accuracy(R_trained, &bank_trained,
+                                           f.test, f.test_lbl, f.n_test,
+                                           f.sig_dim, f.D, 1);
+
+    free(R_rand); free_bank(&bank_rand);
+    free(R_trained); free_bank(&bank_trained); free_fixture(&f);
+
+    /* Catastrophic regression bound: trained must not be more than 5pp
+     * worse than random. The sig_dim=64 anomaly observed in the sweep
+     * was −2pp; this gate is calibrated to catch a true regression
+     * (e.g., training breaks and produces near-chance accuracy). */
+    if (trained_pct < rand_pct - 5) {
+        printf("FAIL no_catastrophic_regression: random=%d%% trained=%d%% "
+               "(regression %d pp exceeds 5 pp threshold)\n",
+               rand_pct, trained_pct, rand_pct - trained_pct);
+        return 1;
+    }
+    printf("INFO no_catastrophic_regression: random=%d%% trained=%d%%\n",
+           rand_pct, trained_pct);
+    return 0;
+}
+
 int main(void) {
-    if (test_trains_reduces_loss())   return 1;
-    if (test_beats_random_baseline()) return 1;
-    if (test_train_determinism())     return 1;
-    printf("gesh_train: all 3 tests passed\n");
+    if (test_trains_reduces_loss())          return 1;
+    if (test_beats_random_baseline())        return 1;
+    if (test_train_determinism())            return 1;
+    if (test_multi_seed_stability())         return 1;
+    if (test_no_catastrophic_regression())   return 1;
+    printf("gesh_train: all 5 tests passed\n");
     return 0;
 }

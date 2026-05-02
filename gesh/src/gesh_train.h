@@ -42,19 +42,52 @@ typedef struct {
     int n_flip_evals_per_epoch;  /* number of (i, j) positions to evaluate per epoch */
     int n_epochs;                 /* total epochs */
     int batch_size;               /* samples per error-evaluation batch */
+
+    /* Intra-epoch refresh frequencies. Both default to 0, meaning
+     * "refresh once per epoch" (the original behavior). Set to a
+     * positive K to refresh every K flips within the epoch. Smaller K
+     * gives a less-stale optimization landscape at higher per-flip
+     * cost.
+     *   bank_refresh_every — fixes the stale-bank issue (H1 in red-team).
+     *   batch_refresh_every — fixes per-epoch batch overfitting (H2). */
+    int bank_refresh_every;
+    int batch_refresh_every;
+
+    /* Early stopping. Halt training if no batch-error improvement for
+     * `early_stop_patience` consecutive epochs. 0 = disabled. */
+    int early_stop_patience;
+
+    /* Initial trit distribution for `gesh_init_random_projection_balanced`
+     * (does NOT affect `gesh_init_random_projection`, which always uses
+     * ±1 for backwards compatibility). 0 = balanced ±1/0; 1 = sign-only. */
+    int init_balanced;
+
     int log_per_epoch;            /* 1 = print per-epoch summary to stderr, 0 = silent */
-    uint32_t seed;                /* RNG for trit-position sampling and batch selection */
+
+    /* Seed for trit-position sampling and batch selection. NOTE: 0 is a
+     * VALID seed and will be used as-is (no fallback to a default). */
+    uint32_t seed;
 } gesh_train_config_t;
 
 /* Default config for Phase A.2 measurements. */
 gesh_train_config_t gesh_train_default(void);
 
-/* Initialize R with random ±1 ternary values. (Phase A.2 init: no zeros,
- * for maximum information per trit. PCA-init or variance-ranked init are
- * future variants gated on whether random init is the bottleneck.)
+/* Initialize R with random ±1 ternary values (no zeros, for maximum
+ * information per trit at init).
  *
- * R: [sig_dim × input_dim] unpacked ternary, caller-allocated. */
+ * R: [sig_dim × input_dim] unpacked ternary, caller-allocated.
+ * seed: 0 is a valid seed and used as-is. */
 void gesh_init_random_projection(
+    m4t_trit_t* R,
+    int sig_dim, int input_dim,
+    uint32_t seed
+);
+
+/* Initialize R with balanced random ternary (-1, 0, +1 each with prob
+ * ~1/3). Allows lattice update to reach zero values without traversing
+ * a flip; useful when the underlying projection has signal-free dims
+ * the optimizer should learn to gate out. */
+void gesh_init_random_projection_balanced(
     m4t_trit_t* R,
     int sig_dim, int input_dim,
     uint32_t seed
