@@ -4,9 +4,9 @@ Lattice-native routing layer over a frozen ternary bank. Sits atop libm4t. The s
 
 ## Status
 
-**Phase A.1 — forward pass + synthetic benchmark.** Bank construction, ternary projection, top-k tile retrieval, k-NN vote classification. Untrained; tests the pipeline end-to-end on a synthetic prototype-classification task.
+**Phase A.1 — forward pass + synthetic benchmark — ONLINE.** Bank construction, ternary projection, top-k tile retrieval, k-NN vote classification. Tests the pipeline end-to-end on a synthetic prototype-classification task. Hardened by red-team remediation (13 findings, 10 fixed, 3 deferred).
 
-**Phase A.2 (next) — lattice update training.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry.
+**Phase A.2 — lattice update training — ONLINE.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry. **Measured: lattice update on a 64→32 ternary projection beats random init by +11pp on the synthetic benchmark, and beats Phase A.1's 64-dim identity projection (69%) using half the dims (73%).**
 
 **Phase B+ (gated)** — Global stage, MTFP4 escalation, etc. Each phase gated on a measured failure mode of the prior phase.
 
@@ -73,14 +73,24 @@ Phase A.1's untrained Hamming-NN baseline on the synthetic task tells us:
 - **Random-projection floor:** with random R, what accuracy does Gesh hit? This is the floor that lattice-update must beat in Phase A.2.
 - **PCA-init floor:** with PCA-on-training-data init for R, what accuracy? This is the upper bound of what Phase A's *initialization* can give without training; the lattice-update gain is measured against it.
 
-## What Phase A.2 will add
+## What Phase A.2 added (now ONLINE)
 
-Lattice-update coordinate descent on R:
-- Per step: sample K random trit positions in R; for each, compute loss delta with the trit flipped (forward pass on a batch); accept flips that reduce loss.
-- Loss: classification error (or summed Hamming distance to predicted-correct-class tile).
-- Convergence: track loss-per-epoch; stop on plateau.
+Lattice-update coordinate descent on R, in `src/gesh_train.{h,c}`:
 
-No STE. No shadow parameters. No Gumbel-softmax. The projection IS ternary; the optimization walks the lattice directly.
+- **Per epoch:** sample a fresh training batch (with replacement); compute baseline classification error; then evaluate `n_flip_evals_per_epoch` random trit positions in R. For each position, try the two non-current ternary values; apply the flip that reduces error (or revert).
+- **End-of-epoch:** rebuild bank from current R (the bank reflects the post-flip projection space).
+- **Loss:** classification error count on the batch. Discrete; matches the discrete optimization shape.
+- **Init:** `gesh_init_random_projection` writes random ±1 ternary R. PCA-init or variance-ranked init are deferred — random init turned out to be sufficient on the synthetic benchmark.
+
+No STE. No shadow parameters. No Gumbel-softmax. The projection is ternary; the optimization walks the lattice directly.
+
+**Measurement (prototype classification, D=64, K=16 informative + 48 noise, 10% per-trit noise, sig_dim=32, n_train=2000, n_test=500):**
+- Random R baseline (untrained): **62%**
+- Trained R (lattice update, 50 epochs × 200 flips, batch=128): **73%**
+- Gain: **+11 percentage points** over random init
+- Beats Phase A.1's identity-projection baseline (69%) using half the dims.
+
+The substrate-claim probe at Phase A scope: routing-first base-3 with lattice-native training improves over random projection on a task with structure that random doesn't capture. The mechanism works.
 
 ## Open question being deferred
 

@@ -14,6 +14,10 @@ Ground-zero rebuild **complete through Tier 3**. The substrate ships its full ro
 - **Tier 3b — SDOT MTFP4 matmul + cell-width conversions.** `m4t_mtfp4_sdot_matmul_bt` (Case W per §8.4: exact by construction up to `M4T_SDOT_K_MAX_EXACT = 14,528,268`), plus widen/narrow conversions.
 - **Tier 3c — MTFP19 × packed-ternary matmul** (`m4t_mtfp_ternary_matmul_bt`). NEON-accelerated, int64 accumulator, Case S saturating store with optional flag tracking.
 
+**Gesh consumer (substrate's first measured consumer):**
+- **Phase A.1 — forward pass + synthetic benchmark.** Bank construction, ternary projection, top-k tile retrieval, k-NN vote classification.
+- **Phase A.2 — lattice-update training.** Coordinate descent over R's ternary trits, no STE. **+11pp gain over random init** on the synthetic prototype-classification benchmark; beats Phase A.1's identity-projection baseline using half the dims.
+
 Each kernel layer was red-teamed adversarially after build; remediation cycles caught silent invariant violations, test coverage gaps, and spec deviations before they could land in a consumer. Full trail in `journal/`.
 
 The prior implementation is preserved on disk in `01MAY26_archived/` (gitignored) as reference. The audit that motivated the reset is in `01MAY26_archived/REVIEWED.md`. The substrate's complete narrative is in [`CHANGELOG.md`](CHANGELOG.md).

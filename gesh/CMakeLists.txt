@@ -20,6 +20,7 @@ set_target_properties(gesh_bench PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(gesh STATIC
     src/gesh_bank.c
     src/gesh_forward.c
+    src/gesh_train.c
 )
 target_include_directories(gesh PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -41,4 +42,8 @@ if(GESH_BUILD_TESTS)
     add_executable(test_gesh_forward tests/test_gesh_forward.c)
     target_link_libraries(test_gesh_forward PRIVATE gesh gesh_bench)
     add_test(NAME gesh_forward COMMAND test_gesh_forward)
+
+    add_executable(test_gesh_train tests/test_gesh_train.c)
+    target_link_libraries(test_gesh_train PRIVATE gesh gesh_bench)
+    add_test(NAME gesh_train COMMAND test_gesh_train)
 endif()

@@ -147,6 +147,62 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Gesh Phase A.2: lattice-update training online]
+
+The substrate's first measured consumer learns. No STE, no shadow parameters, no Gumbel-softmax — coordinate descent over R's ternary trits with bit-exact loss deltas. The lattice IS the geometry; the optimization walks it directly.
+
+### Added
+- **`gesh/src/gesh_train.{h,c}`** — `gesh_train_lattice_update` (training entry point), `gesh_init_random_projection` (random ±1 ternary init), `gesh_train_default` (config helper). Per epoch: sample fresh batch → compute baseline error → evaluate `n_flip_evals_per_epoch` random trit positions, applying the flip that reduces error → rebuild bank end-of-epoch.
+- **`gesh/tests/test_gesh_train.c`** — three properties: `trains_reduces_loss` (training reduces error count meaningfully), `beats_random_baseline` (trained R outperforms random R on the test set), `train_determinism` (same seed → same final R + bank).
+- Aliasing assertions on `gesh_train_lattice_update` per the new CONTRIBUTING.md checklist item.
+
+### Measured (synthetic prototype classification, D=64 with K=16 informative + 48 noise, 10% per-trit noise, sig_dim=32)
+
+| Variant | Test accuracy |
+|---|---|
+| Random R (untrained, sig_dim=32) | **62%** |
+| Identity projection (Phase A.1, all 64 dims) | 69% |
+| Trained R (50 epochs × 200 flips, batch=128, sig_dim=32) | **73%** |
+
+Gain over random init: **+11 percentage points.** Trained R beats Phase A.1's identity baseline using half the dims. The substrate-claim probe at Phase A scope: lattice-native training works.
+
+### Build
+- 12/12 ctest binaries green from clean rebuild under `-Werror`.
+- New library file: `libgesh.a` now includes `gesh_train.o`.
+- Discipline: zero new substrate primitives. Training composes from existing forward pass + bank rebuild + integer error counting. No floats anywhere in the training loop.
+
+### Notes
+- PCA-init / variance-ranked init were design candidates for Phase A.2; random init was tried first per discipline ("simplest thing that could work"). Random init reached +11pp, sufficient for Phase A; PCA-init becomes a Phase B+ optimization gated on whether init quality is the bottleneck.
+- Lattice update accepts only loss-reducing flips. No simulated annealing, no escape from local minima yet — if convergence stalls before adequate accuracy on harder tasks, escalate to smarter move-acceptance.
+
+## [2026-05-01 — Gesh Phase A.1 red-team remediation]
+
+13 findings (2 high, 5 medium, 6 low) on the Phase A.1 build; 10 fixed in this commit, 3 deferred with rationale. Recorded in `journal/gesh_phase_a1_redteam.md`.
+
+Aliasing assertions added to `gesh_forward_classify` (out_predictions vs queries / bank tiles / projection R). Label-positivity assert added in the n_classes derivation. `sig_dim > 0` assert. Dead variables (`class_counts`, `n_classes_seen`) removed. Three new tests: determinism, aliasing-safety, n_queries=0. Class-balance test tolerance tightened ±25%→±15%. README/code drift on `m4t_route_threshold_extract` corrected. `gesh_bank.h` future-variants clarified per phase.
+
+CONTRIBUTING.md "post-commit doc-currency checklist" extended with: "Aliasing assertions on every writable output." Discipline transfer across architectural layers — substrate patterns don't auto-propagate to consumer code; checklists are the mitigation.
+
+## [2026-05-01 — Gesh Phase A.1: forward pass + synthetic benchmark]
+
+The substrate's first measured consumer. Phase A.1 ships the forward pipeline end-to-end on a synthetic prototype-classification task, no learned projection update yet.
+
+**Library structure (`gesh/`):**
+- `bench/synth_proto.{h,c}` — synthetic benchmark generator. C=10 classes, D=64 dims, K=16 informative + 48 noise, 10% per-trit noise. Closed-form deterministic. Pure integer arithmetic.
+- `src/gesh_bank.{h,c}` — class-conditional ternary mean bank. One tile per class.
+- `src/gesh_forward.{h,c}` — forward pass: optional ternary projection of query → Hamming distance to all bank tiles → top-k smallest → class-vote prediction. Composes `m4t_popcount_dist`. No new substrate primitives.
+
+**Phase A.1 baseline measurements:**
+- Identity projection on clean signal: 82%
+- Identity projection on 10% noise (the realistic baseline): 69%
+- Random ternary 64→32 projection on 10% noise: 61%
+
+**Discipline outcome:** zero new substrate primitives.
+
+**LMM cycle artifacts (`journal/gesh_design_*`):**
+- RAW + NODES + REFLECT + SYNTHESIZE: scoped Gesh against task demand (not attention's surface area).
+- CLOSEOUT: owner observation surfaced "the lattice IS the geometry." STE dropped — base-2 fix for a problem that doesn't exist in the lattice. Three Gs collapsed to two (Lattice-Geometric + deferred Global). Phase A.1 became forward-pass-only on a prototype-classification probe.
+
 ## [2026-05-01 — end-to-end doc-currency remediation]
 
 End-to-end adversarial review of the rebuilt codebase (not the kernels alone) surfaced 11 documentation-drift findings (3 high, 5 medium, 4 low). All remediated in this commit. The kernels were red-teamed thoroughly; the documentation ensemble was not, and stale claims accumulated across the four landing commits. **No code changes** — pure documentation update plus one new journal entry.
