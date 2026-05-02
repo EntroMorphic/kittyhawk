@@ -1,2 +1,8 @@
 # Default reviewer for everything.
+#
+# NOTE: the username below is the project owner's GitHub handle. CODEOWNERS
+# only enforces if the username has read access to this repo (currently
+# hosted under EntroMorphic/kittyhawk). If branch-protection rules require
+# CODEOWNERS review and this username doesn't resolve, update to a username
+# that does — otherwise PR merges will block on a non-existent reviewer.
 *       @anjaustin

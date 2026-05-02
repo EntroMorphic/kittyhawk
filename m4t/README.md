@@ -29,7 +29,7 @@ MTFP — Multi-Trit Floating Point, base 3. A value is `mantissa × 3^exponent`.
 
 Mantissa bound: `(3^trits − 1) / 2`. No binary floating point at runtime.
 
-## Live surface — Tiers 1 + 2
+## Live surface — Tiers 1 + 2 + 3
 
 ### Trit packing (`m4t_trit_pack.h`) — Tier 1
 
@@ -103,9 +103,9 @@ ctest --test-dir build
 
 Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets fail at CMake configure. `-Werror` is enabled.
 
-## Tests — Tiers 1 + 2 + 3a
+## Tests — Tiers 1 + 2 + 3
 
-Six test binaries. The first five use hand-derived integer golden values. The cross-exponent test uses a bit-exact `int64` reference at 10,000 samples × 6 properties. Zero float in any test path.
+Eight ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-3 tests use bit-exact `int64` reference implementations as the oracle (no fp in any test path).
 
 | Binary | Coverage |
 |---|---|
@@ -115,8 +115,8 @@ Six test binaries. The first five use hand-derived integer golden values. The cr
 | `test_m4t_mtfp` | clamp64, vec_zero, block_add/sub (NEON + aliasing + saturation), vec_* (NEON-only / scalar-only / NEON+tail) |
 | `test_m4t_route` | threshold_extract, distance_batch, topk_abs, apply_signed, signature_update, end-to-end mini routing pass, `decisions_emit_coverage` |
 | `test_m4t_mtfp_accum_aligning` | 14 properties (10k samples per random property + curated boundary cases): correctness, invariant, determinism, per-block flags, trailing-block-bits-zero, long-sequence (K=256), boundary, n=0, wrapper, roundtrip, dst==a aliasing, NULL out_e, sub-via-negation, sub-self. All bit-exact vs an int64 reference. |
-| `test_m4t_mtfp4` | 10 tests: clamp boundaries, SDOT golden 2×4×3, SDOT random vs int64 reference (200 trials at K up to 1024), SDOT extreme bounds, zero-dim, widen exact, narrow round, narrow saturate, narrow flags, widen-narrow roundtrip. |
-| `test_m4t_ternary_matmul` | 6 tests: golden 2×4×3, random vs reference (200 trials), saturation clamp, saturation flags, zero-dim, determinism. |
+| `test_m4t_mtfp4` | 12 tests: clamp boundaries, SDOT golden 2×4×3, SDOT random vs int64 reference (200 trials, K up to 1024), SDOT high-magnitude (K=4096), SDOT long-K stress (K=1M vs int64 reference), zero-dim, widen exact, narrow round, narrow saturate, narrow flags, **narrow property** (10k random samples + boundary-targeted), widen-narrow roundtrip. |
+| `test_m4t_ternary_matmul` | 9 tests: golden 2×4×3, random vs reference (200 trials), long-K stress (K=1M), saturation clamp, saturation flags, **partial-block** (M·N=5 trailing-bits-stay-zero), **invalid trit code** (0b11 reserved → identical NEON/scalar handling), zero-dim, determinism. |
 
 ## What's not here
 

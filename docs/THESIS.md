@@ -28,15 +28,17 @@ Two parts. Both are falsifiable.
 
 The previous cycle measured a 60pp gap between random-U + sign-only routing and learned-U routing on a 10-class toy. That measurement is consistent with Part B but does not establish it; it establishes that *some* routing structure beats *no* routing structure on that toy. The claim that routing scales as a thesis-defining principle remains open.
 
-## Open questions for the rebuild
+## Closed questions (substrate-side)
 
-1. **Does cross-block-exponent MTFP arithmetic earn its complexity?** The audit identified that the kernel is named-but-unbuilt and the substrate operates as fixed-point-with-conversions until it lands. The rebuild's tier 3 (see [`REMEDIATION_PLAN.md`](REMEDIATION_PLAN.md)) decides this only when a consumer demands it.
+1. ~~Does cross-block-exponent MTFP arithmetic earn its complexity?~~ **CLOSED 2026-05-01.** Built ahead of measured consumer demand under owner authorization. The kernel ships in `m4t_mtfp_vec_accum_aligning` with 14 property tests; the substrate is now floating-point in base 3 at per-tensor exponent granularity. Whether any future consumer's call pattern actually exercises the cross-exp path is a usage-study question, not a substrate question. See `journal/xexpo_design_*` and `journal/xexpo_kernel_redteam.md`.
 
-2. **What benchmark is the substrate's right arbiter?** MNIST and Fashion-MNIST are base-2-framed. CIFAR-10 hits a representation tax that base-3 alone does not close. Go-position phase classification was a strong base-3-native signal. The rebuild should pick its arbiter deliberately rather than defaulting to image canon.
+## Open questions for the consumer-layer rebuild
 
-3. **Is the SDOT-native MTFP4 path the load-bearing primitive?** The audit's strongest "MTFP-as-hardware" claim sits at MTFP4 × ternary → MTFP19 (Case W). If a routing consumer can drive this kernel into a benchmark win, that is the substrate-claim's cleanest demonstration.
+1. **What benchmark is the substrate's right arbiter?** MNIST and Fashion-MNIST are base-2-framed. CIFAR-10 hits a representation tax that base-3 alone does not close. Go-position phase classification was a strong base-3-native signal. The consumer-layer rebuild should pick its arbiter deliberately rather than defaulting to image canon.
 
-4. **Does the LMM cycle methodology generalize beyond this codebase?** Auditing the prior implementation's journal showed 37 cycles, including self-revising closeouts and explicit substrate-discipline gates. The rebuild treats this as load-bearing methodology, not artifact.
+2. **Is the SDOT-native MTFP4 path the load-bearing primitive?** The substrate's strongest "MTFP-as-hardware" claim sits at MTFP4 × ternary → MTFP19 (Case W per §8.4). The kernel ships and is property-tested at K up to 1M. If a routing consumer can drive this kernel into a benchmark win, that is the substrate-claim's cleanest demonstration. Untested at the benchmark level until consumers come back online.
+
+3. **Does the LMM cycle methodology generalize beyond this codebase?** Auditing the prior implementation's journal showed 37 cycles, including self-revising closeouts and explicit substrate-discipline gates. The substrate rebuild added three more: `xexpo_design`, `xexpo_kernel_redteam`, `xexpo_spec_amend`, plus `m4t_matmul_redteam`. Each found issues a single pass would have missed. The pattern of same-author adversarial review-after-build appears robust within this project; cross-project generalizability is open.
 
 ## Re-read
 

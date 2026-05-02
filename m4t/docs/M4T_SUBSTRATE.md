@@ -1,7 +1,7 @@
 ---
 title: M4T Substrate Specification
-status: ground-zero rebuild (2026-04-14)
-supersedes: archive/m4t/docs/{M4T_CONTRACT,M4T_PIPELINE,M4T_BEYOND,M4T_REDTEAM,TRIT_LATTICE_LSH}.md
+status: ground-zero rebuild (2026-04-14); tier 1+2+3 IMPLEMENTED (2026-05-01)
+supersedes: prior-cycle M4T spec docs (preserved in `01MAY26_archived/m4t/docs/`)
 scope: the ternary-float compute substrate for Apple M-series (NEON + SDOT + TBL)
 ---
 
@@ -13,7 +13,11 @@ This is the canonical design document for the rebuild. Every decision here is tr
 
 ## 0. Status
 
-The prior M4T implementation collapsed Multi-Trit Floating Point into "multi-trit fixed-point with a shared global scale" and then adopted a zero-float crusade downstream of that collapse. This spec resets the substrate to its original intent: **MTFP is a base-3 floating-point system**, not a fixed-point integer representation. Files built under the fixed-point reading live in `archive/`. Routing primitives survive intact (`m4t_trit_*`, `m4t_route`, `m4t_ternary_matmul`, `m4t_mtfp4`). The numeric core (`m4t_mtfp.*`) will be rewritten to this spec.
+The prior M4T implementation collapsed Multi-Trit Floating Point into "multi-trit fixed-point with a shared global scale" and then adopted a zero-float crusade downstream of that collapse. This spec resets the substrate to its original intent: **MTFP is a base-3 floating-point system**, not a fixed-point integer representation.
+
+Tier 1 (pure base-3 layer), Tier 2 (route primitives + same-block-exponent MTFP19 arithmetic), and Tier 3 (cross-exponent accumulator + SDOT MTFP4 matmul + MTFP19 ternary matmul + cell-width conversions) all shipped 2026-05-01 under property-test coverage. Each tier was red-teamed adversarially; remediation cycles caught discipline issues and tightened the implementation. See `m4t/README.md` for the live surface and `journal/` for the cycle trail.
+
+The prior-cycle implementation is preserved in `01MAY26_archived/` (gitignored, on disk only) as reference material.
 
 ---
 
@@ -277,7 +281,13 @@ Explicitly out of scope. Consumer-layer concerns.
 - **GELU, softmax, argmax.** Dense-transformer nonlinearities. Archived with their LUTs; may return as routing-consumer primitives if needed.
 - **Training.** M4T is inference-substrate-only. Training artifacts live in the consumer.
 - **Threading.** Single-threaded at the opcode level. Parallelism is a consumer concern (no libdispatch, no pthreads).
-- **Binary floating-point.** Banned in every runtime kernel of `libm4t` and in every per-query / per-batch path of `libglyph`. Permitted in four bounded sites outside the runtime hot path: (1) build-time LUT generation (`archive/m4t/tools/m4t_lut_gen.c` — archived with its consumers, returns when a routing consumer demands smooth nonlinearities); (2) microbenchmark timing arithmetic (`m4t/tools/m4t_profile.c`, display-only ns/Gops conversions); (3) one-shot dataset ingestion at consumer startup (`src/glyph_dataset.c` float32 loaders for CIFAR-10-style dumps, converted to MTFP mantissas once and never touched again); (4) one-shot pair-IG LUT build in `tools/direct_lsh.c::build_ig_log_table` (`T[i] = round(i × log2(i) × SCALE)`, built once per consumer startup; per-query pair-IG re-rank is then pure integer arithmetic against the LUT). All four are compile-time-opt-in or startup-only; none execute per-query.
+- **Binary floating-point.** Banned in every runtime kernel of `libm4t` and in every per-query / per-batch path of any consumer above it. Permitted in four bounded categories outside the runtime hot path:
+  1. **Build-time LUT generation** for smooth nonlinearities (GELU/softmax tables). Returns with the consumer that demands them; the prior cycle's LUT generator is preserved in `01MAY26_archived/m4t/tools/`.
+  2. **Microbenchmark timing arithmetic** (display-only ns/Gops conversions in profiling tools). Tools tree returns when a profiling consumer demands it.
+  3. **One-shot dataset ingestion** at consumer startup (e.g. CIFAR-10 float32 loaders, converted to MTFP mantissas once and never touched again).
+  4. **One-shot LUT builds for integer-arithmetic-with-table primitives** (e.g. pair-IG `T[i] = round(i · log2(i) · SCALE)` built once at startup; per-query lookups are pure integer arithmetic against the LUT).
+
+  All four categories are compile-time-opt-in or startup-only; none execute per-query. The prior-cycle code that exercised each category is preserved in `01MAY26_archived/`; the current tree contains no consumer code, so no live float sites exist.
 
 ---
 
@@ -303,23 +313,22 @@ m4t/
     test_m4t_mtfp4.c
     test_m4t_ternary_matmul.c
     test_m4t_trit_pack.c
-  tools/
+  tools/                     — (DEFERRED in current tree; prior-cycle tools
+                                preserved in 01MAY26_archived/m4t/tools/. Returns
+                                when a profiling/golden-value consumer demands.)
     m4t_trit_golden.c        — enumerated golden-value tests
     m4t_size_check.sh        — .text budget enforcement
     m4t_profile.c            — hot-path throughput microbenchmark (SDOT/TBL/VCNT;
                                 sanctioned display-only float for ns/Gops conversion)
-    (m4t_lut_gen.c was moved to archive/m4t/tools/ alongside its archived
-     consumers; see archive/README.md)
+    (Prior-cycle m4t_lut_gen.c is preserved in 01MAY26_archived/m4t/tools/
+     alongside its consumers; returns when a routing consumer demands smooth
+     nonlinearities.)
   docs/
     M4T_SUBSTRATE.md         — this file
 
-src/                         — glyph wrapper headers (aliases over m4t)
-  glyph_types.h
-  glyph_trit_pack.h
-  glyph_route.h
-  glyph_ternary_matmul.h
-
-tests/                       — glyph wrapper tests
+(Higher-layer wrapper headers and tests — glyph_types.h, glyph_trit_pack.h,
+ glyph_route.h, glyph_ternary_matmul.h, plus consumer-side tests — return when
+ the consumer-side rebuild starts. Prior-cycle versions in 01MAY26_archived/.)
   test_glyph_wrapper.c
 tools/
   mnist_trit_lattice.c       — LSH routing tool (primary benchmark)
@@ -419,8 +428,8 @@ For readers tracing a spec section back to the code that realizes it.
 | 9 | Cache and prefetch (128 B line = 8 blocks) | Design constraint; no explicit enforcement needed in code |
 | 10 | Width conversions | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_to_mtfp19`, `m4t_mtfp19_to_mtfp4`) |
 | 11 | Routing-first surface | `m4t/src/m4t_route.{c,h}` (the five primitives), `m4t/src/m4t_ternary_matmul.{c,h}` (LSH-projection primitive) |
-| 12 | What is NOT in M4T | `archive/` (see `archive/README.md`) |
-| 13 | File organization | `m4t/src/`, `m4t/tests/`, `m4t/tools/` — see `m4t/README.md` |
+| 12 | What is NOT in M4T | Prior-cycle artifacts preserved in `01MAY26_archived/` (gitignored, on-disk only) |
+| 13 | File organization | `m4t/src/`, `m4t/tests/` — see `m4t/README.md`. `m4t/tools/` deferred until a profiling consumer demands it. |
 | 14.1 | Logical block size (OPEN) | Deferred; logical block = hardware block (1:1) |
 | 14.2 | Cross-block add policy (IMPLEMENTED 2026-05-01) | `m4t_mtfp_vec_accum_aligning` + pairwise wrapper; round-to-nearest; SATURATED+ROUNDED flag bits; named opt-in retains "widen-don't-round" as the default |
 | 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |

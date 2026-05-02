@@ -3,7 +3,8 @@
  *
  * Each test packs all 9 valid trit-pair combinations, runs the op,
  * unpacks, and checks against hand-derived expected values from the
- * truth tables in m4t/tools/m4t_trit_golden.c.
+ * prior-cycle truth-table enumeration (preserved in
+ * 01MAY26_archived/m4t/tools/m4t_trit_golden.c).
  *
  * Also tests a 65-trit vector (exercises NEON block + scalar tail).
  */

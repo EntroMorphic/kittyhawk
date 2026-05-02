@@ -25,8 +25,10 @@
  * Indexed by (a_code << 2) | b_code. Output is the result's 2-bit code.
  * Code mapping: 0 → trit 0, 1 → trit +1, 2 → trit -1, 3 → reserved.
  *
- * Derived from m4t/tools/m4t_trit_golden.c truth tables, then converted
- * from signed trit values to 2-bit codes.
+ * Derived from prior-cycle trit golden-value enumeration tools (preserved
+ * in 01MAY26_archived/m4t/tools/m4t_trit_golden.c; returns when a tools
+ * consumer demands it). Tables converted from signed trit values to 2-bit
+ * codes.
  */
 
 static const uint8_t LUT_MUL[16] __attribute__((aligned(16))) = {

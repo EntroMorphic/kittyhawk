@@ -147,6 +147,32 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-01 — end-to-end doc-currency remediation]
+
+End-to-end adversarial review of the rebuilt codebase (not the kernels alone) surfaced 11 documentation-drift findings (3 high, 5 medium, 4 low). All remediated in this commit. The kernels were red-teamed thoroughly; the documentation ensemble was not, and stale claims accumulated across the four landing commits. **No code changes** — pure documentation update plus one new journal entry.
+
+### Changed (documentation)
+
+- **`README.md` Status section (H1):** rewrote from "rebuild starts from kernels" (stale, predicting future work) to a complete tier-by-tier status reflecting that tier 1+2+3 all shipped under property-test coverage. Added a journal-cycle subsection to the Documentation table.
+- **`m4t/README.md` test surface (H2):** "Six test binaries" → "Eight ctest binaries"; "10 tests" → "12 tests" for `test_m4t_mtfp4`; "6 tests" → "9 tests" for `test_m4t_ternary_matmul`; "Live surface — Tiers 1 + 2" → "Tiers 1 + 2 + 3"; "Tests — Tiers 1 + 2 + 3a" → "Tiers 1 + 2 + 3". Test-table rows expanded to enumerate the new test cases added during the prior red-team remediations.
+- **`m4t/docs/M4T_SUBSTRATE.md` broken paths (H3):** frontmatter `supersedes` line now references `01MAY26_archived/m4t/docs/` rather than the broken `archive/` path; §0 status updated to reflect tier 1+2+3 completion; §12 binary-float section rewritten to describe sanctioned categories rather than path-specific links to archived files; §13 file-organization tree clarifies that `m4t/tools/` is deferred and prior-cycle versions are in `01MAY26_archived/`; §17 cross-reference rows for §12 and §13 updated.
+- **`m4t/src/m4t_types.h`, `m4t/src/m4t_trit_ops.c`, `m4t/tests/test_m4t_trit_ops.c`:** stale `m4t/tools/...` path references rewritten to point at `01MAY26_archived/m4t/tools/...` or rephrased to be path-free. No code changes; comment hygiene only.
+- **`docs/THESIS.md` (M1):** "Does cross-block-exponent MTFP arithmetic earn its complexity?" moved from "Open questions" to a new "Closed questions (substrate-side)" section noting it shipped 2026-05-01. Two remaining open questions (benchmark arbiter, SDOT-as-load-bearing) reframed for the consumer-layer rebuild. Added LMM-methodology note tracking the four cycles run during the substrate rebuild.
+- **`docs/REMEDIATION_PLAN.md` (M2):** status header changed from "REVISED — red-team findings folded in" to "EXECUTED 2026-05-01 — owner authorization overrode the consumer-discovery cycle gate." Added a status note at the top of the body pointing readers to CHANGELOG for the actual narrative. Plan body preserved as historical artifact.
+- **`docs/FINDINGS.md` (M3):** added Axis 0 "Substrate kernel correctness (regression guard)" with the 8-test inventory. Status updated from "ground-zero (no measurements yet)" to "substrate complete; no benchmark axes yet." Made explicit that this is a regression guard, not a substrate-claim measurement.
+- **`.github/CODEOWNERS` (M5):** added a NOTE explaining the username may need to be verified against the EntroMorphic/kittyhawk repo's actual reviewer set.
+
+### Added
+
+- **`journal/m4t_matmul_spec_amend.md` (M4):** lightweight synthesize-only cycle documenting the §8.4 / §8.5 / §17 cross-reference table amendments that landed alongside tier-3b/3c. Companion to `journal/xexpo_spec_amend.md` (which covered §14.2 + §14.4). All substrate-spec edits in this rebuild are now journal-traced per principle 7.
+- **`CONTRIBUTING.md` "Post-commit doc-currency checklist":** an 8-item checklist for sweeping the documentation ensemble after any kernel / spec / status-flipping commit. Captures the methodology lesson from this end-to-end red-team — kernel red-teams catch kernel issues, documentation red-teams catch ensemble drift, both are needed.
+
+### Build
+
+No code changes. 8/8 ctest binaries remain green; rebuilt to verify no documentation edit accidentally touched a kernel.
+
+---
+
 ### Changed
 - (none — ground zero state; tiers 1 and 2 are first landings.)
 

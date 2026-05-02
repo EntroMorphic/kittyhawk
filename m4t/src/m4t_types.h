@@ -10,7 +10,9 @@
  * full contract.
  *
  * No binary floating point (float, double, float16, bfloat16) anywhere in
- * libm4t. Binary float appears only at build time, in m4t/tools/m4t_lut_gen.c.
+ * libm4t. Sanctioned non-runtime float sites are enumerated in
+ * m4t/docs/M4T_SUBSTRATE.md §12; the current tree contains no consumer
+ * code so none of those sites is live.
  * int8/int16/int32/int64 appear only as mantissa containers at clean trit
  * boundaries — never as binary quantization types.
  *

@@ -43,3 +43,21 @@ The canonical numeric-system contract is [`m4t/docs/M4T_SUBSTRATE.md`](m4t/docs/
 - Keep PRs scoped: one cycle of work, one logical change.
 - The PR description should explain *why* the change is needed and what it would mean if it didn't land.
 - Negative-result PRs are welcome. Document the cycle, the hypothesis, the measurement, and the falsification. These are findings.
+
+## Post-commit doc-currency checklist
+
+After any commit that lands a kernel, a spec change, or a status flip, sweep the documentation ensemble for staleness. Two prior end-to-end red-teams in this project caught ~10 cross-document drift issues each (stale test counts, stale section headings, broken path references, "ONLINE" sections still labeled "pending consumer"). Each issue was small in isolation; their accumulation across files produced a misleading first impression for any new reader.
+
+Before merging, audit:
+
+- [ ] **Top-level `README.md`** — does the Status section still describe the current state? Does the Documentation table reference any new docs?
+- [ ] **`m4t/README.md`** — do test counts and section headings reflect the actual test surface? Are tier labels current?
+- [ ] **`m4t/docs/M4T_SUBSTRATE.md`** — are §17 cross-reference rows still pointing to the right files? Do path references resolve in the *current* tree (not the archived tree)? If a section mentions `archive/...`, verify it should say `01MAY26_archived/...` or be rephrased to drop the path.
+- [ ] **`docs/THESIS.md`** — are any "open questions" now closed? Have closed ones been moved to a "closed questions" section rather than left misleading?
+- [ ] **`docs/REMEDIATION_PLAN.md` and similar plans** — does the document's status header match the executed reality? If not, add a status note at the top that points readers to the CHANGELOG for the actual narrative.
+- [ ] **`docs/FINDINGS.md`** — are new measurements axis-recorded? Are stale "(none yet)" claims still accurate?
+- [ ] **`CHANGELOG.md`** — is the most recent entry complete? Does it cite the journal cycle that produced it?
+- [ ] **Source comments** — do any `/* see m4t/tools/foo.c */` or similar references still resolve? Path-broken comments mislead future readers.
+- [ ] **Spec amendments → journal cycles.** Per principle 7, every substantive `M4T_SUBSTRATE.md` edit needs a `journal/*_spec_amend.md` cycle (lightweight is fine; full RAW→NODES→REFLECT→SYNTHESIZE only when amending substrate semantics).
+
+This checklist is not a hook (the harness can't run it for you). It's a discipline reminder: code red-teams catch kernel issues; documentation red-teams catch *ensemble* drift. Both are needed.

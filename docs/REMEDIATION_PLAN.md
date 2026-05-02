@@ -2,11 +2,13 @@
 title: Substrate Remediation Plan — Tiers 2 & 3
 date: 2026-05-01
 scope: m4t kernel rebuild after the ground-zero reset
-status: REVISED — red-team findings folded in (see REMEDIATION_PLAN_REDTEAM.md)
-companions: 01MAY26_archived/REVIEWED.md · docs/REMEDIATION_PLAN_REDTEAM.md · m4t/docs/M4T_SUBSTRATE.md · NORTH_STAR.md
+status: EXECUTED 2026-05-01 — owner authorization overrode the consumer-discovery cycle gate after tier 2; tier 3 built directly under the named-consumer-demand reading of principle 5. All tiers shipped, all kernels red-teamed (see `journal/xexpo_kernel_redteam.md`, `journal/m4t_matmul_redteam.md`). This document is preserved as the original plan; the actual narrative is in `CHANGELOG.md`.
+companions: 01MAY26_archived/REVIEWED.md · docs/REMEDIATION_PLAN_REDTEAM.md · m4t/docs/M4T_SUBSTRATE.md · NORTH_STAR.md · CHANGELOG.md
 ---
 
 # Remediation Plan
+
+> **Status note (2026-05-01).** This plan was written before tier 3 began. Its body describes a consumer-discovery cycle that would gate tier 3 against measured consumer demand. **That gate was overridden** by owner direction ("the consumer wall was holding back progress"), which read principle 5 as "named consumer demand suffices, not measured." Tier 3a, 3b, and 3c all shipped under that reading, with substrate-spec re-reads honoring principle 7 and adversarial red-team passes after each kernel landed. The body below is preserved as the original plan; the **CHANGELOG** records what actually happened.
 
 The 2026-05-01 audit (preserved as `01MAY26_archived/REVIEWED.md`) categorized the m4t kernels into three tiers by substrate trustworthiness:
 
