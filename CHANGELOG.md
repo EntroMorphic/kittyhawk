@@ -147,6 +147,37 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Gesh Phase A.2: sig_dim sweep across 8 dims × 3 variants]
+
+A `gesh/bench/sweep_dims.c` benchmark tool sweeps sig_dim ∈ {2, 4, 8, 16, 32, 64, 128, 256} and runs random R / trained R / identity at each. Deterministic. Results saved to `gesh/docs/sweep_dims_results.md`. Three load-bearing findings:
+
+### 1. Lattice update earns its complexity in the compression regime
+Peak gain **+15pp at sig_dim = 16** (which exactly equals the informative-dim count K = 16). At sig_dim = 32, +13pp. At sig_dim ≥ 64, training adds 1–2pp on this benchmark — random R already encodes most of what training would.
+
+### 2. Random ternary projection beats identity at sig_dim = D
+Identity at sig_dim = 64 hits 69%; random ternary projection at sig_dim = 64 hits 79% — **+10pp over identity at the same dimensionality.** The mechanism: random ternary projection of the 48 noise dims produces incoherent signal that the class-mean bank averages toward zero, while informative dims still carry through. Implicit denoising via random projection. Worth retesting on richer benchmarks.
+
+### 3. Anomaly at sig_dim = 64: trained −2pp vs random
+At sig_dim matching D, random hits 79% but trained drops to 77%. Within seed noise (±10 samples for ±2pp on n_test=500), but suggestive of a "training walks into a worse basin than random ternary's implicit regularization" regime. Multi-seed measurement queued; flagged as the most interesting finding for Phase B investigation.
+
+### Sweep table
+
+| sig_dim |  2  |  4  |  8  | 16 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|---|---|---|
+| random  | 19% | 24% | 35% | 47% | 62% | 79% | 89% | 95% |
+| trained | 23% | 30% | 44% | **62%** | 75% | 77% | 91% | 96% |
+| gain    | +4 | +6 | +9 | **+15** | +13 | −2 | +2 | +1 |
+
+Identity (sig_dim = D = 64, no projection) = 69%. Total sweep runtime: ~17 seconds.
+
+### Added
+- `gesh/bench/sweep_dims.c` — sweep tool (built but not in ctest; benchmark, not regression).
+- `gesh/docs/sweep_dims_results.md` — full results with curve sketch and discussion.
+- `gesh/CMakeLists.txt` adds `gesh_sweep_dims` executable.
+
+### Build
+12/12 ctest binaries still green. Sweep tool builds clean under `-Werror`.
+
 ## [2026-05-02 — Gesh Phase A.2: lattice-update training online]
 
 The substrate's first measured consumer learns. No STE, no shadow parameters, no Gumbel-softmax — coordinate descent over R's ternary trits with bit-exact loss deltas. The lattice IS the geometry; the optimization walks it directly.

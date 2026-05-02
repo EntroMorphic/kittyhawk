@@ -47,3 +47,7 @@ if(GESH_BUILD_TESTS)
     target_link_libraries(test_gesh_train PRIVATE gesh gesh_bench)
     add_test(NAME gesh_train COMMAND test_gesh_train)
 endif()
+
+# Sweep tool (benchmark, not regression test). Builds with the library.
+add_executable(gesh_sweep_dims bench/sweep_dims.c)
+target_link_libraries(gesh_sweep_dims PRIVATE gesh gesh_bench)

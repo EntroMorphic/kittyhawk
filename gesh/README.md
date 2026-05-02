@@ -6,7 +6,7 @@ Lattice-native routing layer over a frozen ternary bank. Sits atop libm4t. The s
 
 **Phase A.1 — forward pass + synthetic benchmark — ONLINE.** Bank construction, ternary projection, top-k tile retrieval, k-NN vote classification. Tests the pipeline end-to-end on a synthetic prototype-classification task. Hardened by red-team remediation (13 findings, 10 fixed, 3 deferred).
 
-**Phase A.2 — lattice update training — ONLINE.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry. **Measured: lattice update on a 64→32 ternary projection beats random init by +11pp on the synthetic benchmark, and beats Phase A.1's 64-dim identity projection (69%) using half the dims (73%).**
+**Phase A.2 — lattice update training — ONLINE.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry. **Measured across a sig_dim sweep (`docs/sweep_dims_results.md`): lattice update earns its complexity in the compression regime, with peak +15pp gain at sig_dim = 16 = the informative-dim count. Random ternary projection beats identity at sig_dim = 64 by +10pp via implicit denoising.**
 
 **Phase B+ (gated)** — Global stage, MTFP4 escalation, etc. Each phase gated on a measured failure mode of the prior phase.
 
