@@ -147,6 +147,59 @@ Adversarial pass over the SDOT MTFP4 matmul, cell-width conversions, and MTFP19 
 
 8/8 ctest binaries green from clean rebuild under `-Werror`. Substrate's overall capability unchanged from the prior tier-3b/3c entry; the remediation hardened tests and tightened preconditions.
 
+## [2026-05-02 — Gesh Phase B probe: Gate 1 FAIL, Gate 2 PASS]
+
+Executed the two pre-committed gates from `journal/gesh_findings_synthesize.md`.
+
+### Gate 1 — image canon parity (MNIST): FAIL
+
+Lifted the canonical ternary-pixel-quantization pipeline from `01MAY26_archived/` into `gesh/bench/image_canon.{c,h}` (substrate-legal: per-image normalize → direct ternary quantization at calibrated tau, no random projection of pixels). Built `gesh/bench/mnist_probe.c` running Gesh forward + lattice-update against MNIST.
+
+| sig_dim | random          | trained         | gain    |
+|---------|------------------|------------------|---------|
+|     128 |  50.7% ± 1.9pp |  51.6% ± 2.6pp |  +0.8 pp |
+|     256 |  54.2% ± 1.7pp |  54.7% ± 1.6pp |  +0.5 pp |
+
+Identity at sig_dim = 784: 43.4%. Pre-committed PASS bar was ≥95% with ≥+2pp gain; trained Gesh sits **far below the 90% inconclusive floor** with gain within seed noise.
+
+**What survives:** random R at sig_dim=128 beats identity at sig_dim=784 by **+7.3pp** — the same magnitude C2 showed on the synthetic. Substrate-level finding (random ternary projection > identity) transfers cleanly to MNIST.
+
+**What fails:** the lattice-update mechanism's compression-regime gain (synthetic +5–8pp) does not transfer. The Phase A consumer architecture (single class-mean bank, top_k=1) is the bottleneck — its expressivity ceiling on MNIST is 50–55%, leaving lattice-update no informative loss surface.
+
+### Gate 2 — H1 mechanism test: PASS
+
+Built `gesh/bench/denoise_probe.c` testing the "implicit denoising via random ternary projection" mechanism. For each output dim *j* of random R, scored x[j] = stddev_c(R[j] · P_c) (prototype-subspace alignment) and y[j] = max-min spread of per-class projection-mean. 100 random R samples × 64 output dims = 6400 observations.
+
+- **Pearson r = +0.8921**, t = 157.89 (df = 6398), **p << 0.001**.
+- Stratification monotone: low alignment (n=7) → mean spread 3,649; mid (n=1267) → 7,451; high (n=5126) → 11,404.
+
+H1 upgraded from hypothesis to **demonstrated mechanism** within the synthetic benchmark's domain. The C2 finding now has a measured story.
+
+### Pre-commit-and-honor methodology held
+
+Gate 1 failed honestly; no post-hoc tuning to push MNIST accuracy up. The clean Gate 1 / Gate 2 split (Gate 1 fails, Gate 2 passes) localizes the failure to the consumer architecture, not the substrate or the projection. Loop-back to NODES recorded in `journal/gesh_phase_b_probe_closeout.md`.
+
+### Added
+- `gesh/bench/image_canon.{c,h}` — MNIST IDX loader + per-image normalize + direct ternary quantization to unpacked m4t_trit_t. Lifted from `01MAY26_archived/src/{glyph_dataset.c, glyph_sig.c}`; trimmed to MNIST + normalize + quantize (deskew, gradients, CIFAR loader deferred).
+- `gesh/bench/mnist_probe.c` — Phase B Gate 1 probe.
+- `gesh/bench/denoise_probe.c` — Phase B Gate 2 mechanism test.
+- `gesh_image_canon` static library + `gesh_mnist_probe`/`gesh_denoise_probe` executables in `gesh/CMakeLists.txt`.
+- `gesh/docs/phase_b_gate1_results.md` — Gate 1 results, FAIL verdict, mechanism analysis.
+- `gesh/docs/phase_b_gate2_results.md` — Gate 2 results, PASS verdict, H1 demonstrated.
+- `journal/gesh_phase_b_probe_closeout.md` — gate verdicts, loop-back-to-NODES action, re-evaluation of prior NODES against MNIST data, recommended next cycle (Path A: richer consumer; Path B: different lattice-update objective).
+
+### Changed
+- `gesh/docs/sweep_dims_results.md` — H1 marked DEMONSTRATED MECHANISM with Phase B Gate 2 reference.
+- `gesh/README.md` — Phase B probe status block added; gate verdicts surfaced.
+
+### Findings table
+
+| Prior node | Status post-MNIST |
+|------------|-------------------|
+| C1 — lattice update earns +4–8pp in compression | **Synthetic-specific.** |
+| C2 — random > identity at sig_dim=D by +7pp | **Transfers** (+7.3pp on MNIST). |
+| H1 — implicit denoising mechanism | **Mechanism demonstrated** (Gate 2). |
+
 ## [2026-05-02 — Gesh Phase A.2 sweep extended to sig_dim = 1024]
 
 Re-ran the multi-seed sweep with four additional expansion ratios: 384, 512, 768, 1024. Confirms expansion saturation is monotone — random and trained accuracies converge tightly at every extreme dim, with gain pinned to ≤ +0.2pp.

@@ -72,7 +72,7 @@ This is consistent with a "random ternary projection is asymptotically a suffici
 
 These remain conjectures — plausible explanations for the data, not demonstrated mechanisms. Future cycles could pressure-test them:
 
-1. **"Implicit denoising via random ternary projection."** Hypothesis explaining why random R at sig_dim = D beats identity. Mechanism test: project the noise dims through a random ternary matrix, examine the per-dim class-conditional variance of the projected signatures. Predicts: noise-dim signal averages toward zero in projected space.
+1. **"Implicit denoising via random ternary projection."** ~~Hypothesis~~ → **DEMONSTRATED MECHANISM (2026-05-02)** via Phase B Gate 2 (`gesh/docs/phase_b_gate2_results.md`). Pearson r(prototype-alignment, observed-class-discrimination) = +0.892, t = 157.89, p << 0.001 across 100 random R samples × 64 output dims. Output dims of random R that score high on prototype-subspace alignment yield proportionately larger inter-class discrimination spread; dims with low alignment yield small spread. Mechanism upgrades from hypothesis to finding within the synthetic benchmark's domain.
 
 2. **"Compression sweet spot near the informative-dim count."** Hypothesis explaining why gain peaks near sig_dim = 16 = K (the informative-dim count of the synthetic benchmark). Mechanism test: vary K (informative dim count) in the data generator and sweep sig_dim; predict peak gain shifts with K.
 

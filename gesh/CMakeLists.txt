@@ -52,3 +52,23 @@ endif()
 # Links `m` for sqrt (used for stddev computation in multi-seed reporting).
 add_executable(gesh_sweep_dims bench/sweep_dims.c)
 target_link_libraries(gesh_sweep_dims PRIVATE gesh gesh_bench m)
+
+# Image canon — substrate-legal MNIST loader + ternary quantization
+# pipeline (no random projections; one trit per pixel). Lifted from
+# 01MAY26_archived/src/{glyph_dataset.c, glyph_sig.c}.
+add_library(gesh_image_canon STATIC
+    bench/image_canon.c
+)
+target_include_directories(gesh_image_canon PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
+)
+target_link_libraries(gesh_image_canon PUBLIC m4t)
+set_target_properties(gesh_image_canon PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Phase B Gate 1: MNIST canonical pipeline probe.
+add_executable(gesh_mnist_probe bench/mnist_probe.c)
+target_link_libraries(gesh_mnist_probe PRIVATE gesh gesh_image_canon m)
+
+# Phase B Gate 2: H1 mechanism test (implicit denoising hypothesis).
+add_executable(gesh_denoise_probe bench/denoise_probe.c)
+target_link_libraries(gesh_denoise_probe PRIVATE gesh gesh_bench m)

@@ -8,7 +8,11 @@ Lattice-native routing layer over a frozen ternary bank. Sits atop libm4t. The s
 
 **Phase A.2 — lattice update training — ONLINE.** Coordinate-descent flips on projection trits to reduce loss. No STE. The lattice IS the geometry. **Measured across a multi-seed sig_dim sweep extended through sig_dim = 1024 (`docs/sweep_dims_results.md`, 5 seeds per cell, 12 dims): lattice update earns its complexity in the compression regime — gain plateaus at +8pp at sig_dim ∈ {16, 32}. Random ternary projection at sig_dim = D beats identity by +7pp robustly across seeds (hypothesis: implicit denoising; not mechanism-verified). Expansion saturates monotonically: at sig_dim = 1024 (16× input dim) random and trained converge to 98.6% ± 0.5pp with +0.0pp gain. The single-seed sweep's "+15pp peak" and "−2pp anomaly" were artifacts that didn't survive multi-seed averaging.**
 
-**Phase B+ (gated)** — Global stage, MTFP4 escalation, etc. Each phase gated on a measured failure mode of the prior phase.
+**Phase B probe — RAN 2026-05-02.** Two pre-committed gates from `journal/gesh_findings_synthesize.md`:
+- **Gate 1 (image canon parity, MNIST): FAIL.** Trained Gesh hits 51.6% / 54.7% at sig_dim ∈ {128, 256}; gain over random R within seed noise (+0.5 to +0.8pp). Pre-committed PASS bar was ≥95% with ≥+2pp gain; far below the inconclusive floor. **However, C2 transfers cleanly:** random R at sig_dim=128 beats identity at sig_dim=784 by **+7.3pp** — substrate-level finding survives. The Gesh-Phase-A *consumer* architecture (single class-mean bank, top_k=1) is the bottleneck, not the substrate. Details: `docs/phase_b_gate1_results.md`.
+- **Gate 2 (H1 mechanism test): PASS.** Pearson r = +0.892, t = 157.89, p << 0.001. The "implicit denoising" mechanism behind C2 is empirically demonstrated: output dims of random R with high prototype-subspace alignment yield proportionately larger inter-class discrimination. H1 upgraded from hypothesis to demonstrated mechanism. Details: `docs/phase_b_gate2_results.md`.
+
+Closeout and loop-back to NODES recorded in `journal/gesh_phase_b_probe_closeout.md`. Recommended next cycle: richer consumer (multi-table LSH composition or multi-prototype banks) before substrate-claim measurement on Go positions.
 
 ## Design lineage
 
