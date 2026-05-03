@@ -510,3 +510,89 @@ The emission-coverage criterion is the specific defense against this class of fa
 This section exists because two LMM cycles in sequence converged on it. The first cycle produced a two-part criterion (C-sub: substrate-side three-way capacity; C-con: consumer-side realization). The scrutiny meta-cycle found the two parts collapsed structurally — C-sub applied literally to `sign_extract` fails because collapsing its zero state yields a well-defined binary sign-test. The single-part "emission coverage" criterion subsumes both correctly. A subsequent red-team noted the criterion needed scope qualification (output-side / input-side / not applicable) and a per-primitive audit trail; both landed in §18.2 and §18.5.
 
 Journal record: `base3_native_criterion_{raw,nodes,reflect,synthesize}.md` (first cycle); `updated_model_scrutiny_{raw,nodes,reflect,synthesize}.md` (scrutiny cycle).
+
+## 19. Zero-state semantics: declared interpretations
+
+§18 establishes that the third state must be *exercised*. §19 establishes that the third state can be *interpreted* differently by different consumers, and that primitives operating on three-state inputs MUST declare which interpretation their semantic assumes. This section is the substrate-claim's first response to the P0 remediation plan (`docs/REMEDIATION_PLAN_P0.md` P0-1) that surfaced the substrate's free third state was being treated as "default" or "tie" by every consumer rather than used operationally.
+
+### 19.1 Why semantics matters separately from emission
+
+§18 asks: *does the third state get emitted?* §19 asks: *what does it mean when it is?*
+
+Both are necessary. A primitive can pass §18 (zero is emitted with positive measure) and still fail to use the third state operationally — every consumer might treat the zero as just another value, distinguishable from ±1 only by aggregate Hamming cost. The substrate-claim that base-3 surpasses base-2 lives in *operational distinction*, not just in *representational presence*.
+
+Base-2 has only two states. Any three-state semantic in the substrate must, to avoid being theater, route to operationally-distinct kernel paths. The §19 audit captures this.
+
+### 19.2 The four sanctioned zero-state interpretations
+
+A primitive's zero-state semantic falls in one of four classes (or declares §19 not applicable):
+
+**(I) Tie-cancellation** — zero arises from a balanced sum or sign-thresholded equality. The "zero" means "evidence is balanced; no signed conclusion." Operationally: distance to a tie-zero is half-cost (per `m4t_popcount_dist`'s ternary Hamming).
+- Example: `gesh_bank_build_class_mean` produces zeros where within-class samples sign-cancel.
+- Cost in current `m4t_popcount_dist`: (q=±1, t=0) → 1.
+
+**(II) Wildcard / don't-care** — zero is *deliberately placed* to mean "this position is irrelevant; any query value at this position is a free match." Operationally: distance to a wildcard-zero is zero-cost; the query's value at this position is ignored.
+- Example: `gesh_bank_build_class_wildcard` (introduced 2026-05-02 per P0-1) places zeros at low-SNR positions for each class signature.
+- Cost in `m4t_route_wildcard_dist`: (q=±1, t=0) → 0.
+- **Substrate-distinct from base-2**: base-2 expresses "don't care" via separate mask bits (2× storage) or multi-rule disjunction. The substrate's three-state alphabet expresses it natively in the same 2-bit packing as ±1 trits.
+
+**(III) Abstain / no-opinion** — zero in a *query* signature means the query has no value at this position. Operationally: an abstaining query against a tile that asserts ±1 is a partial mismatch (the query gives no signal here; the tile expects one).
+- Example: `m4t_route_threshold_extract` produces a zero when the projection accumulator's magnitude is below tau — the query's signal at that position is below noise, so the query "abstains."
+- Cost in current `m4t_popcount_dist` and `m4t_route_wildcard_dist`: (q=0, t=±1) → 1.
+
+**(IV) Sentinel / disabled** — zero on an *aggregated decision* field (not on an *input trit*) means "no decision; skip this slot." Operationally: skipped entirely.
+- Example: `m4t_route_apply_signed`'s `decision.sign == 0` is sentinel-skip, distinct from any input-trit zero.
+- This interpretation is at a *different layer* (decisions, not raw trits) and should not be confused with (I)/(II)/(III).
+
+A primitive's docstring MUST declare which of (I)–(IV) it consumes/produces at its API boundary, and what input class the declaration assumes. Primitives that conflate interpretations (e.g., a distance kernel that treats input-trit zero as both tie-cancellation AND wildcard depending on its origin) are §19 violations.
+
+### 19.3 Operational distinction requirement
+
+A new primitive that claims to use a different zero-state interpretation than an existing primitive (e.g., wildcard vs tie-cancellation) MUST demonstrate:
+
+(a) **A behavior difference at the API boundary.** Same inputs, the new primitive produces different outputs than the existing one for cases where the zero-state interpretation matters. This is a unit test, not a hand-wave.
+
+(b) **A consumer that would route differently between the two interpretations.** If both kernels produce identical routing decisions on every plausible consumer input, the "different interpretation" is theater and the new primitive does not land.
+
+(c) **A measurement showing the interpretation matters operationally.** Per the substrate-novelty audit (CONTRIBUTING.md sixth rule), the new primitive must demonstrate that its semantic is exercised on a benchmark designed to expose it. Otherwise the primitive's substrate-claim contribution is unmeasurable.
+
+### 19.4 Per-primitive audit (§19 column extension to §18.5)
+
+Extending the §18.5 audit table with a §19 zero-state interpretation column. Primitives that consume or produce three-state inputs MUST have a non-blank entry.
+
+| Primitive | §18 scope | §19 zero-state interpretation | Sanctioned input class |
+|---|---|---|---|
+| `m4t_route_threshold_extract` | Output-side | Produces (III) Abstain (output trit zero = "magnitude below tau") | tau ≥ 0; input integer or MTFP19 mantissa values |
+| `m4t_popcount_dist` | Input-side | Symmetric ternary Hamming; treats both signature zeros as (I) Tie-cancellation; same cost regardless of which side the zero is on | Signatures from any constructor producing legitimate {-1, 0, +1} values; zeros treated as ties (cost 1 vs ±1, cost 0 vs zero) |
+| `m4t_route_wildcard_dist` (NEW, P0-1) | Input-side | Tile-side zero is (II) Wildcard (free match against any query value); query-side zero is (III) Abstain (cost 1 against tile-±1) | Tile signatures from `gesh_bank_build_class_wildcard` or other constructors that place zeros DELIBERATELY; query signatures from any extractor |
+| `m4t_route_distance_batch` | Input-side | Wraps `m4t_popcount_dist`; inherits (I) interpretation | As `m4t_popcount_dist` |
+| `m4t_route_topk_abs` | Output-side | Decision sign zero is (IV) Sentinel (no-decision) | Score arrays per §18.5 |
+| `m4t_route_apply_signed` | Input-side | Decision sign zero is (IV) Sentinel (skip slot) | Decisions from `topk_abs` |
+| `m4t_route_signature_update` | Compound | Internal threshold_extract(tau=0); produces (I) Tie-cancellation in output | Per §18.5 |
+| `m4t_mtfp_ternary_matmul_bt` | Input-side | Weight zero is "no contribution"; semantically (I) Tie-cancellation in the per-position weight | Ternary weight matrices |
+| `m4t_mtfp4_sdot_matmul_bt` | Input-side | Same as above | Same |
+| `m4t_ternary_dot_matmul_bt` | Input-side | Same as above (delegates to MTFP4 SDOT) | Ternary inputs both sides |
+| `gesh_bank_build_class_mean` | Output-side (constructs ternary tiles) | Produces (I) Tie-cancellation (zero from sample-cancel) | Class-balanced or imbalanced labeled samples |
+| `gesh_bank_build_kmeans_per_class` | Output-side | Produces (I) Tie-cancellation per cluster (zero from cluster-mean cancel) | Same |
+| `gesh_bank_build_class_wildcard` (NEW, P0-1) | Output-side | Produces (II) Wildcard (zero from low-SNR DELIBERATE placement) | Labeled samples; uses signal/noise threshold on per-dim integer SNR proxy |
+
+### 19.5 Why this matters
+
+Until 2026-05-02, every primitive in the substrate that produced or consumed zero treated it as (I) Tie-cancellation by default, and consumers built on top of these primitives inherited the assumption. The substrate's free third state was structurally present (passing §18 emission coverage) but operationally unused — the "third state" was a half-cost variant of the ±1 state, not a semantic-distinct routing signal.
+
+This was the substrate-claim drift the P0 remediation plan corrected. §19 codifies the correction: zero-state interpretations are explicit, declared per primitive, and operationally distinct paths are required for the substrate-claim to be more than theater.
+
+### 19.6 Review gate
+
+Every primitive that consumes or produces three-state inputs MUST ship with:
+
+(a) **Declared zero-state interpretation** in the docstring — one of (I)/(II)/(III)/(IV) or "§19 not applicable" with rationale.
+(b) **Behavior-difference test** if the interpretation differs from an existing primitive — a unit test demonstrating that same-input cases produce different output. If the new primitive's semantic is identical to an existing one's on all plausible inputs, the new primitive does not land.
+(c) **§19 audit table entry** in this document.
+(d) For (II) Wildcard primitives specifically: a sanctioned-pairing constraint declaring which bank constructors produce inputs the kernel is correct against. Wildcard kernels paired with tie-cancellation banks over-promote ambiguous matches and are a §19 violation.
+
+### 19.7 History
+
+§19 exists because the P0-1 design cycle (`gesh_zero_signal_design_*.md`) surfaced that the substrate's structural zero was passing §18 emission coverage while failing operational distinction. The wildcard semantics introduced for `m4t_route_wildcard_dist` and `gesh_bank_build_class_wildcard` is the first new zero-state interpretation in the substrate; declaring it required §19 to formalize the audit category alongside §18.
+
+Journal record: `gesh_zero_signal_design_{raw,nodes,reflect,synthesize,closeout}.md`. Plan: `docs/REMEDIATION_PLAN_P0.md`.
