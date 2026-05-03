@@ -10,6 +10,7 @@
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,4 +63,167 @@ void gesh_bank_build_class_mean(
 
     free(tile_unpacked);
     free(class_sums);
+}
+
+/* ── k-means per-class bank constructor ──────────────────────────────────
+ *
+ * Multi-prototype bank: k > 1 tiles per class. See header for full
+ * algorithm description. Substrate-legal: integer arithmetic, ternary
+ * outputs, deterministic stratified init (no random weights).
+ *
+ * Performance note: this routine still uses per-iteration scalar
+ * orchestration (assignment loop, sum update, comparison). The
+ * substrate purification task is queued to lift these to libm4t
+ * kernels. Numerical results are bit-identical pre/post purification
+ * because the operations are deterministic integer arithmetic. */
+void gesh_bank_build_kmeans_per_class(
+    gesh_bank_t* bank,
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int k_per_class,
+    int max_iters,
+    uint32_t seed)
+{
+    (void)seed;  /* reserved for future tie-breaking variants */
+
+    assert(bank && samples && labels);
+    assert(n_samples >= 0 && n_classes > 0);
+    assert(k_per_class >= 1 && max_iters >= 1);
+    assert(bank->n_tiles == k_per_class * n_classes);
+    assert(bank->sig_dim > 0);
+    assert(bank->tiles_packed && bank->labels);
+
+    int D = bank->sig_dim;
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+
+    /* Mask: all-ones for valid trits, tail bits zeroed. Same construction
+     * as gesh_forward_classify uses for popcount_dist. */
+    uint8_t* mask = malloc((size_t)Dp);
+    memset(mask, 0xFF, (size_t)Dp);
+    int tail_trits = D & 3;
+    if (tail_trits > 0) {
+        uint8_t tail_mask = (uint8_t)((1u << (tail_trits * 2)) - 1u);
+        mask[Dp - 1] = tail_mask;
+    }
+
+    /* Pre-pack all samples once (used by Hamming distance per iteration). */
+    uint8_t* samples_packed = malloc((size_t)n_samples * (size_t)Dp);
+    for (int i = 0; i < n_samples; i++) {
+        m4t_pack_trits_1d(samples_packed + (size_t)i * Dp,
+                          samples + (size_t)i * D, D);
+    }
+
+    /* Per-class scratch buffers (sized for the largest class; reuse). */
+    int* class_idx = malloc((size_t)n_samples * sizeof(int));
+    int* assignments = malloc((size_t)n_samples * sizeof(int));
+    int32_t* sums = malloc((size_t)k_per_class * (size_t)D * sizeof(int32_t));
+    int* counts = malloc((size_t)k_per_class * sizeof(int));
+    m4t_trit_t* centroids_unpacked = malloc((size_t)k_per_class * (size_t)D
+                                              * sizeof(m4t_trit_t));
+    uint8_t* centroids_packed = malloc((size_t)k_per_class * (size_t)Dp);
+    m4t_trit_t* tile_buf = malloc((size_t)D * sizeof(m4t_trit_t));
+
+    for (int c = 0; c < n_classes; c++) {
+        /* Gather indices of class-c samples. */
+        int n_c = 0;
+        for (int i = 0; i < n_samples; i++) {
+            if (labels[i] == c) {
+                class_idx[n_c++] = i;
+            }
+        }
+        if (n_c == 0) {
+            /* No samples for this class — leave tiles zero-packed and
+             * labels set. The forward path will compute Hamming distances
+             * against zero tiles; not meaningful but doesn't crash. */
+            for (int j = 0; j < k_per_class; j++) {
+                memset(bank->tiles_packed
+                         + (size_t)(c * k_per_class + j) * Dp, 0, (size_t)Dp);
+                bank->labels[c * k_per_class + j] = c;
+            }
+            continue;
+        }
+
+        /* Stratified mod-k init: assignments[s] = s % k_per_class for the
+         * per-class sample list. Deterministic, substrate-clean. */
+        for (int s = 0; s < n_c; s++) {
+            assignments[s] = s % k_per_class;
+        }
+
+        /* Initial centroid computation from stratified assignments. */
+        for (int it = 0; it <= max_iters; it++) {
+            /* (Re)compute centroids from current assignments. */
+            memset(sums, 0, (size_t)k_per_class * (size_t)D * sizeof(int32_t));
+            memset(counts, 0, (size_t)k_per_class * sizeof(int));
+            for (int s = 0; s < n_c; s++) {
+                int cluster = assignments[s];
+                const m4t_trit_t* sample = samples + (size_t)class_idx[s] * D;
+                int32_t* sum_row = sums + (size_t)cluster * D;
+                for (int d = 0; d < D; d++) {
+                    sum_row[d] += (int32_t)sample[d];
+                }
+                counts[cluster]++;
+            }
+            for (int kk = 0; kk < k_per_class; kk++) {
+                m4t_trit_t* cent = centroids_unpacked + (size_t)kk * D;
+                if (counts[kk] == 0) {
+                    /* Empty cluster — keep prior centroid (no update). */
+                    continue;
+                }
+                gesh_threshold_int32_to_trit(cent, sums + (size_t)kk * D, D);
+            }
+
+            if (it == max_iters) break;
+
+            /* Pack centroids for Hamming distance computation. */
+            for (int kk = 0; kk < k_per_class; kk++) {
+                m4t_pack_trits_1d(centroids_packed + (size_t)kk * Dp,
+                                  centroids_unpacked + (size_t)kk * D, D);
+            }
+
+            /* Reassign each sample to nearest centroid. */
+            int n_changed = 0;
+            for (int s = 0; s < n_c; s++) {
+                const uint8_t* sample_packed =
+                    samples_packed + (size_t)class_idx[s] * Dp;
+                int best_cluster = 0;
+                int32_t best_dist = m4t_popcount_dist(
+                    sample_packed, centroids_packed, mask, Dp);
+                for (int kk = 1; kk < k_per_class; kk++) {
+                    int32_t d = m4t_popcount_dist(
+                        sample_packed,
+                        centroids_packed + (size_t)kk * Dp,
+                        mask, Dp);
+                    if (d < best_dist) {
+                        best_dist = d;
+                        best_cluster = kk;
+                    }
+                }
+                if (assignments[s] != best_cluster) {
+                    assignments[s] = best_cluster;
+                    n_changed++;
+                }
+            }
+            if (n_changed == 0) break;
+        }
+
+        /* Pack final centroids into bank tiles for class c. */
+        for (int kk = 0; kk < k_per_class; kk++) {
+            m4t_pack_trits_1d(
+                bank->tiles_packed + (size_t)(c * k_per_class + kk) * Dp,
+                centroids_unpacked + (size_t)kk * D, D);
+            bank->labels[c * k_per_class + kk] = c;
+        }
+    }
+
+    free(mask);
+    free(samples_packed);
+    free(class_idx);
+    free(assignments);
+    free(sums);
+    free(counts);
+    free(centroids_unpacked);
+    free(centroids_packed);
+    free(tile_buf);
 }

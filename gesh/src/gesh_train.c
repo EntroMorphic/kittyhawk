@@ -46,6 +46,8 @@ gesh_train_config_t gesh_train_default(void) {
     cfg.init_balanced          = 0;
     cfg.log_per_epoch          = 0;
     cfg.seed                   = 0xfeedfaceu;
+    cfg.k_per_class            = 0;   /* 0 / 1 → class-mean (single proto) */
+    cfg.kmeans_iters           = 50;
     return cfg;
 }
 
@@ -81,7 +83,11 @@ void gesh_init_random_projection_balanced(
 /* Project all training samples through R; rebuild bank from the
  * projected signatures. Substrate-routed via the scratch-aware wrapper
  * (m4t_mtfp_ternary_matmul_bt + m4t_route_threshold_extract; no
- * per-call malloc since scratch is pre-allocated). */
+ * per-call malloc since scratch is pre-allocated).
+ *
+ * Bank constructor dispatch: k_per_class ≤ 1 → single-prototype class-mean.
+ *                            k_per_class > 1 → k-means per class
+ *                                              (n_tiles must = k × n_classes). */
 static void rebuild_bank_from_projection(
     gesh_bank_t* bank,
     const m4t_trit_t* R,
@@ -90,12 +96,21 @@ static void rebuild_bank_from_projection(
     int n_samples,
     int sig_dim, int input_dim, int n_classes,
     m4t_trit_t* scratch_projected,
-    gesh_project_scratch_t* proj_scratch)
+    gesh_project_scratch_t* proj_scratch,
+    int k_per_class, int kmeans_iters,
+    uint32_t kmeans_seed)
 {
     gesh_project_batch_unpacked_scratch(scratch_projected, samples,
                                            n_samples, R, sig_dim, input_dim,
                                            proj_scratch);
-    gesh_bank_build_class_mean(bank, scratch_projected, labels, n_samples, n_classes);
+    if (k_per_class > 1) {
+        gesh_bank_build_kmeans_per_class(bank, scratch_projected, labels,
+                                            n_samples, n_classes,
+                                            k_per_class, kmeans_iters,
+                                            kmeans_seed);
+    } else {
+        gesh_bank_build_class_mean(bank, scratch_projected, labels, n_samples, n_classes);
+    }
 }
 
 /* Resample a fresh training batch. */
@@ -264,10 +279,15 @@ int gesh_train_lattice_update(
     assert(R && out_bank && train_samples && train_labels && cfg);
     assert(n_samples > 0 && n_classes > 0);
     assert(sig_dim > 0 && input_dim > 0);
-    assert(top_k > 0 && top_k <= n_classes);
+    assert(top_k > 0);
     assert(out_bank->sig_dim == sig_dim);
-    assert(out_bank->n_tiles == n_classes);
+    /* Bank-size constraint depends on the bank constructor:
+     *   class-mean (k_per_class ≤ 1): n_tiles == n_classes.
+     *   k-means (k_per_class > 1):    n_tiles == k_per_class × n_classes. */
+    int k_pc = (cfg->k_per_class > 1) ? cfg->k_per_class : 1;
+    assert(out_bank->n_tiles == k_pc * n_classes);
     assert(out_bank->tiles_packed && out_bank->labels);
+    int kmeans_it = (cfg->kmeans_iters > 0) ? cfg->kmeans_iters : 50;
     assert((const void*)R != (const void*)train_samples);
     assert((const void*)R != (const void*)out_bank->tiles_packed);
 
@@ -305,13 +325,17 @@ int gesh_train_lattice_update(
     int* batch_labels = malloc((size_t)batch * sizeof(int));
 
     gesh_train_scratch_t sc;
+    /* n_tiles arg passes the bank's actual T (= k_per_class × n_classes
+     * for k-means; = n_classes for single-prototype). The dists scratch
+     * must be sized for T, not for n_classes. */
     scratch_alloc(&sc, sig_dim, input_dim, n_samples,
-                    n_classes, top_k, n_classes, batch);
+                    out_bank->n_tiles, top_k, n_classes, batch);
 
     /* Initial bank from current R. */
     rebuild_bank_from_projection(out_bank, R, train_samples, train_labels,
                                    n_samples, sig_dim, input_dim, n_classes,
-                                   scratch_proj, &sc.bank_proj_scratch);
+                                   scratch_proj, &sc.bank_proj_scratch,
+                                   k_pc, kmeans_it, state);
 
     int last_train_errors = -1;
     int n_flips_total = 0;
@@ -364,7 +388,8 @@ int gesh_train_lattice_update(
                 rebuild_bank_from_projection(
                     out_bank, R, train_samples, train_labels,
                     n_samples, sig_dim, input_dim, n_classes, scratch_proj,
-                    &sc.bank_proj_scratch);
+                    &sc.bank_proj_scratch,
+                    k_pc, kmeans_it, state);
                 /* Re-measure baseline against fresh bank. */
                 base_errors = count_errors_scratch(
                     R, batch_samples, batch_labels, batch, out_bank,
@@ -385,7 +410,8 @@ int gesh_train_lattice_update(
         /* End-of-epoch bank refresh (always, for consistent post-epoch state). */
         rebuild_bank_from_projection(out_bank, R, train_samples, train_labels,
                                        n_samples, sig_dim, input_dim, n_classes,
-                                       scratch_proj, &sc.bank_proj_scratch);
+                                       scratch_proj, &sc.bank_proj_scratch,
+                                       k_pc, kmeans_it, state);
         last_train_errors = base_errors;
 
         if (cfg->log_per_epoch) {

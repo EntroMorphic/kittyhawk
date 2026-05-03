@@ -67,6 +67,14 @@ typedef struct {
     /* Seed for trit-position sampling and batch selection. NOTE: 0 is a
      * VALID seed and will be used as-is (no fallback to a default). */
     uint32_t seed;
+
+    /* Multi-prototype bank: if k_per_class > 1, the training loop
+     * refreshes the bank using gesh_bank_build_kmeans_per_class with
+     * this k. Caller's bank must have n_tiles = k_per_class × n_classes.
+     * Default 0 (or 1) → use single-prototype class-mean refresh
+     * (n_tiles must equal n_classes). */
+    int k_per_class;
+    int kmeans_iters;            /* used only if k_per_class > 1; default 50 */
 } gesh_train_config_t;
 
 /* Default config for Phase A.2 measurements. */

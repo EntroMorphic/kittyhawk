@@ -93,3 +93,20 @@ target_link_libraries(gesh_denoise_probe PRIVATE gesh gesh_bench m)
 # confidence interval on the capacity-floor claim.
 add_executable(gesh_finding3_probe bench/finding3_probe.c)
 target_link_libraries(gesh_finding3_probe PRIVATE gesh gesh_bench m)
+
+# Single-run MNIST probe: full 60K train, full 10K test, sig_dim=64,
+# top_k=3, n_epochs=64, early_stop OFF. One decisive measurement.
+add_executable(gesh_mnist_full_run bench/mnist_full_run.c)
+target_link_libraries(gesh_mnist_full_run PRIVATE gesh gesh_image_canon m)
+
+# k-means multi-prototype bank measurement on MNIST. Tests whether
+# bank capacity (T=10) was the bottleneck, by replacing single-class-
+# mean bank with k-means (T = k_per_class × C tiles).
+add_executable(gesh_mnist_kmeans_run bench/mnist_kmeans_run.c)
+target_link_libraries(gesh_mnist_kmeans_run PRIVATE gesh gesh_image_canon m)
+
+# k-means trained: train R via lattice update with k-means bank refresh
+# in the loop (vs class-mean refresh in mnist_full_run.c). Tests whether
+# training contributes on top of the bank-capacity gain.
+add_executable(gesh_mnist_kmeans_trained bench/mnist_kmeans_trained.c)
+target_link_libraries(gesh_mnist_kmeans_trained PRIVATE gesh gesh_image_canon m)
