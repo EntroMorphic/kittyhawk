@@ -150,6 +150,55 @@ void gesh_bank_build_class_wildcard(
     free(class_sums);
 }
 
+/* ── Confidence-aware bank constructor (P0-2) ─────────────────────────── */
+void gesh_bank_build_class_mean_with_confidence(
+    gesh_bank_t* bank,
+    uint8_t* conf_bits,
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int tau_strong_permille)
+{
+    assert(bank && conf_bits && samples && labels);
+    assert(bank->n_tiles == n_classes);
+    int D = bank->sig_dim;
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+    int conf_bytes_per_class = (D + 7) / 8;
+
+    int32_t* sums = calloc((size_t)n_classes * D, sizeof(int32_t));
+    int32_t* counts = calloc((size_t)n_classes, sizeof(int32_t));
+    for (int i = 0; i < n_samples; i++) {
+        int c = labels[i];
+        int32_t* row = sums + (size_t)c * D;
+        const m4t_trit_t* s = samples + (size_t)i * D;
+        for (int j = 0; j < D; j++) row[j] += (int32_t)s[j];
+        counts[c]++;
+    }
+
+    m4t_trit_t* tile = malloc((size_t)D * sizeof(m4t_trit_t));
+    memset(conf_bits, 0, (size_t)n_classes * (size_t)conf_bytes_per_class);
+
+    for (int c = 0; c < n_classes; c++) {
+        const int32_t* row = sums + (size_t)c * D;
+        int32_t cnt = counts[c];
+        uint8_t* conf_row = conf_bits + (size_t)c * (size_t)conf_bytes_per_class;
+        for (int j = 0; j < D; j++) {
+            int32_t v = row[j];
+            int32_t abs_v = (v >= 0) ? v : -v;
+            tile[j] = (v > 0) ? 1 : (v < 0) ? -1 : 0;
+            int32_t signal_pm = (cnt > 0)
+                ? (int32_t)((int64_t)abs_v * 1000 / cnt) : 0;
+            if (signal_pm > tau_strong_permille) {
+                conf_row[j >> 3] |= (uint8_t)(1u << (j & 7));
+            }
+        }
+        m4t_pack_trits_1d(bank->tiles_packed + (size_t)c * Dp, tile, D);
+        bank->labels[c] = c;
+    }
+    free(tile); free(counts); free(sums);
+}
+
 /* ── k-means per-class bank constructor ──────────────────────────────────
  *
  * Multi-prototype bank: k > 1 tiles per class. See header for full

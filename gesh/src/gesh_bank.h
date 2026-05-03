@@ -122,6 +122,26 @@ void gesh_bank_build_class_wildcard(
     int snr_threshold_permille
 );
 
+/* Confidence-aware bank: builds class-mean trit signatures AND per-class
+ * confidence bitmaps. The confidence bit is set at positions where the
+ * class-mean's signal strength exceeds tau_strong_permille, indicating
+ * "this class is strongly characterized by this dim."
+ *
+ * Outputs are paired: bank->tiles_packed (trit signatures) + a separate
+ * caller-allocated conf_bits buffer of size n_classes × ceil(sig_dim/8).
+ *
+ * Pair with `m4t_route_confidence_weighted_dist` for substrate-novel
+ * magnitude-aware routing. */
+void gesh_bank_build_class_mean_with_confidence(
+    gesh_bank_t* bank,
+    uint8_t* conf_bits,            /* [n_classes × ceil(sig_dim/8)] */
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int tau_strong_permille
+);
+
 /* Multi-prototype bank: k > 1 tiles per class via k-means clustering on
  * the sample space restricted to each class. Total tiles T = k_per_class
  * × n_classes; tile (c × k_per_class + j) carries label c.

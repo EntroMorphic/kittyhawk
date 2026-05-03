@@ -70,6 +70,74 @@ void m4t_route_threshold_extract(
     int n
 );
 
+/* ── Dual-threshold extract (§19 5-state encoding) ─────────────────────── */
+
+/* Threshold-extract that emits BOTH a packed-trit signature (using
+ * tau_weak) AND a parallel packed-bit confidence bitmap (positions
+ * where |value| > tau_strong). The composed (trit, confidence) pair
+ * is a 5-state encoding {-strong, -weak, 0, +weak, +strong}.
+ *
+ * Per-position outputs:
+ *   value > tau_strong   → trit=+1, conf=1
+ *   tau_weak < value ≤ tau_strong → trit=+1, conf=0
+ *   |value| ≤ tau_weak   → trit=0,  conf=0
+ *   value < -tau_strong  → trit=-1, conf=1
+ *  -tau_strong ≤ value < -tau_weak → trit=-1, conf=0
+ *
+ * Substrate-novel: magnitude information that single-tau threshold
+ * extract discards. Base-2 with quantize-then-route loses magnitude
+ * after quantization; recovering it requires a parallel mantissa
+ * channel (≥1.5× storage).
+ *
+ * Buffer sizes:
+ *   dst_trit_packed: ≥ M4T_TRIT_PACKED_BYTES(n) bytes
+ *   dst_conf_bits:   ≥ ceil(n / 8) bytes (1 bit per position, LSB-first)
+ *
+ * Preconditions: 0 ≤ tau_weak ≤ tau_strong; n ≥ 0; non-aliasing outputs. */
+void m4t_route_threshold_extract_dual(
+    uint8_t* dst_trit_packed,
+    uint8_t* dst_conf_bits,
+    const int64_t* values,
+    int64_t tau_weak,
+    int64_t tau_strong,
+    int n
+);
+
+/* ── Confidence-weighted distance ──────────────────────────────────────── */
+
+/* Hamming-style distance over (trit, confidence) signature pairs. The
+ * trit signatures are packed-trit (2 bits/pos); the confidence bitmaps
+ * are packed-bit (1 bit/pos). Cost table per position:
+ *
+ *   (q.trit ↔ t.trit same nonzero sign):    0    (agreement, any confidence)
+ *   (q.trit = 0, t.trit = 0):                0    (mutual abstain, current Hamming)
+ *   (q.trit ±1, t.trit = 0):                 1    (asymmetric abstain, current Hamming)
+ *   (q.trit = 0, t.trit ±1):                 1    (asymmetric abstain, current Hamming)
+ *   (q.trit ↔ t.trit opposite sign):
+ *     - both confidence bits 0:              2    (current Hamming, both uncertain)
+ *     - exactly one confidence bit 1:        3    (one side asserted strongly)
+ *     - both confidence bits 1:              4    (mutual high-confidence disagreement)
+ *
+ * §19 (III) Abstain semantics for trit zero (cost depends on whether
+ * the OTHER side asserts). §19 has no formal interpretation for the
+ * confidence bit alone; it's a magnitude class indicator that modifies
+ * mismatch cost when both sides have a sign opinion.
+ *
+ * Returns int32 cost; max possible cost per position is 4 (vs 2 for
+ * standard Hamming). Distance is scaled accordingly.
+ *
+ * Preconditions: same as m4t_popcount_dist; sig_dim ≥ 0; mask sized for
+ * trit signature. The conf bitmaps are NOT masked separately — the trit
+ * mask governs which positions count. */
+int32_t m4t_route_confidence_weighted_dist(
+    const uint8_t* query_trit_packed,
+    const uint8_t* query_conf_bits,
+    const uint8_t* tile_trit_packed,
+    const uint8_t* tile_conf_bits,
+    const uint8_t* mask,
+    int sig_dim
+);
+
 /* ── Wildcard distance ─────────────────────────────────────────────────── */
 
 /* Wildcard-Hamming distance between a query signature and a tile

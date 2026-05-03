@@ -675,6 +675,100 @@ static int test_wildcard_multi_byte(void) {
     return 0;
 }
 
+/* ── threshold_extract_dual + confidence_weighted_dist (P0-2) ──────────
+ *
+ * 5-state encoding via (trit, confidence) pair. Tests the cost-table
+ * extension and the dual-extract output structure. */
+
+static int test_threshold_extract_dual_basic(void) {
+    /* Inputs spanning -strong, -weak, 0, +weak, +strong. */
+    int64_t values[5] = { -100, -20, 0, 20, 100 };
+    int64_t tau_weak = 10, tau_strong = 50;
+    uint8_t trit_packed[2] = {0};
+    uint8_t conf_bits = 0;
+
+    m4t_route_threshold_extract_dual(trit_packed, &conf_bits,
+                                       values, tau_weak, tau_strong, 5);
+
+    /* Expected trits: -1, -1, 0, +1, +1 → codes 0b10, 0b10, 0b00, 0b01, 0b01. */
+    /* Byte 0 (positions 0..3): 0b01 0b00 0b10 0b10 = 0b01_00_10_10 = 0x4A. */
+    ASSERT_EQ_I32(trit_packed[0], 0x4Au, "dual-extract trit byte 0");
+    /* Byte 1 (position 4): 0b01 in low bits = 0x01. */
+    ASSERT_EQ_I32(trit_packed[1], 0x01u, "dual-extract trit byte 1");
+
+    /* Expected conf bits: 1, 0, 0, 0, 1 → bits set at position 0, 4. */
+    /* Bit 0 (position 0): 1; bit 1 (pos 1): 0; bit 4 (pos 4): 1.
+     * Byte = 0b00010001 = 0x11. */
+    ASSERT_EQ_I32(conf_bits, 0x11u, "dual-extract confidence byte");
+    return 0;
+}
+
+static int test_confidence_weighted_dist_cost_table(void) {
+    /* Build position-0-only tests for each (q_trit, t_trit, q_conf, t_conf)
+     * combination of interest. Single-byte signatures; mask = 0x03 (low
+     * 2 bits = position 0 active). */
+    struct case_t {
+        m4t_trit_t q_trit, t_trit;
+        int q_conf, t_conf;
+        int32_t expected_cost;
+    } cases[] = {
+        /* Same-sign agreement: cost 0 regardless of confidence */
+        {  1,  1, 0, 0, 0 },
+        {  1,  1, 1, 1, 0 },
+        /* Mutual abstain */
+        {  0,  0, 0, 0, 0 },
+        /* Asymmetric abstain (current Hamming, cost 1) */
+        {  1,  0, 1, 0, 1 },
+        {  0,  1, 0, 1, 1 },
+        /* Opposite-sign, no confidence: cost 2 (current Hamming) */
+        {  1, -1, 0, 0, 2 },
+        /* Opposite-sign, one confident: cost 3 */
+        {  1, -1, 1, 0, 3 },
+        {  1, -1, 0, 1, 3 },
+        /* Opposite-sign, both confident: cost 4 */
+        {  1, -1, 1, 1, 4 },
+        { -1,  1, 1, 1, 4 },
+    };
+    int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
+    for (int c = 0; c < n_cases; c++) {
+        m4t_trit_t q_t[4] = { cases[c].q_trit, 0, 0, 0 };
+        m4t_trit_t t_t[4] = { cases[c].t_trit, 0, 0, 0 };
+        uint8_t q_packed = pack4(q_t);
+        uint8_t t_packed = pack4(t_t);
+        uint8_t q_conf_byte = (uint8_t)(cases[c].q_conf & 1u);
+        uint8_t t_conf_byte = (uint8_t)(cases[c].t_conf & 1u);
+        uint8_t mask = 0x03u;
+        int32_t got = m4t_route_confidence_weighted_dist(
+            &q_packed, &q_conf_byte,
+            &t_packed, &t_conf_byte,
+            &mask, 1);
+        ASSERT_EQ_I32(got, cases[c].expected_cost, "confidence_dist case");
+    }
+    return 0;
+}
+
+static int test_confidence_weighted_equals_hamming_no_confidence(void) {
+    /* When all confidence bits are 0, weighted dist == Hamming. */
+    m4t_trit_t q[16] = {  1, -1,  0,  1, -1,  0,  1, -1,
+                            0,  1, -1,  0,  1, -1,  0,  1 };
+    m4t_trit_t t[16] = {  1,  1, -1,  0,  1, -1,  0,  1,
+                            -1, -1,  1,  0, -1,  0,  1,  1 };
+    uint8_t q_packed[4], t_packed[4];
+    for (int i = 0; i < 4; i++) {
+        q_packed[i] = pack4(q + i*4);
+        t_packed[i] = pack4(t + i*4);
+    }
+    uint8_t mask[4] = { 0xFFu, 0xFFu, 0xFFu, 0xFFu };
+    uint8_t q_conf[2] = { 0, 0 };
+    uint8_t t_conf[2] = { 0, 0 };
+
+    int32_t hamming  = m4t_popcount_dist(q_packed, t_packed, mask, 4);
+    int32_t weighted = m4t_route_confidence_weighted_dist(
+        q_packed, q_conf, t_packed, t_conf, mask, 16);
+    ASSERT_EQ_I32(weighted, hamming, "weighted == hamming when no confidence");
+    return 0;
+}
+
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -698,6 +792,9 @@ int main(void) {
     if (test_wildcard_equals_hamming_no_tile_zeros())  return 1;
     if (test_wildcard_respects_mask())                 return 1;
     if (test_wildcard_multi_byte())                    return 1;
+    if (test_threshold_extract_dual_basic())                   return 1;
+    if (test_confidence_weighted_dist_cost_table())            return 1;
+    if (test_confidence_weighted_equals_hamming_no_confidence()) return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }

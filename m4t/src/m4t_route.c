@@ -37,6 +37,94 @@ void m4t_route_threshold_extract(
     }
 }
 
+/* ── Dual-threshold extract ────────────────────────────────────────────── */
+
+void m4t_route_threshold_extract_dual(
+    uint8_t* dst_trit_packed,
+    uint8_t* dst_conf_bits,
+    const int64_t* values,
+    int64_t tau_weak,
+    int64_t tau_strong,
+    int n)
+{
+    assert(dst_trit_packed && dst_conf_bits && values);
+    assert(tau_weak >= 0 && tau_strong >= tau_weak);
+    assert(n >= 0);
+
+    int trit_bytes = M4T_TRIT_PACKED_BYTES(n);
+    int conf_bytes = (n + 7) / 8;
+    memset(dst_trit_packed, 0, (size_t)trit_bytes);
+    memset(dst_conf_bits,   0, (size_t)conf_bytes);
+
+    for (int i = 0; i < n; i++) {
+        int64_t v = values[i];
+        m4t_trit_t t = (v > tau_weak) ?  1 :
+                       (v < -tau_weak) ? -1 :
+                                          0;
+        uint8_t trit_code = (t == 1) ? 0x01u : (t == -1) ? 0x02u : 0x00u;
+        dst_trit_packed[i >> 2] |= (uint8_t)(trit_code << ((i & 3) * 2));
+
+        /* Confidence bit: |v| > tau_strong. */
+        int64_t abs_v = (v >= 0) ? v : -v;
+        if (abs_v > tau_strong) {
+            dst_conf_bits[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+    }
+}
+
+/* ── Confidence-weighted distance ──────────────────────────────────────── */
+
+int32_t m4t_route_confidence_weighted_dist(
+    const uint8_t* query_trit_packed,
+    const uint8_t* query_conf_bits,
+    const uint8_t* tile_trit_packed,
+    const uint8_t* tile_conf_bits,
+    const uint8_t* mask,
+    int sig_dim)
+{
+    assert(query_trit_packed && query_conf_bits);
+    assert(tile_trit_packed && tile_conf_bits && mask);
+    assert(sig_dim >= 0);
+
+    int packed_bytes = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    /* Standard ternary Hamming as the baseline; weighted variant adds
+     * confidence-conditioned extra cost on opposite-sign mismatches. */
+    int32_t base_cost = m4t_popcount_dist(query_trit_packed, tile_trit_packed,
+                                            mask, packed_bytes);
+
+    /* Confidence weight: per-position scan to find opposite-sign
+     * mismatches and add 1 (XOR confidence) or 2 (both confident) to
+     * the cost. */
+    int32_t bonus = 0;
+    for (int i = 0; i < sig_dim; i++) {
+        int byte_idx_t = i >> 2;
+        int bit_off_t  = (i & 3) * 2;
+        uint8_t q_code = (uint8_t)((query_trit_packed[byte_idx_t] >> bit_off_t) & 0x3u);
+        uint8_t t_code = (uint8_t)((tile_trit_packed[byte_idx_t]  >> bit_off_t) & 0x3u);
+
+        /* Opposite-sign: q=0b01, t=0b10 OR q=0b10, t=0b01. */
+        int opposite = (q_code == 0x01u && t_code == 0x02u) ||
+                       (q_code == 0x02u && t_code == 0x01u);
+        if (!opposite) continue;
+
+        /* Mask check: same per-byte 0xFF/tail logic as popcount_dist's
+         * mask. The trit-field is at bits [bit_off_t, bit_off_t+2).
+         * Active iff those bits are set in the mask. */
+        uint8_t mask_byte = mask[byte_idx_t];
+        uint8_t trit_field_mask = (uint8_t)(0x3u << bit_off_t);
+        if ((mask_byte & trit_field_mask) != trit_field_mask) continue;
+
+        /* Confidence bits. */
+        int q_conf = (query_conf_bits[i >> 3] >> (i & 7)) & 1u;
+        int t_conf = (tile_conf_bits[i >> 3]  >> (i & 7)) & 1u;
+        int conf_count = q_conf + t_conf;
+        bonus += conf_count;  /* 0, 1, or 2 extra cost beyond the base */
+    }
+
+    return base_cost + bonus;
+}
+
 /* ── Wildcard distance ─────────────────────────────────────────────────── */
 
 int32_t m4t_route_wildcard_dist(

@@ -575,6 +575,8 @@ Extending the §18.5 audit table with a §19 zero-state interpretation column. P
 | `gesh_bank_build_class_mean` | Output-side (constructs ternary tiles) | Produces (I) Tie-cancellation (zero from sample-cancel) | Class-balanced or imbalanced labeled samples |
 | `gesh_bank_build_kmeans_per_class` | Output-side | Produces (I) Tie-cancellation per cluster (zero from cluster-mean cancel) | Same |
 | `gesh_bank_build_class_wildcard` (NEW, P0-1) | Output-side | Produces (II) Wildcard (zero from low-SNR DELIBERATE placement) | Labeled samples; uses signal/noise threshold on per-dim integer SNR proxy |
+| `m4t_route_threshold_extract_dual` (NEW, P0-2) | Output-side (5-state effective: emits ternary trit + confidence bit) | Trit uses (III) Abstain (zero = magnitude below tau_weak); confidence bit is binary (1 = magnitude > tau_strong, 0 otherwise). Composed encoding {-strong, -weak, 0, +weak, +strong} | int64 inputs; tau_weak ≤ tau_strong |
+| `m4t_route_confidence_weighted_dist` (NEW, P0-2) | Input-side (consumes 5-state encoding) | Cost table weights mismatches by confidence: confident-vs-confident disagreements cost 4; confident-vs-uncertain costs 3; standard ternary Hamming for the trit baseline | Signature pairs from `threshold_extract_dual` (kernel and bank constructor matched) |
 
 ### 19.5 Why this matters
 
