@@ -747,6 +747,80 @@ static int test_confidence_weighted_dist_cost_table(void) {
     return 0;
 }
 
+/* §19.6(b) behavior-difference: same trit inputs, different confidence,
+ * MUST produce different distances. The cost difference reveals that
+ * the kernel uses confidence as a substrate-distinct signal. */
+static int test_confidence_weighted_vs_hamming_behavior_diff(void) {
+    /* Single position: q=+1, t=-1 (full mismatch).
+     * Hamming costs 2; confidence weighting:
+     *   no conf: 2; one conf: 3; both conf: 4.
+     * So the kernel must produce different values for these inputs. */
+    m4t_trit_t q[4] = {  1, 0, 0, 0 };
+    m4t_trit_t t[4] = { -1, 0, 0, 0 };
+    uint8_t q_packed = pack4(q);
+    uint8_t t_packed = pack4(t);
+    uint8_t mask = 0x03u;
+
+    uint8_t qc_off = 0, tc_off = 0;
+    uint8_t qc_on  = 1, tc_on  = 1;
+
+    int32_t hamming  = m4t_popcount_dist(&q_packed, &t_packed, &mask, 1);
+    int32_t conf_off = m4t_route_confidence_weighted_dist(
+        &q_packed, &qc_off, &t_packed, &tc_off, &mask, 1);
+    int32_t conf_one = m4t_route_confidence_weighted_dist(
+        &q_packed, &qc_on,  &t_packed, &tc_off, &mask, 1);
+    int32_t conf_both = m4t_route_confidence_weighted_dist(
+        &q_packed, &qc_on,  &t_packed, &tc_on,  &mask, 1);
+
+    ASSERT_EQ_I32(hamming,    2, "Hamming on full mismatch");
+    ASSERT_EQ_I32(conf_off,   2, "conf-off matches Hamming on full mismatch");
+    ASSERT_EQ_I32(conf_one,   3, "one-confident extends mismatch by 1");
+    ASSERT_EQ_I32(conf_both,  4, "both-confident extends mismatch by 2");
+    /* Behavior-difference: conf_one != hamming, conf_both != hamming. */
+    if (conf_one == hamming || conf_both == hamming) {
+        fprintf(stderr, "FAIL: conf kernel didn't differentiate from Hamming\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* H2: multi-byte loop boundaries + mask handling. */
+static int test_confidence_weighted_multi_byte_and_mask(void) {
+    /* 16 trits = 4 packed bytes (covers >8-byte? no, 4 bytes; this is the
+     * 4-byte path). Use 32 trits = 8 packed bytes for the 8-byte path. */
+    m4t_trit_t q[32], t[32];
+    for (int i = 0; i < 32; i++) {
+        q[i] = (m4t_trit_t)((i & 1) ? 1 : -1);
+        t[i] = (m4t_trit_t)((i & 1) ? -1 : 1);  /* every position is full mismatch */
+    }
+    uint8_t q_packed[8], t_packed[8];
+    for (int i = 0; i < 8; i++) {
+        q_packed[i] = pack4(q + i*4);
+        t_packed[i] = pack4(t + i*4);
+    }
+    uint8_t mask[8];
+    memset(mask, 0xFFu, 8);
+
+    /* All confidence ON: every position contributes 4 cost = 32 × 4 = 128. */
+    uint8_t conf_all[4] = { 0xFFu, 0xFFu, 0xFFu, 0xFFu };
+    int32_t got_all = m4t_route_confidence_weighted_dist(
+        q_packed, conf_all, t_packed, conf_all, mask, 32);
+    ASSERT_EQ_I32(got_all, 128, "32 full-mismatches × cost 4 (both-conf)");
+
+    /* All confidence OFF: each position contributes 2 cost = 32 × 2 = 64. */
+    uint8_t conf_none[4] = { 0, 0, 0, 0 };
+    int32_t got_none = m4t_route_confidence_weighted_dist(
+        q_packed, conf_none, t_packed, conf_none, mask, 32);
+    ASSERT_EQ_I32(got_none, 64, "32 full-mismatches × cost 2 (no-conf)");
+
+    /* Mask out the second 16 trits (last 4 bytes inactive). */
+    uint8_t mask_half[8] = { 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0, 0, 0, 0 };
+    int32_t got_masked = m4t_route_confidence_weighted_dist(
+        q_packed, conf_all, t_packed, conf_all, mask_half, 32);
+    ASSERT_EQ_I32(got_masked, 64, "16 active full-mismatches × cost 4 (mask honored)");
+    return 0;
+}
+
 static int test_confidence_weighted_equals_hamming_no_confidence(void) {
     /* When all confidence bits are 0, weighted dist == Hamming. */
     m4t_trit_t q[16] = {  1, -1,  0,  1, -1,  0,  1, -1,
@@ -793,8 +867,10 @@ int main(void) {
     if (test_wildcard_respects_mask())                 return 1;
     if (test_wildcard_multi_byte())                    return 1;
     if (test_threshold_extract_dual_basic())                   return 1;
-    if (test_confidence_weighted_dist_cost_table())            return 1;
-    if (test_confidence_weighted_equals_hamming_no_confidence()) return 1;
+    if (test_confidence_weighted_dist_cost_table())                return 1;
+    if (test_confidence_weighted_vs_hamming_behavior_diff())       return 1;
+    if (test_confidence_weighted_multi_byte_and_mask())            return 1;
+    if (test_confidence_weighted_equals_hamming_no_confidence())   return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }

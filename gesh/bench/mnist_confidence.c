@@ -123,8 +123,9 @@ int main(void) {
     printf("  baseline (class_mean + Hamming):                  %.1f%%\n", baseline_pm / 10.0);
     printf("  confidence (mean_with_conf + weighted dist):      %.1f%%\n", conf_pm / 10.0);
     printf("  delta: %+.1fpp\n", (conf_pm - baseline_pm) / 10.0);
-    printf("  Gate 4 (within ±2pp): %s\n",
-           (abs(conf_pm - baseline_pm) <= 20) ? "PASS" : "FAIL");
+    /* Gate 4 = "no regression beyond -2pp." Improvements always pass. */
+    printf("  Gate 4 (no regression beyond -2pp): %s\n",
+           ((conf_pm - baseline_pm) >= -20) ? "PASS" : "FAIL");
 
     free(train); free(test); free(R); free(train_proj); free(tile_conf);
     free(bank.tiles_packed); free(bank.labels);

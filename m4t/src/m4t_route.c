@@ -48,6 +48,10 @@ void m4t_route_threshold_extract_dual(
     int n)
 {
     assert(dst_trit_packed && dst_conf_bits && values);
+    /* H3 fix: writable outputs must not alias each other or the input. */
+    assert((const void*)dst_trit_packed != (const void*)dst_conf_bits);
+    assert((const void*)dst_trit_packed != (const void*)values);
+    assert((const void*)dst_conf_bits   != (const void*)values);
     assert(tau_weak >= 0 && tau_strong >= tau_weak);
     assert(n >= 0);
 

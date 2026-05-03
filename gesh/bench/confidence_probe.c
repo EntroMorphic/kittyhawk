@@ -96,10 +96,26 @@ static void project_and_dual_extract(
     free(row);
 }
 
-/* Run one synth_proto seed; return (baseline_pm, confidence_pm). */
+/* Run one synth_proto seed; return (baseline_pm, confidence_pm) at the
+ * specified tau_strong. tau_weak fixed at 0 (sign extraction). */
+static void run_synth_seed_tau(int* baseline_pm, int* conf_pm,
+                                  uint32_t train_seed, uint32_t test_seed,
+                                  uint32_t r_seed,
+                                  int64_t tau_strong, int tau_strong_pm_for_bank);
+
 static void run_synth_seed(int* baseline_pm, int* conf_pm,
                               uint32_t train_seed, uint32_t test_seed,
                               uint32_t r_seed)
+{
+    run_synth_seed_tau(baseline_pm, conf_pm, train_seed, test_seed, r_seed,
+                          /*tau_strong*/5, /*tau_strong_pm_for_bank*/600);
+}
+
+static void run_synth_seed_tau(int* baseline_pm, int* conf_pm,
+                                  uint32_t train_seed, uint32_t test_seed,
+                                  uint32_t r_seed,
+                                  int64_t tau_strong,
+                                  int tau_strong_pm_for_bank)
 {
     synth_proto_config_t cfg = synth_proto_default();
     int D = cfg.input_dim, C = cfg.n_classes;
@@ -137,12 +153,10 @@ static void run_synth_seed(int* baseline_pm, int* conf_pm,
     for (int i = 0; i < n_test; i++) if (preds[i] == test_lbl[i]) correct++;
     *baseline_pm = (correct * 1000) / n_test;
 
-    /* Confidence path: build bank with confidence, dual-extract test queries,
-     * confidence-weighted distance. tau_strong calibrated as ~50% of K=16
-     * informative-dim contribution maximum (= ~8 in raw acc). */
-    int64_t tau_weak = 0;       /* sign extraction at zero */
-    int64_t tau_strong = 5;     /* magnitude > 5 = "confident" */
-    int tau_strong_permille = 600;  /* 60% of mean magnitude in [0..1000] */
+    /* Confidence path: caller-supplied tau_strong (raw acc) and
+     * tau_strong_pm_for_bank (permille for class-mean magnitude). */
+    int64_t tau_weak = 0;
+    int tau_strong_permille = tau_strong_pm_for_bank;
 
     uint8_t* tile_conf = malloc((size_t)C * (size_t)conf_bytes);
     gesh_bank_build_class_mean_with_confidence(
@@ -169,11 +183,48 @@ static void run_synth_seed(int* baseline_pm, int* conf_pm,
 }
 
 int main(void) {
-    printf("# P0-2 confidence verification — synth_proto, %d seeds\n", N_SEEDS);
+    printf("# P0-2 confidence verification — synth_proto, %d seeds, tau-sweep\n", N_SEEDS);
     uint32_t train_seeds[3] = { 0x11111111u, 0x22222222u, 0x33333333u };
     uint32_t test_seeds[3]  = { 0x44444444u, 0x55555555u, 0x66666666u };
     uint32_t r_seeds[3]     = { 0xc7c7c7c7u, 0xb22bd00du, 0xdeadc0deu };
 
+    /* C2 fix: tau-sweep to verify gain isn't a calibration artifact.
+     * Sweep tau_strong over a reasonable range; report per-tau gain. */
+    struct tau_pair { int64_t raw; int permille; const char* name; } taus[] = {
+        {  2, 300, "low" },
+        {  5, 600, "default" },
+        { 10, 750, "high" },
+        { 20, 900, "very-high" },
+    };
+    int n_taus = (int)(sizeof(taus) / sizeof(taus[0]));
+
+    printf("\n## Tau-sweep (per-tau, %d seeds each)\n", N_SEEDS);
+    printf("| tau_strong (raw, perm) | baseline mean | confidence mean | paired gain | 95%% CI       |\n");
+    printf("|------------------------|---------------|------------------|-------------|---------------|\n");
+
+    for (int ti = 0; ti < n_taus; ti++) {
+        int baseline[N_SEEDS], conf[N_SEEDS];
+        for (int s = 0; s < N_SEEDS; s++) {
+            run_synth_seed_tau(&baseline[s], &conf[s],
+                                  train_seeds[s], test_seeds[s], r_seeds[s],
+                                  taus[ti].raw, taus[ti].permille);
+        }
+        double bsum = 0, csum = 0; for (int s=0;s<N_SEEDS;s++){bsum+=baseline[s];csum+=conf[s];}
+        double bmean = bsum / N_SEEDS, cmean = csum / N_SEEDS;
+        double gsum = 0; for (int s=0;s<N_SEEDS;s++) gsum += (conf[s] - baseline[s]);
+        double gmean = gsum / N_SEEDS;
+        double gsq = 0; for (int s=0;s<N_SEEDS;s++) {
+            double d = (conf[s] - baseline[s]) - gmean; gsq += d*d;
+        }
+        double gsd = sqrt(gsq / (N_SEEDS - 1));
+        double gci = 1.96 * gsd / sqrt(N_SEEDS);
+        printf("| %s (%lld, %d)        | %5.1f%%        | %5.1f%%           | %+5.2fpp     | [%+5.2f, %+5.2f] |\n",
+               taus[ti].name, (long long)taus[ti].raw, taus[ti].permille,
+               bmean / 10.0, cmean / 10.0, gmean / 10.0,
+               (gmean - gci) / 10.0, (gmean + gci) / 10.0);
+    }
+
+    /* Default-tau detail (kept for backward-compat with the prior reporting). */
     int baseline[N_SEEDS], conf[N_SEEDS];
     for (int s = 0; s < N_SEEDS; s++) {
         run_synth_seed(&baseline[s], &conf[s],
