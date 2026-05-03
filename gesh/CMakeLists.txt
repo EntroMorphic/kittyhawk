@@ -116,3 +116,7 @@ target_link_libraries(gesh_mnist_kmeans_trained PRIVATE gesh gesh_image_canon m)
 # baseline on synth_wildcard. Runs Gates 1, 2, 3 from the design SYNTHESIZE.
 add_executable(gesh_wildcard_probe bench/wildcard_probe.c)
 target_link_libraries(gesh_wildcard_probe PRIVATE gesh gesh_bench m)
+
+# P0-1 Gate 4: MNIST regression check for wildcard bank.
+add_executable(gesh_mnist_wildcard bench/mnist_wildcard.c)
+target_link_libraries(gesh_mnist_wildcard PRIVATE gesh gesh_image_canon)

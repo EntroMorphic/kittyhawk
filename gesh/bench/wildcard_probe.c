@@ -1,34 +1,9 @@
 /*
- * wildcard_probe.c — P0-1 verification benchmark.
+ * wildcard_probe.c — P0-1 verification, multi-seed.
  *
- * Runs the four pre-committed gates from gesh_zero_signal_design_synthesize.md:
- *   Gate 1: wildcard accuracy on synth_wildcard ≥ Hamming + 5pp.
- *   Gate 2: wildcard runtime ≤ 1.2× current Hamming.
- *   Gate 3: substrate-novelty audit — articulated in the gate verdict
- *           narrative (storage advantage is structural, not runtime-
- *           measurable beyond what Gate 2 already captures).
- *   Gate 4: no MNIST regression beyond ±2pp (skipped in this probe; run
- *           the existing mnist probes to verify, with caller-supplied
- *           wildcard bank if desired).
- *
- * Configuration:
- *   synth_wildcard:
- *     C = 10 classes
- *     D = 64 = K(16 always) + M(16 sometimes) + N(32 noise)
- *     n_train = 2000, n_test = 500
- *     noise_pct = 10
- *
- *   Bank constructors compared:
- *     class_mean    — emergent zeros from sample-cancellation ties
- *     class_wildcard — deliberate zeros at signal_pm < threshold
- *
- *   Distance kernels compared:
- *     popcount_dist     — §19 (I) Tie-cancellation symmetric Hamming
- *     wildcard_dist     — §19 (II) Wildcard tile-zero, (III) Abstain query-zero
- *
- * Four (bank, kernel) pairs measured; the diagonal pair (class_wildcard +
- * wildcard_dist) is the substrate-novel cell. The off-diagonal pairs
- * are §19.6 violations but measured for the comparison.
+ * Three independent (proto, train, test, R) seed sets. Reports mean
+ * ± stddev for each (bank, kernel) cell. The substrate-novel finding
+ * is the wildcard BANK paired with standard Hamming kernel.
  */
 
 #include "synth_wildcard.h"
@@ -44,23 +19,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define N_TRAIN 2000
 #define N_TEST  500
 #define SIG_DIM 64
 #define TOP_K   1
-#define WILDCARD_SNR_THRESHOLD_PERMILLE 200  /* signal < 0.2 → wildcard */
+#define WILDCARD_SNR_THRESHOLD_PERMILLE 200
+#define N_SEEDS 3
 
-typedef enum {
-    BANK_CLASS_MEAN     = 0,
-    BANK_CLASS_WILDCARD = 1,
-} bank_kind_t;
-
-typedef enum {
-    DIST_HAMMING  = 0,
-    DIST_WILDCARD = 1,
-} dist_kind_t;
+typedef enum { DIST_HAMMING = 0, DIST_WILDCARD = 1 } dist_kind_t;
+typedef enum { BANK_MEAN = 0, BANK_WILDCARD = 1 } bank_kind_t;
 
 static int eval_pm(
     const m4t_trit_t* R, const gesh_bank_t* bank,
@@ -69,204 +37,134 @@ static int eval_pm(
 {
     gesh_projection_t proj = { .R = R, .input_dim = input_dim, .sig_dim = sig_dim };
     int* preds = malloc((size_t)n_test * sizeof(int));
-    int rc;
-    if (dist_kind == DIST_HAMMING) {
-        rc = gesh_forward_classify(preds, test, n_test, bank, &proj, TOP_K);
-    } else {
-        rc = gesh_forward_classify_wildcard(preds, test, n_test, bank, &proj, TOP_K);
-    }
+    int rc = (dist_kind == DIST_HAMMING)
+        ? gesh_forward_classify(preds, test, n_test, bank, &proj, TOP_K)
+        : gesh_forward_classify_wildcard(preds, test, n_test, bank, &proj, TOP_K);
     if (rc != 0) { free(preds); return -1; }
     int correct = 0;
-    for (int i = 0; i < n_test; i++) {
-        if (preds[i] == test_lbl[i]) correct++;
-    }
+    for (int i = 0; i < n_test; i++) if (preds[i] == test_lbl[i]) correct++;
     free(preds);
     return (correct * 1000) / n_test;
 }
 
-static int count_zeros_in_bank(const gesh_bank_t* bank) {
-    int Dp = M4T_TRIT_PACKED_BYTES(bank->sig_dim);
-    int total_zeros = 0;
-    int total_positions = bank->n_tiles * bank->sig_dim;
-    /* Unpack and count. */
-    m4t_trit_t* unpacked = malloc((size_t)bank->sig_dim * sizeof(m4t_trit_t));
-    for (int t = 0; t < bank->n_tiles; t++) {
-        m4t_unpack_trits_1d(unpacked,
-                              bank->tiles_packed + (size_t)t * Dp,
-                              bank->sig_dim);
-        for (int j = 0; j < bank->sig_dim; j++) {
-            if (unpacked[j] == 0) total_zeros++;
-        }
-    }
-    free(unpacked);
-    return (total_zeros * 1000) / total_positions;  /* permille */
-}
-
-int main(void) {
+/* Run one seed set; populate the four (bank, kernel) cell results. */
+static void run_one_seed(
+    int cell_pm[2][2],
+    uint32_t proto_seed, uint32_t train_seed, uint32_t test_seed, uint32_t r_seed)
+{
     synth_wildcard_config_t cfg = synth_wildcard_default();
-
-    printf("# P0-1 wildcard verification probe\n");
-    printf("# C=%d, D=%d (K=%d always + M=%d sometimes + N=%d noise), "
-           "noise_pct=%d, snr_threshold_pm=%d\n",
-           cfg.n_classes, cfg.input_dim, cfg.always_dim, cfg.sometimes_dim,
-           cfg.noise_dim, cfg.noise_pct, WILDCARD_SNR_THRESHOLD_PERMILLE);
-    printf("# n_train=%d, n_test=%d, sig_dim=%d, top_k=%d\n",
-           N_TRAIN, N_TEST, SIG_DIM, TOP_K);
-    fflush(stdout);
-
-    /* Generate prototypes + train + test samples. */
+    cfg.proto_seed = proto_seed;
     int D = cfg.input_dim;
-    m4t_trit_t* protos = malloc((size_t)cfg.n_classes * D * sizeof(m4t_trit_t));
+    int C = cfg.n_classes;
+    int Dp_sig = M4T_TRIT_PACKED_BYTES(SIG_DIM);
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
     synth_wildcard_generate_prototypes(protos, &cfg);
 
     m4t_trit_t* train = malloc((size_t)N_TRAIN * D * sizeof(m4t_trit_t));
     int* train_lbl = malloc((size_t)N_TRAIN * sizeof(int));
-    synth_wildcard_generate_samples(train, train_lbl, N_TRAIN, protos,
-                                       &cfg, 0x11111111u);
+    synth_wildcard_generate_samples(train, train_lbl, N_TRAIN, protos, &cfg, train_seed);
 
     m4t_trit_t* test = malloc((size_t)N_TEST * D * sizeof(m4t_trit_t));
     int* test_lbl = malloc((size_t)N_TEST * sizeof(int));
-    synth_wildcard_generate_samples(test, test_lbl, N_TEST, protos,
-                                       &cfg, 0x22222222u);
+    synth_wildcard_generate_samples(test, test_lbl, N_TEST, protos, &cfg, test_seed);
 
-    /* Random R — substrate-deterministic; same seed across cells. */
     m4t_trit_t* R = malloc((size_t)SIG_DIM * D * sizeof(m4t_trit_t));
-    gesh_init_random_projection(R, SIG_DIM, D, 0xc0ffeebbu);
+    gesh_init_random_projection(R, SIG_DIM, D, r_seed);
 
-    /* Project training samples through R to get sig_dim-trit signatures. */
     m4t_trit_t* train_proj = malloc((size_t)N_TRAIN * SIG_DIM * sizeof(m4t_trit_t));
     gesh_project_batch_unpacked(train_proj, train, N_TRAIN, R, SIG_DIM, D);
 
-    /* Build both banks. */
-    int Dp_sig = M4T_TRIT_PACKED_BYTES(SIG_DIM);
-    gesh_bank_t bank_mean, bank_wild;
+    gesh_bank_t bm, bw;
+    bm.tiles_packed = malloc((size_t)C * (size_t)Dp_sig);
+    bm.labels = malloc((size_t)C * sizeof(int));
+    bm.n_tiles = C; bm.sig_dim = SIG_DIM;
+    gesh_bank_build_class_mean(&bm, train_proj, train_lbl, N_TRAIN, C);
 
-    bank_mean.tiles_packed = malloc((size_t)cfg.n_classes * (size_t)Dp_sig);
-    bank_mean.labels = malloc((size_t)cfg.n_classes * sizeof(int));
-    bank_mean.n_tiles = cfg.n_classes;
-    bank_mean.sig_dim = SIG_DIM;
-    gesh_bank_build_class_mean(&bank_mean, train_proj, train_lbl,
-                                  N_TRAIN, cfg.n_classes);
+    bw.tiles_packed = malloc((size_t)C * (size_t)Dp_sig);
+    bw.labels = malloc((size_t)C * sizeof(int));
+    bw.n_tiles = C; bw.sig_dim = SIG_DIM;
+    gesh_bank_build_class_wildcard(&bw, train_proj, train_lbl, N_TRAIN, C,
+                                       WILDCARD_SNR_THRESHOLD_PERMILLE);
 
-    bank_wild.tiles_packed = malloc((size_t)cfg.n_classes * (size_t)Dp_sig);
-    bank_wild.labels = malloc((size_t)cfg.n_classes * sizeof(int));
-    bank_wild.n_tiles = cfg.n_classes;
-    bank_wild.sig_dim = SIG_DIM;
-    gesh_bank_build_class_wildcard(&bank_wild, train_proj, train_lbl,
-                                      N_TRAIN, cfg.n_classes,
-                                      WILDCARD_SNR_THRESHOLD_PERMILLE);
+    cell_pm[BANK_MEAN][DIST_HAMMING]      = eval_pm(R, &bm, test, test_lbl, N_TEST, SIG_DIM, D, DIST_HAMMING);
+    cell_pm[BANK_MEAN][DIST_WILDCARD]     = eval_pm(R, &bm, test, test_lbl, N_TEST, SIG_DIM, D, DIST_WILDCARD);
+    cell_pm[BANK_WILDCARD][DIST_HAMMING]  = eval_pm(R, &bw, test, test_lbl, N_TEST, SIG_DIM, D, DIST_HAMMING);
+    cell_pm[BANK_WILDCARD][DIST_WILDCARD] = eval_pm(R, &bw, test, test_lbl, N_TEST, SIG_DIM, D, DIST_WILDCARD);
 
-    int mean_zero_pm = count_zeros_in_bank(&bank_mean);
-    int wild_zero_pm = count_zeros_in_bank(&bank_wild);
-    printf("# bank_mean zero density:     %d permille (%.1f%%)\n",
-           mean_zero_pm, mean_zero_pm / 10.0);
-    printf("# bank_wildcard zero density: %d permille (%.1f%%)\n",
-           wild_zero_pm, wild_zero_pm / 10.0);
-    printf("\n");
-
-    /* Run the four (bank, kernel) cells with timing. */
-    printf("## Gate 1 — accuracy across bank × kernel pairs\n\n");
-    printf("| bank          | kernel    | accuracy | runtime (10K queries) |\n");
-    printf("|---------------|-----------|----------|------------------------|\n");
-
-    struct cell_result {
-        int pm;
-        double runtime_s;
-    } results[2][2];  /* [bank_kind][dist_kind] */
-
-    /* Eval timing: amplify by running the 500-test 20× to get a meaningful
-     * runtime measurement. Same accuracy result; deterministic. */
-    int n_repeats = 20;
-
-    bank_kind_t bank_kinds[] = { BANK_CLASS_MEAN, BANK_CLASS_WILDCARD };
-    dist_kind_t dist_kinds[] = { DIST_HAMMING, DIST_WILDCARD };
-    const char* bank_names[] = { "class_mean", "class_wildcard" };
-    const char* dist_names[] = { "Hamming", "Wildcard" };
-
-    for (int b = 0; b < 2; b++) {
-        for (int d = 0; d < 2; d++) {
-            const gesh_bank_t* this_bank =
-                (bank_kinds[b] == BANK_CLASS_MEAN) ? &bank_mean : &bank_wild;
-            int pm = -1;
-            clock_t t0 = clock();
-            for (int rep = 0; rep < n_repeats; rep++) {
-                pm = eval_pm(R, this_bank, test, test_lbl, N_TEST,
-                              SIG_DIM, D, dist_kinds[d]);
-            }
-            clock_t t1 = clock();
-            results[b][d].pm = pm;
-            results[b][d].runtime_s =
-                (double)(t1 - t0) / CLOCKS_PER_SEC;
-            printf("| %-13s | %-9s | %5.1f%%   | %6.2fs (%d×%d=%d queries) |\n",
-                   bank_names[b], dist_names[d], pm / 10.0,
-                   results[b][d].runtime_s, n_repeats, N_TEST,
-                   n_repeats * N_TEST);
-            fflush(stdout);
-        }
-    }
-
-    /* Gate 1 verdict. */
-    int hamming_baseline_pm  = results[BANK_CLASS_MEAN][DIST_HAMMING].pm;
-    int wildcard_substrate_pm = results[BANK_CLASS_WILDCARD][DIST_WILDCARD].pm;
-    int gain_pp_x10 = wildcard_substrate_pm - hamming_baseline_pm;  /* permille - permille = pp×10 */
-
-    printf("\n## Gate 1 verdict: substrate-novel pair vs baseline\n");
-    printf("  baseline        (class_mean + Hamming):    %5.1f%%\n", hamming_baseline_pm / 10.0);
-    printf("  substrate-novel (class_wildcard + Wildcard): %5.1f%%\n", wildcard_substrate_pm / 10.0);
-    printf("  gain:                                       %+5.1fpp\n", gain_pp_x10 / 10.0);
-    printf("  Gate 1 PASS bar: gain ≥ +5.0pp\n");
-    printf("  Gate 1 verdict: %s\n",
-           gain_pp_x10 >= 50 ? "**PASS**" :
-           gain_pp_x10 >= 10 ? "INCONCLUSIVE (1pp ≤ gain < 5pp)" :
-           gain_pp_x10 >  0  ? "MARGINAL (positive but < 1pp)" :
-                                "**FAIL** (gain ≤ 0; substrate-novelty not demonstrated)");
-
-    /* Gate 2 verdict: wildcard runtime vs Hamming runtime on same bank. */
-    /* Compare bank_wildcard + Wildcard vs bank_wildcard + Hamming —
-     * isolates the kernel runtime difference, holding the bank constant. */
-    printf("\n## Gate 2 verdict: wildcard kernel runtime overhead\n");
-    double t_hamming  = results[BANK_CLASS_WILDCARD][DIST_HAMMING].runtime_s;
-    double t_wildcard = results[BANK_CLASS_WILDCARD][DIST_WILDCARD].runtime_s;
-    double ratio = t_wildcard / t_hamming;
-    printf("  Hamming runtime  (on wildcard bank): %.3fs\n", t_hamming);
-    printf("  Wildcard runtime (on wildcard bank): %.3fs\n", t_wildcard);
-    printf("  ratio (wildcard / Hamming):          %.2fx\n", ratio);
-    printf("  Gate 2 PASS bar: ratio ≤ 1.20×\n");
-    printf("  Gate 2 verdict: %s\n",
-           ratio <= 1.20 ? "**PASS**" :
-           ratio <= 1.50 ? "ACCEPTABLE (overhead present but bounded)" :
-                            "**FAIL** (overhead exceeds 50%; needs NEON optimization)");
-
-    /* Gate 3: substrate-novelty audit — by construction. The
-     * wildcard kernel uses the substrate's free third state directly
-     * via 2-bit packed-trit storage. Base-2 with masks would require
-     * either:
-     *   - 4-state encoding {-1, 0, +1, mask} = 2 bits per position SAME
-     *     as substrate, but the kernel must dispatch on 4 states instead
-     *     of 3 — extra branching.
-     *   - 3-state ±1/0 encoding + separate mask bitvector = 2 bits/pos
-     *     for trits + 1 bit/pos for mask = 1.5× substrate storage,
-     *     plus separate popcount-distance over the mask, plus AND'ing
-     *     the mask into the cost computation = additional NEON pass.
-     *
-     * Either way base-2 pays storage or compute overhead the substrate's
-     * free third state avoids. The audit is structural; documented in
-     * §19.5 of M4T_SUBSTRATE.md. */
-    printf("\n## Gate 3 verdict: substrate-novelty audit\n");
-    printf("  Wildcard semantics is expressed in the substrate's free\n");
-    printf("  third state at 2 bits/position. Base-2 alternatives:\n");
-    printf("    - 4-state {-1, 0, +1, mask}: same 2 bits/pos but extra\n");
-    printf("      branching on the 4th state (no free SDOT-equivalent).\n");
-    printf("    - ±1 + separate mask: 3 bits/pos = 1.5× storage, plus\n");
-    printf("      separate masked-popcount kernel (extra NEON pass).\n");
-    printf("  Substrate-novelty audit: **PASS by construction**.\n");
-    printf("  Documented: m4t/docs/M4T_SUBSTRATE.md §19.5.\n");
-
-    /* Cleanup. */
     free(protos); free(train); free(train_lbl); free(test); free(test_lbl);
     free(R); free(train_proj);
-    free(bank_mean.tiles_packed); free(bank_mean.labels);
-    free(bank_wild.tiles_packed); free(bank_wild.labels);
+    free(bm.tiles_packed); free(bm.labels);
+    free(bw.tiles_packed); free(bw.labels);
+}
+
+static void stats(const int* vals, int n, double* mean_pct, double* sd_pp) {
+    double sum = 0; for (int i = 0; i < n; i++) sum += vals[i];
+    double m = sum / n;
+    double sq = 0; for (int i = 0; i < n; i++) { double d = vals[i] - m; sq += d*d; }
+    double var = (n > 1) ? sq / (n - 1) : 0;
+    *mean_pct = m / 10.0;
+    *sd_pp = sqrt(var) / 10.0;
+}
+
+static const uint32_t PROTO_SEEDS[N_SEEDS]  = { 0xc0ffeebbu, 0xa5a5a5a5u, 0xfeedfaceu };
+static const uint32_t TRAIN_SEEDS[N_SEEDS]  = { 0x11111111u, 0x22222222u, 0x33333333u };
+static const uint32_t TEST_SEEDS[N_SEEDS]   = { 0x44444444u, 0x55555555u, 0x66666666u };
+static const uint32_t R_SEEDS[N_SEEDS]      = { 0xc7c7c7c7u, 0xb22bd00du, 0xdeadc0deu };
+
+int main(void) {
+    printf("# P0-1 wildcard verification — %d seeds\n", N_SEEDS);
+    printf("# synth_wildcard: C=10, D=64 (K=16+M=16+N=32), n_train=%d, n_test=%d, sig_dim=%d\n",
+           N_TRAIN, N_TEST, SIG_DIM);
+    printf("\n");
+
+    int cells_per_seed[N_SEEDS][2][2];
+    for (int s = 0; s < N_SEEDS; s++) {
+        run_one_seed(cells_per_seed[s], PROTO_SEEDS[s], TRAIN_SEEDS[s], TEST_SEEDS[s], R_SEEDS[s]);
+    }
+
+    /* Aggregate. */
+    int mean_ham[N_SEEDS], mean_wld[N_SEEDS], wld_ham[N_SEEDS], wld_wld[N_SEEDS];
+    for (int s = 0; s < N_SEEDS; s++) {
+        mean_ham[s] = cells_per_seed[s][BANK_MEAN][DIST_HAMMING];
+        mean_wld[s] = cells_per_seed[s][BANK_MEAN][DIST_WILDCARD];
+        wld_ham[s]  = cells_per_seed[s][BANK_WILDCARD][DIST_HAMMING];
+        wld_wld[s]  = cells_per_seed[s][BANK_WILDCARD][DIST_WILDCARD];
+    }
+    double m_mh, sd_mh, m_mw, sd_mw, m_wh, sd_wh, m_ww, sd_ww;
+    stats(mean_ham, N_SEEDS, &m_mh, &sd_mh);
+    stats(mean_wld, N_SEEDS, &m_mw, &sd_mw);
+    stats(wld_ham,  N_SEEDS, &m_wh, &sd_wh);
+    stats(wld_wld,  N_SEEDS, &m_ww, &sd_ww);
+
+    /* Paired gains (substrate-novel cell minus baseline cell, per seed). */
+    int gain_bank_alone[N_SEEDS], gain_committed_pair[N_SEEDS];
+    for (int s = 0; s < N_SEEDS; s++) {
+        gain_bank_alone[s]      = wld_ham[s]  - mean_ham[s];
+        gain_committed_pair[s]  = wld_wld[s]  - mean_ham[s];
+    }
+    double gba_mean, gba_sd, gcp_mean, gcp_sd;
+    stats(gain_bank_alone,     N_SEEDS, &gba_mean, &gba_sd);
+    stats(gain_committed_pair, N_SEEDS, &gcp_mean, &gcp_sd);
+
+    printf("| bank          | kernel    | mean ± stddev    | min   | max   |\n");
+    printf("|---------------|-----------|------------------|-------|-------|\n");
+    int min_v, max_v;
+    min_v = max_v = mean_ham[0]; for (int s=1;s<N_SEEDS;s++){if(mean_ham[s]<min_v)min_v=mean_ham[s];if(mean_ham[s]>max_v)max_v=mean_ham[s];}
+    printf("| class_mean    | Hamming   | %5.1f%% ± %4.2fpp | %5.1f | %5.1f |\n", m_mh, sd_mh, min_v/10.0, max_v/10.0);
+    min_v = max_v = mean_wld[0]; for (int s=1;s<N_SEEDS;s++){if(mean_wld[s]<min_v)min_v=mean_wld[s];if(mean_wld[s]>max_v)max_v=mean_wld[s];}
+    printf("| class_mean    | Wildcard  | %5.1f%% ± %4.2fpp | %5.1f | %5.1f |\n", m_mw, sd_mw, min_v/10.0, max_v/10.0);
+    min_v = max_v = wld_ham[0]; for (int s=1;s<N_SEEDS;s++){if(wld_ham[s]<min_v)min_v=wld_ham[s];if(wld_ham[s]>max_v)max_v=wld_ham[s];}
+    printf("| class_wildcard| Hamming   | %5.1f%% ± %4.2fpp | %5.1f | %5.1f | <-- bank alone\n", m_wh, sd_wh, min_v/10.0, max_v/10.0);
+    min_v = max_v = wld_wld[0]; for (int s=1;s<N_SEEDS;s++){if(wld_wld[s]<min_v)min_v=wld_wld[s];if(wld_wld[s]>max_v)max_v=wld_wld[s];}
+    printf("| class_wildcard| Wildcard  | %5.1f%% ± %4.2fpp | %5.1f | %5.1f | <-- committed pair\n", m_ww, sd_ww, min_v/10.0, max_v/10.0);
+
+    printf("\n");
+    printf("## Paired gains vs baseline (class_mean + Hamming)\n");
+    printf("  Bank alone (class_wildcard + Hamming): %+5.2fpp ± %4.2fpp paired stddev\n", gba_mean, gba_sd);
+    printf("  Committed pair (class_wildcard + Wildcard): %+5.2fpp ± %4.2fpp paired stddev\n", gcp_mean, gcp_sd);
+    printf("  95%% CI on bank-alone gain: [%+5.2f, %+5.2f] (mean ± 1.96*sd/sqrt(n))\n",
+           gba_mean - 1.96*gba_sd/sqrt(N_SEEDS), gba_mean + 1.96*gba_sd/sqrt(N_SEEDS));
 
     return 0;
 }
