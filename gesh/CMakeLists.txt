@@ -11,6 +11,7 @@ add_library(gesh_bench STATIC
     bench/synth_proto.c
     bench/synth_wildcard.c
     bench/synth_close_proto.c
+    bench/synth_compose_hier.c
 )
 target_include_directories(gesh_bench PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
@@ -141,3 +142,12 @@ target_link_libraries(gesh_mnist_geometric PRIVATE gesh gesh_image_canon)
 # P0-4 verification: hierarchical (compositional) routing on synth_close_proto.
 add_executable(gesh_compose_probe bench/compose_probe.c)
 target_link_libraries(gesh_compose_probe PRIVATE gesh gesh_bench m)
+
+# P0-4 RED-TEAM REMEDIATION: ablation across stage-1/stage-2/mask configs
+# on a hierarchical synthetic (synth_compose_hier).
+add_executable(gesh_compose_ablation bench/compose_ablation.c)
+target_link_libraries(gesh_compose_ablation PRIVATE gesh gesh_bench m)
+
+# P0-4 Gate 4 (red-team C3): MNIST regression check for P0-4 hier.
+add_executable(gesh_mnist_compose bench/mnist_compose.c)
+target_link_libraries(gesh_mnist_compose PRIVATE gesh gesh_image_canon)

@@ -12,6 +12,7 @@
  */
 
 #include "gesh_bank.h"
+#include "gesh_forward.h"
 #include "synth_proto.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
@@ -149,9 +150,66 @@ static int test_noisy_recovery(void) {
     return 0;
 }
 
+/* P0-4 red-team H4 fix: shape-only integration test for the
+ * archived-but-in-tree hierarchical bank. Verifies alloc / build /
+ * free don't crash and produce a structurally well-formed bank. Does
+ * NOT verify classification correctness — the design is documented as
+ * a negative result; this test only guards the API surface against
+ * accidental shape regressions. */
+static int test_hier_bank_shape(void) {
+    synth_proto_config_t cfg = synth_proto_default();
+    int C = cfg.n_classes;
+    int D = cfg.input_dim;
+    cfg.seed = 0xBEEFu;
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    int n_train = 200 * C;
+    m4t_trit_t* train = malloc((size_t)n_train * D * sizeof(m4t_trit_t));
+    int* y = malloc((size_t)n_train * sizeof(int));
+    synth_proto_generate_samples(train, y, n_train, protos, &cfg, 0xC0FFu);
+
+    gesh_bank_hier_t hb;
+    if (gesh_bank_hier_alloc(&hb, C, D) != 0) return 1;
+    gesh_bank_build_hierarchical(&hb, train, y, n_train, C, /*snr_pm=*/200);
+
+    if (hb.n_stage1 != C || hb.sig_dim != D
+        || hb.stage1.n_tiles != C
+        || hb.stage2 == NULL || hb.stage2_masks == NULL) {
+        printf("FAIL hier_bank_shape: top-level fields\n");
+        return 1;
+    }
+    for (int c = 0; c < C; c++) {
+        if (hb.stage2[c].n_tiles != C || hb.stage2[c].sig_dim != D) {
+            printf("FAIL hier_bank_shape: sub-bank %d shape\n", c);
+            return 1;
+        }
+        for (int k = 0; k < C; k++) {
+            if (hb.stage2[c].labels[k] != k) {
+                printf("FAIL hier_bank_shape: sub-bank %d labels[%d]=%d\n",
+                       c, k, hb.stage2[c].labels[k]);
+                return 1;
+            }
+        }
+    }
+
+    /* Forward should not crash. */
+    int* preds = malloc((size_t)n_train * sizeof(int));
+    gesh_projection_t proj = { .R = NULL, .input_dim = D, .sig_dim = D };
+    int rc = gesh_forward_classify_hierarchical(preds, NULL, train, n_train,
+                                                    &hb, &proj);
+    if (rc != 0) { printf("FAIL hier forward returned %d\n", rc); return 1; }
+
+    free(preds);
+    gesh_bank_hier_free(&hb);
+    free(train); free(y); free(protos);
+    return 0;
+}
+
 int main(void) {
     if (test_clean_recovery())  return 1;
     if (test_noisy_recovery())  return 1;
-    printf("gesh_bank: all 2 tests passed\n");
+    if (test_hier_bank_shape()) return 1;
+    printf("gesh_bank: all 3 tests passed\n");
     return 0;
 }
