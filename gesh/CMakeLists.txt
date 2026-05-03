@@ -128,3 +128,7 @@ target_link_libraries(gesh_confidence_probe PRIVATE gesh gesh_bench m)
 # P0-2 Gate 4: MNIST regression check for confidence routing.
 add_executable(gesh_mnist_confidence bench/mnist_confidence.c)
 target_link_libraries(gesh_mnist_confidence PRIVATE gesh gesh_image_canon)
+
+# P0-3 verification: lattice-native geometric training on synth_proto.
+add_executable(gesh_geometric_probe bench/geometric_probe.c)
+target_link_libraries(gesh_geometric_probe PRIVATE gesh gesh_bench m)

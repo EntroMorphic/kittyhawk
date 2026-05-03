@@ -843,7 +843,36 @@ static int test_confidence_weighted_equals_hamming_no_confidence(void) {
     return 0;
 }
 
-/* ── Main ──────────────────────────────────────────────────────────────── */
+/* ── pairwise_hamming_sum (P0-3) ───────────────────────────────────────── */
+
+static int test_pairwise_hamming_sum_basic(void) {
+    /* T=3, sig_dim=4. Three tiles:
+     *   tile 0: (+1, +1,  0,  0)  packed = 0x05
+     *   tile 1: (-1, -1,  0,  0)  packed = 0x0A
+     *   tile 2: ( 0,  0, +1, +1)  packed = 0x50
+     * Pairwise Hamming:
+     *   (0,1): full mismatch on first 2, agree on last 2 = 2+2+0+0 = 4
+     *   (0,2): asymmetric on all 4 (+1 vs 0 = 1, +1 vs 0 = 1, 0 vs +1 = 1, 0 vs +1 = 1) = 4
+     *   (1,2): asymmetric on all 4 = 4
+     * Sum = 12. */
+    uint8_t tiles[3] = { 0x05u, 0x0Au, 0x50u };
+    uint8_t mask = 0xFFu;
+    int32_t got = m4t_route_pairwise_hamming_sum(tiles, &mask, 3, 4);
+    ASSERT_EQ_I32(got, 12, "pairwise hamming sum 3 tiles");
+    return 0;
+}
+
+static int test_pairwise_hamming_sum_edge_cases(void) {
+    uint8_t tile = 0x05u;
+    uint8_t mask = 0xFFu;
+    /* T=0 or T=1: no pairs → sum 0. */
+    ASSERT_EQ_I32(m4t_route_pairwise_hamming_sum(&tile, &mask, 0, 4), 0, "T=0 → 0");
+    ASSERT_EQ_I32(m4t_route_pairwise_hamming_sum(&tile, &mask, 1, 4), 0, "T=1 → 0");
+    /* sig_dim=0 → sum 0 regardless of T. */
+    ASSERT_EQ_I32(m4t_route_pairwise_hamming_sum(&tile, &mask, 5, 0), 0, "sig_dim=0 → 0");
+    return 0;
+}
+
 
 int main(void) {
     if (test_threshold_extract_tau0())             return 1;
@@ -871,6 +900,8 @@ int main(void) {
     if (test_confidence_weighted_vs_hamming_behavior_diff())       return 1;
     if (test_confidence_weighted_multi_byte_and_mask())            return 1;
     if (test_confidence_weighted_equals_hamming_no_confidence())   return 1;
+    if (test_pairwise_hamming_sum_basic())                         return 1;
+    if (test_pairwise_hamming_sum_edge_cases())                    return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }

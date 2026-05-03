@@ -129,6 +129,33 @@ int gesh_train_lattice_update(
     const gesh_train_config_t* cfg
 );
 
+/* P0-3 — lattice-native geometric training. Same shape as
+ * gesh_train_lattice_update but the loss is `-pairwise_hamming_sum`
+ * over the bank tiles (we maximize tile separation in trit space).
+ *
+ * Substrate-distinct: the loss is computed entirely on packed-trit
+ * tile signatures via m4t_route_pairwise_hamming_sum. No labels
+ * referenced beyond bank construction (class-mean grouping). No
+ * batch sampling — loss is bank-only. The lattice IS the geometry.
+ *
+ * Same scratch / refresh / early-stop behavior as the standard
+ * lattice update. Bank type is single-prototype class-mean (uses
+ * gesh_bank_build_class_mean for refresh).
+ *
+ * Returns the final pairwise_hamming_sum value on success, -1 on
+ * failure. */
+int gesh_train_lattice_update_geometric(
+    m4t_trit_t*       R,
+    gesh_bank_t*      out_bank,
+    const m4t_trit_t* train_samples,
+    const int*        train_labels,
+    int n_samples,
+    int n_classes,
+    int sig_dim,
+    int input_dim,
+    const gesh_train_config_t* cfg
+);
+
 #ifdef __cplusplus
 }
 #endif

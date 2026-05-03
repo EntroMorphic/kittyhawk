@@ -448,3 +448,130 @@ int gesh_train_lattice_update(
     scratch_free(&sc);
     return last_train_errors;
 }
+
+/* ── P0-3: lattice-native geometric training ──────────────────────────── */
+
+#include "m4t_route.h"
+
+int gesh_train_lattice_update_geometric(
+    m4t_trit_t* R,
+    gesh_bank_t* out_bank,
+    const m4t_trit_t* train_samples,
+    const int* train_labels,
+    int n_samples,
+    int n_classes,
+    int sig_dim,
+    int input_dim,
+    const gesh_train_config_t* cfg)
+{
+    assert(R && out_bank && train_samples && train_labels && cfg);
+    assert(n_samples > 0 && n_classes > 1);
+    assert(sig_dim > 0 && input_dim > 0);
+    assert(out_bank->sig_dim == sig_dim);
+    assert(out_bank->n_tiles == n_classes);
+
+    int n_epochs = (cfg->n_epochs > 0) ? cfg->n_epochs : 50;
+    int n_flips  = (cfg->n_flip_evals_per_epoch > 0)
+                    ? cfg->n_flip_evals_per_epoch : 100;
+
+    int Dp_sig = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    /* Mask for pairwise sum computation. */
+    uint8_t* mask = malloc((size_t)Dp_sig);
+    memset(mask, 0xFF, (size_t)Dp_sig);
+    int tail = sig_dim & 3;
+    if (tail > 0) mask[Dp_sig - 1] = (uint8_t)((1u << (tail * 2)) - 1u);
+
+    m4t_trit_t* scratch_proj = malloc((size_t)n_samples * (size_t)sig_dim
+                                         * sizeof(m4t_trit_t));
+    gesh_project_scratch_t pscratch;
+    gesh_project_scratch_init(&pscratch, sig_dim, input_dim, n_samples);
+
+    /* Initial bank + initial loss. */
+    gesh_project_batch_unpacked_scratch(scratch_proj, train_samples, n_samples,
+                                           R, sig_dim, input_dim, &pscratch);
+    gesh_bank_build_class_mean(out_bank, scratch_proj, train_labels,
+                                  n_samples, n_classes);
+    int32_t base_loss = m4t_route_pairwise_hamming_sum(
+        out_bank->tiles_packed, mask, n_classes, sig_dim);
+
+    /* Seed for trit-position sampling. */
+    uint32_t state = cfg->seed ? cfg->seed : 0x12345678u;
+
+    int best_loss = base_loss;
+    int n_no_improve = 0;
+    int patience = (cfg->early_stop_patience > 0) ? cfg->early_stop_patience : 0;
+
+    for (int epoch = 0; epoch < n_epochs; epoch++) {
+        for (int flip = 0; flip < n_flips; flip++) {
+            uint32_t r1 = state ^= state << 13;
+            r1 ^= r1 >> 17; r1 ^= r1 << 5; state = r1;
+            int trit_idx = (int)(r1 % (uint32_t)(sig_dim * input_dim));
+            int i = trit_idx / input_dim;
+            int j = trit_idx % input_dim;
+            m4t_trit_t orig = R[i * input_dim + j];
+
+            int best_loss_local = base_loss;
+            m4t_trit_t best_value = orig;
+
+            for (int v_idx = -1; v_idx <= 1; v_idx++) {
+                m4t_trit_t v = (m4t_trit_t)v_idx;
+                if (v == orig) continue;
+                R[i * input_dim + j] = v;
+                /* Rebuild bank from scratch and recompute loss. */
+                gesh_project_batch_unpacked_scratch(
+                    scratch_proj, train_samples, n_samples,
+                    R, sig_dim, input_dim, &pscratch);
+                gesh_bank_build_class_mean(out_bank, scratch_proj, train_labels,
+                                              n_samples, n_classes);
+                int32_t this_loss = m4t_route_pairwise_hamming_sum(
+                    out_bank->tiles_packed, mask, n_classes, sig_dim);
+                if (this_loss > best_loss_local) {
+                    best_loss_local = this_loss;
+                    best_value = v;
+                }
+            }
+            R[i * input_dim + j] = best_value;
+            if (best_value != orig) {
+                base_loss = best_loss_local;
+            } else {
+                /* Restore bank to current-R state since we left R as orig. */
+                gesh_project_batch_unpacked_scratch(
+                    scratch_proj, train_samples, n_samples,
+                    R, sig_dim, input_dim, &pscratch);
+                gesh_bank_build_class_mean(out_bank, scratch_proj, train_labels,
+                                              n_samples, n_classes);
+            }
+        }
+
+        if (cfg->log_per_epoch) {
+            fprintf(stderr, "[gesh_train_geometric] epoch %d/%d: "
+                    "pairwise_sum=%d (best=%d)\n",
+                    epoch + 1, n_epochs, base_loss, best_loss);
+        }
+
+        if (base_loss > best_loss) {
+            best_loss = base_loss;
+            n_no_improve = 0;
+        } else if (patience > 0) {
+            if (++n_no_improve >= patience) {
+                if (cfg->log_per_epoch)
+                    fprintf(stderr, "[gesh_train_geometric] early-stop epoch %d\n", epoch + 1);
+                break;
+            }
+        }
+    }
+
+    /* Final bank rebuild from final R. */
+    gesh_project_batch_unpacked_scratch(scratch_proj, train_samples, n_samples,
+                                           R, sig_dim, input_dim, &pscratch);
+    gesh_bank_build_class_mean(out_bank, scratch_proj, train_labels,
+                                  n_samples, n_classes);
+    int32_t final_loss = m4t_route_pairwise_hamming_sum(
+        out_bank->tiles_packed, mask, n_classes, sig_dim);
+
+    free(mask);
+    free(scratch_proj);
+    gesh_project_scratch_free(&pscratch);
+    return final_loss;
+}

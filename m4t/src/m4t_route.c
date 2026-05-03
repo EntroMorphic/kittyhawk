@@ -222,6 +222,31 @@ int32_t m4t_route_wildcard_dist(
     return total - correction;
 }
 
+/* ── Pairwise Hamming sum ──────────────────────────────────────────────── */
+
+int32_t m4t_route_pairwise_hamming_sum(
+    const uint8_t* tile_sigs_packed,
+    const uint8_t* mask,
+    int T,
+    int sig_dim)
+{
+    assert(T >= 0 && sig_dim >= 0);
+    if (T < 2 || sig_dim == 0) return 0;
+    assert(tile_sigs_packed && mask);
+
+    int Dp = M4T_TRIT_PACKED_BYTES(sig_dim);
+    int32_t sum = 0;
+    for (int i = 0; i < T; i++) {
+        for (int j = i + 1; j < T; j++) {
+            sum += m4t_popcount_dist(
+                tile_sigs_packed + (size_t)i * Dp,
+                tile_sigs_packed + (size_t)j * Dp,
+                mask, Dp);
+        }
+    }
+    return sum;
+}
+
 /* ── Distance batch ────────────────────────────────────────────────────── */
 
 void m4t_route_distance_batch(

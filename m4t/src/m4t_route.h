@@ -183,6 +183,28 @@ int32_t m4t_route_wildcard_dist(
     int sig_dim
 );
 
+/* ── Pairwise Hamming sum (lattice-native geometric loss) ──────────────── */
+
+/* Sum of ternary Hamming distances over all (i, j) tile pairs with i<j.
+ * Used as a lattice-native geometric loss for substrate-novel training:
+ * maximizing this sum maximizes class-tile separation in trit space.
+ *
+ * Substrate-distinct: ternary Hamming is the trit lattice's natural
+ * distance metric. Operates entirely on packed-trit signatures via
+ * existing m4t_popcount_dist; no labels, no float, no continuous
+ * relaxation. The lattice IS the geometry.
+ *
+ * Returns int32 sum. Max possible value = T*(T-1)/2 * 2*sig_dim.
+ *
+ * Preconditions: T >= 0; sig_dim >= 0; tile signatures + mask non-NULL
+ * when T*(T-1) > 0. */
+int32_t m4t_route_pairwise_hamming_sum(
+    const uint8_t* tile_sigs_packed,    /* [T × M4T_TRIT_PACKED_BYTES(sig_dim)] */
+    const uint8_t* mask,
+    int T,
+    int sig_dim
+);
+
 /* ── Distance batch ────────────────────────────────────────────────────── */
 
 /* Compute routing distance from one query signature to T tile signatures.
