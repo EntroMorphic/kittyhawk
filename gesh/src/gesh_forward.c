@@ -8,12 +8,37 @@
 
 #include "gesh_forward.h"
 #include "gesh_project.h"
+#include "m4t_route.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Distance kernel signature shared between standard Hamming and wildcard
+ * forward variants. Both kernels have the same arg shape. */
+typedef int32_t (*dist_kernel_t)(
+    const uint8_t* query_packed,
+    const uint8_t* tile_packed,
+    const uint8_t* mask,
+    int packed_bytes_or_sig_dim);
+
+/* Trampolines unify the calling convention. m4t_popcount_dist takes
+ * packed_bytes; m4t_route_wildcard_dist takes sig_dim. Both produce the
+ * same int32 distance under their declared semantics. */
+static int32_t dist_hamming_trampoline(
+    const uint8_t* a, const uint8_t* b, const uint8_t* mask,
+    int packed_bytes_or_sig_dim)
+{
+    return m4t_popcount_dist(a, b, mask, packed_bytes_or_sig_dim);
+}
+static int32_t dist_wildcard_trampoline(
+    const uint8_t* a, const uint8_t* b, const uint8_t* mask,
+    int packed_bytes_or_sig_dim)
+{
+    return m4t_route_wildcard_dist(a, b, mask, packed_bytes_or_sig_dim);
+}
 
 /* Find the indices of the top_k smallest values in `dists[0..T)`.
  * Writes top_k indices to `out_idx`; output order is ascending by value.
@@ -54,13 +79,25 @@ static void topk_smallest_indices(
     free(buf_d);
 }
 
-int gesh_forward_classify(
+/* Shared core for both forward variants. The only behavioral difference
+ * between gesh_forward_classify and gesh_forward_classify_wildcard is the
+ * per-tile distance kernel; everything else (projection, top-k, vote)
+ * is identical. The `dist_kernel` parameter selects between them.
+ *
+ * The `dist_kernel_arg_is_sig_dim` flag handles the API-shape difference:
+ *   m4t_popcount_dist takes packed_bytes
+ *   m4t_route_wildcard_dist takes sig_dim
+ * Both compute the same byte-level work; only the argument convention
+ * differs. */
+static int forward_classify_impl(
     int* out_predictions,
     const m4t_trit_t* queries,
     int n_queries,
     const gesh_bank_t* bank,
     const gesh_projection_t* proj,
-    int top_k)
+    int top_k,
+    dist_kernel_t dist_kernel,
+    int dist_kernel_arg_is_sig_dim)
 {
     assert(out_predictions && bank && proj);
     assert(n_queries >= 0);
@@ -141,10 +178,11 @@ int gesh_forward_classify(
             m4t_pack_trits_1d(packed_sig, x, sig_dim);
         }
 
-        /* 2. Compute Hamming distance to each tile. */
+        /* 2. Compute distance to each tile via the selected kernel. */
+        int dist_arg = dist_kernel_arg_is_sig_dim ? sig_dim : Dp_sig;
         for (int t = 0; t < T; t++) {
             const uint8_t* tile = bank->tiles_packed + (size_t)t * Dp_sig;
-            dists[t] = m4t_popcount_dist(packed_sig, tile, mask_packed, Dp_sig);
+            dists[t] = dist_kernel(packed_sig, tile, mask_packed, dist_arg);
         }
 
         /* 3. Find top_k smallest distances. */
@@ -175,4 +213,38 @@ int gesh_forward_classify(
     free(topk_idx);
     free(vote);
     return 0;
+}
+
+int gesh_forward_classify(
+    int* out_predictions,
+    const m4t_trit_t* queries,
+    int n_queries,
+    const gesh_bank_t* bank,
+    const gesh_projection_t* proj,
+    int top_k)
+{
+    /* Standard ternary Hamming routing — §19 (I) Tie-cancellation
+     * symmetric semantics for zero-state. */
+    return forward_classify_impl(out_predictions, queries, n_queries,
+                                  bank, proj, top_k,
+                                  dist_hamming_trampoline,
+                                  /*dist_kernel_arg_is_sig_dim=*/0);
+}
+
+int gesh_forward_classify_wildcard(
+    int* out_predictions,
+    const m4t_trit_t* queries,
+    int n_queries,
+    const gesh_bank_t* bank,
+    const gesh_projection_t* proj,
+    int top_k)
+{
+    /* Wildcard routing — §19 (II) Wildcard semantics for tile-zero
+     * positions. Caller-responsible for using a deliberate-wildcard bank
+     * (e.g. gesh_bank_build_class_wildcard) per the §19.6 sanctioned-
+     * pairing constraint. */
+    return forward_classify_impl(out_predictions, queries, n_queries,
+                                  bank, proj, top_k,
+                                  dist_wildcard_trampoline,
+                                  /*dist_kernel_arg_is_sig_dim=*/1);
 }

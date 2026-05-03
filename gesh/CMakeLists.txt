@@ -9,6 +9,7 @@
 # tests and any future end-to-end tools.
 add_library(gesh_bench STATIC
     bench/synth_proto.c
+    bench/synth_wildcard.c
 )
 target_include_directories(gesh_bench PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
@@ -110,3 +111,8 @@ target_link_libraries(gesh_mnist_kmeans_run PRIVATE gesh gesh_image_canon m)
 # training contributes on top of the bank-capacity gain.
 add_executable(gesh_mnist_kmeans_trained bench/mnist_kmeans_trained.c)
 target_link_libraries(gesh_mnist_kmeans_trained PRIVATE gesh gesh_image_canon m)
+
+# P0-1 verification: wildcard kernel + wildcard bank vs class_mean + Hamming
+# baseline on synth_wildcard. Runs Gates 1, 2, 3 from the design SYNTHESIZE.
+add_executable(gesh_wildcard_probe bench/wildcard_probe.c)
+target_link_libraries(gesh_wildcard_probe PRIVATE gesh gesh_bench m)

@@ -37,6 +37,99 @@ void m4t_route_threshold_extract(
     }
 }
 
+/* ── Wildcard distance ─────────────────────────────────────────────────── */
+
+int32_t m4t_route_wildcard_dist(
+    const uint8_t* query_packed,
+    const uint8_t* tile_packed,
+    const uint8_t* mask,
+    int sig_dim)
+{
+    assert(query_packed && tile_packed && mask);
+    assert(sig_dim >= 0);
+
+    int packed_bytes = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    /* Standard ternary Hamming. Reuses the optimized kernel; this
+     * accounts for all the cost-table cells except the wildcard
+     * exception. */
+    int32_t total = m4t_popcount_dist(query_packed, tile_packed,
+                                        mask, packed_bytes);
+
+    /* Wildcard correction: subtract 1 per position where
+     *   tile-trit-field == 0b00 (zero, wildcard interpretation)
+     *   AND query-trit-field is non-zero (0b01 or 0b10)
+     *   AND mask field is active (mask byte's 2-bit field is 0b11)
+     *
+     * Per-byte bit math: each byte holds 4 trit fields at bit positions
+     * (0..1), (2..3), (4..5), (6..7). The mask 0x55 = 0b01010101 selects
+     * the LOW bit of each 2-bit field. We compute three byte-level masks
+     * with one bit per field at the low-bit-of-field position:
+     *
+     *   tile_field_zero  = (~(b_t | (b_t >> 1))) & 0x55
+     *     bit set iff field is 0b00 (both bits zero).
+     *
+     *   query_field_nonzero = (b_q | (b_q >> 1)) & 0x55
+     *     bit set iff field is 0b01 or 0b10 (at least one bit set).
+     *
+     *   mask_field_active = (mask) & 0x55
+     *     bit set iff mask field is 0b11 (caller guarantees mask
+     *     bytes are 0xFF for active fields, 0x00 for inactive — see
+     *     gesh_forward.c mask construction). The 0x55 isolates the
+     *     low bit of each field, which is 1 iff the field is active.
+     *
+     * Their AND gives a byte where each set bit represents one
+     * position to subtract from the standard Hamming total.
+     *
+     * No NEON path on this corrective pass — the per-byte work is
+     * a few ALU ops + popcount; for typical sig_dim ≤ 1024 (Dp ≤ 256)
+     * the loop is bounded by a few hundred byte operations. If
+     * profiling shows this is a bottleneck (Gate 2: runtime ≤ 1.2×
+     * current Hamming), a NEON variant follows (vand/vshr/vbic/vcnt
+     * pattern). */
+    int32_t correction = 0;
+    int i = 0;
+
+    /* 8-byte chunks via __builtin_popcountll for high-throughput
+     * scalar. Same shape as popcount_dist's 8-byte path. */
+    for (; i + 8 <= packed_bytes; i += 8) {
+        uint64_t bt, bq, mb;
+        memcpy(&bt, tile_packed  + i, 8);
+        memcpy(&bq, query_packed + i, 8);
+        memcpy(&mb, mask         + i, 8);
+        uint64_t tile_zero       = (~(bt | (bt >> 1))) & 0x5555555555555555ULL;
+        uint64_t query_nonzero   = (bq | (bq >> 1))     & 0x5555555555555555ULL;
+        uint64_t mask_active     = mb                   & 0x5555555555555555ULL;
+        uint64_t correction_mask = tile_zero & query_nonzero & mask_active;
+        correction += (int32_t)__builtin_popcountll(correction_mask);
+    }
+    /* 4-byte chunks for the N_PROJ=16 fast path. */
+    for (; i + 4 <= packed_bytes; i += 4) {
+        uint32_t bt, bq, mb;
+        memcpy(&bt, tile_packed  + i, 4);
+        memcpy(&bq, query_packed + i, 4);
+        memcpy(&mb, mask         + i, 4);
+        uint32_t tile_zero       = (~(bt | (bt >> 1))) & 0x55555555u;
+        uint32_t query_nonzero   = (bq | (bq >> 1))     & 0x55555555u;
+        uint32_t mask_active     = mb                   & 0x55555555u;
+        uint32_t correction_mask = tile_zero & query_nonzero & mask_active;
+        correction += (int32_t)__builtin_popcount(correction_mask);
+    }
+    /* Byte tail. */
+    for (; i < packed_bytes; i++) {
+        uint8_t bt = tile_packed[i];
+        uint8_t bq = query_packed[i];
+        uint8_t mb = mask[i];
+        uint8_t tile_zero       = (uint8_t)((~(bt | (bt >> 1))) & 0x55u);
+        uint8_t query_nonzero   = (uint8_t)((bq | (bq >> 1))     & 0x55u);
+        uint8_t mask_active     = (uint8_t)(mb                   & 0x55u);
+        uint8_t correction_mask = (uint8_t)(tile_zero & query_nonzero & mask_active);
+        correction += (int32_t)__builtin_popcount((unsigned)correction_mask);
+    }
+
+    return total - correction;
+}
+
 /* ── Distance batch ────────────────────────────────────────────────────── */
 
 void m4t_route_distance_batch(

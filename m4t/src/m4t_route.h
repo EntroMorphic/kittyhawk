@@ -70,6 +70,51 @@ void m4t_route_threshold_extract(
     int n
 );
 
+/* ── Wildcard distance ─────────────────────────────────────────────────── */
+
+/* Wildcard-Hamming distance between a query signature and a tile
+ * signature, where TILE-zero is interpreted as wildcard (don't-care /
+ * match-anything). Distinct from `m4t_popcount_dist` which costs
+ * (q=±1, t=0) at 1; this kernel costs it at 0.
+ *
+ * Per-position cost table:
+ *   (q=+1, t=+1)  → 0   (full match)
+ *   (q=-1, t=-1)  → 0   (full match)
+ *   (q=0,  t=0)   → 0   (mutual abstention; same as popcount_dist)
+ *   (q=±1, t=0)   → 0   (wildcard match — KEY DISTINCTION FROM popcount_dist)
+ *   (q=0,  t=±1)  → 1   (query abstains, tile asserts; partial mismatch)
+ *   (q=+1, t=-1)  → 2   (full mismatch)
+ *   (q=-1, t=+1)  → 2   (full mismatch)
+ *
+ * §19 zero-state interpretation: the kernel produces (II) Wildcard
+ * semantics for tile-side zeros; (III) Abstain semantics for query-side
+ * zeros (cost 1 against tile-±1, cost 0 against tile-0). See
+ * `m4t/docs/M4T_SUBSTRATE.md` §19 for the substrate-level discussion.
+ *
+ * §19 sanctioned input class: tile signatures from constructors that
+ * place zeros DELIBERATELY (`gesh_bank_build_class_wildcard`,
+ * sparse-coded constructors, feature-pruning constructors). NOT for
+ * use against `gesh_bank_build_class_mean` or `gesh_bank_build_kmeans_per_class`
+ * outputs where zeros emerge from sample-cancellation ties — there
+ * the wildcard interpretation over-promotes ambiguous matches.
+ *
+ * Implementation: computes standard ternary Hamming via
+ * `m4t_popcount_dist`, then subtracts a wildcard correction equal to
+ * the count of positions where tile-trit==0 AND query-trit!=0 (those
+ * positions contribute 1 to standard Hamming but 0 to wildcard).
+ *
+ * Preconditions:
+ *   query_packed, tile_packed, mask non-NULL.
+ *   sig_dim ≥ 0.
+ *   query_packed and tile_packed contain valid trit codes
+ *     (0b00, 0b01, 0b10); 0b11 is undefined behavior. */
+int32_t m4t_route_wildcard_dist(
+    const uint8_t* query_packed,
+    const uint8_t* tile_packed,
+    const uint8_t* mask,
+    int sig_dim
+);
+
 /* ── Distance batch ────────────────────────────────────────────────────── */
 
 /* Compute routing distance from one query signature to T tile signatures.

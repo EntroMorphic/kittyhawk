@@ -60,6 +60,25 @@ int gesh_forward_classify(
     int top_k
 );
 
+/* Wildcard-aware variant of gesh_forward_classify. Same shape, but the
+ * per-tile distance metric is `m4t_route_wildcard_dist` (treating tile-
+ * zero positions as wildcard / don't-care, §19 (II) interpretation)
+ * instead of `m4t_popcount_dist` (§19 (I) symmetric Hamming).
+ *
+ * Per the §19.6 sanctioned-pairing constraint: callers MUST use a bank
+ * constructed by `gesh_bank_build_class_wildcard` or another constructor
+ * that places zeros DELIBERATELY. Using this with `gesh_bank_build_class_mean`
+ * or `gesh_bank_build_kmeans_per_class` re-interprets emergent ties as
+ * deliberate wildcards, over-promoting ambiguous matches. */
+int gesh_forward_classify_wildcard(
+    int* out_predictions,
+    const m4t_trit_t* queries,
+    int n_queries,
+    const gesh_bank_t* bank,
+    const gesh_projection_t* proj,
+    int top_k
+);
+
 #ifdef __cplusplus
 }
 #endif

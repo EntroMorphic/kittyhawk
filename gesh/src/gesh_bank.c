@@ -65,6 +65,91 @@ void gesh_bank_build_class_mean(
     free(class_sums);
 }
 
+/* ── Wildcard bank constructor ──────────────────────────────────────────
+ *
+ * Per-class signed sum + per-class sample count + signal-to-noise
+ * threshold. Positions below threshold receive deliberate zero
+ * (§19 (II) Wildcard); above, standard sign.
+ *
+ * The "signal" is |sum| / count = mean magnitude. This is a coarse
+ * SNR proxy — for ternary samples whose values are ±1 or 0, the per-dim
+ * mean magnitude IS the within-class consistency on that dim. A class
+ * whose samples uniformly assert +1 on dim d gives signal=1.0 there;
+ * a class whose samples are evenly split on dim d gives signal≈0.
+ * Permille scale: signal_pm = |sum| × 1000 / count, range [0, 1000]. */
+void gesh_bank_build_class_wildcard(
+    gesh_bank_t* bank,
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int snr_threshold_permille)
+{
+    assert(bank && samples && labels);
+    assert(n_samples >= 0 && n_classes > 0);
+    assert(bank->n_tiles == n_classes);
+    assert(bank->sig_dim > 0);
+    assert(bank->tiles_packed && bank->labels);
+    assert(snr_threshold_permille >= 0);
+
+    int D = bank->sig_dim;
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+
+    int32_t* class_sums   = calloc((size_t)n_classes * (size_t)D, sizeof(int32_t));
+    int32_t* class_counts = calloc((size_t)n_classes,             sizeof(int32_t));
+    assert(class_sums && class_counts);
+
+    /* Accumulate sums and counts per class. */
+    for (int i = 0; i < n_samples; i++) {
+        int c = labels[i];
+        assert(c >= 0 && c < n_classes);
+        const m4t_trit_t* s = samples + (size_t)i * D;
+        int32_t* row = class_sums + (size_t)c * D;
+        for (int j = 0; j < D; j++) {
+            row[j] += (int32_t)s[j];
+        }
+        class_counts[c]++;
+    }
+
+    m4t_trit_t* tile_unpacked = malloc((size_t)D * sizeof(m4t_trit_t));
+    assert(tile_unpacked);
+
+    for (int c = 0; c < n_classes; c++) {
+        const int32_t* row = class_sums + (size_t)c * D;
+        int32_t cnt = class_counts[c];
+
+        for (int j = 0; j < D; j++) {
+            int32_t v = row[j];
+            int32_t abs_v = (v >= 0) ? v : -v;
+            int32_t signal_pm;
+            if (cnt > 0) {
+                /* signal_pm = |sum| × 1000 / count; integer arithmetic. */
+                signal_pm = (int32_t)((int64_t)abs_v * 1000 / cnt);
+            } else {
+                signal_pm = 0;
+            }
+
+            if (signal_pm < snr_threshold_permille) {
+                /* DELIBERATE wildcard. (II) Wildcard interpretation. */
+                tile_unpacked[j] = 0;
+            } else {
+                tile_unpacked[j] = (v > 0) ?  1
+                                 : (v < 0) ? -1
+                                 :            0;
+            }
+        }
+
+        m4t_pack_trits_1d(
+            bank->tiles_packed + (size_t)c * Dp,
+            tile_unpacked, D);
+        bank->labels[c] = c;
+    }
+
+    free(tile_unpacked);
+    free(class_counts);
+    free(class_sums);
+}
+
 /* ── k-means per-class bank constructor ──────────────────────────────────
  *
  * Multi-prototype bank: k > 1 tiles per class. See header for full

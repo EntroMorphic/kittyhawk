@@ -79,6 +79,49 @@ void gesh_bank_build_class_mean(
     int n_classes
 );
 
+/* Build a class-mean bank with deliberate wildcards (zero-state,
+ * §19 Wildcard interpretation) at low signal-to-noise positions for
+ * each class.
+ *
+ * Algorithm:
+ *   For each class c:
+ *     1. Compute per-dim signed sum across class-c samples (as in
+ *        gesh_bank_build_class_mean).
+ *     2. Compute per-dim sample count.
+ *     3. Compute per-dim "signal magnitude" = |sum| × 1000 / count
+ *        (permille of mean magnitude in [0, 1000]).
+ *     4. If signal_pm < snr_threshold_permille → tile trit = 0
+ *        (DELIBERATE wildcard, §19 (II)).
+ *        Else → tile trit = sign(sum) (standard ±1).
+ *     5. Pack tile.
+ *
+ * Output tiles use (II) Wildcard zero-state interpretation. Pair with
+ * `m4t_route_wildcard_dist` for substrate-native decision-rule routing.
+ * Pairing with `m4t_popcount_dist` (which uses (I) Tie-cancellation
+ * symmetric Hamming) is a §19 violation — wildcards get re-interpreted
+ * as half-cost ties, defeating their purpose.
+ *
+ * Determinism: same samples + labels + threshold → same output.
+ *
+ * Edge case: snr_threshold_permille = 0 produces output bit-identical to
+ * gesh_bank_build_class_mean (no positions zeroed; threshold satisfied
+ * by anything ≥ 0). Useful as a sanity check.
+ *
+ * Preconditions:
+ *   bank->n_tiles == n_classes
+ *   bank->sig_dim > 0
+ *   bank->tiles_packed and bank->labels non-NULL and sized
+ *   labels[i] in [0, n_classes)
+ *   snr_threshold_permille >= 0 */
+void gesh_bank_build_class_wildcard(
+    gesh_bank_t* bank,
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int snr_threshold_permille
+);
+
 /* Multi-prototype bank: k > 1 tiles per class via k-means clustering on
  * the sample space restricted to each class. Total tiles T = k_per_class
  * × n_classes; tile (c × k_per_class + j) carries label c.

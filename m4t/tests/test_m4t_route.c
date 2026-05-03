@@ -512,6 +512,169 @@ static int test_decisions_emit_coverage(void) {
     return 0;
 }
 
+/* ── wildcard_dist (§19) ───────────────────────────────────────────────
+ *
+ * §19 zero-state semantic test group. The wildcard kernel uses (II)
+ * Wildcard interpretation for tile-side zeros and (III) Abstain for
+ * query-side zeros — distinct from m4t_popcount_dist's (I) Tie-
+ * cancellation symmetric semantic. §19.6 review gate requires:
+ *   (a) declared zero-state interpretation in docstring (done in m4t_route.h)
+ *   (b) behavior-difference test demonstrating different output for
+ *       same input vs the existing kernel (test_wildcard_vs_hamming below)
+ *   (c) §19 audit table entry (done in m4t/docs/M4T_SUBSTRATE.md §19.4)
+ *   (d) sanctioned-pairing constraint — documented in m4t_route.h
+ */
+
+/* Build a single-byte packed signature from an array of 4 trits in {-1,0,+1}.
+ * trits[0] occupies bits 0-1, trits[1] bits 2-3, etc. */
+static uint8_t pack4(const m4t_trit_t* trits) {
+    uint8_t b = 0;
+    for (int i = 0; i < 4; i++) {
+        uint8_t code = (trits[i] == 1)  ? 0x01u :
+                       (trits[i] == -1) ? 0x02u :
+                                          0x00u;
+        b |= (uint8_t)(code << (i * 2));
+    }
+    return b;
+}
+
+/* Cost-table verification: every (q, t) ∈ {-1, 0, +1}² combination
+ * produces the documented wildcard cost. */
+static int test_wildcard_dist_cost_table(void) {
+    /* Build two single-byte signatures (4 trits each) covering every
+     * needed (q, t) pair. Use a separate test per pair for clarity. */
+    int cases[][3] = {
+        /*  q,  t, expected_cost */
+        {  1,  1, 0 },   /*  full match  */
+        { -1, -1, 0 },   /*  full match  */
+        {  0,  0, 0 },   /*  mutual abstention */
+        {  1,  0, 0 },   /*  WILDCARD: tile-zero, query-+1 → free match */
+        { -1,  0, 0 },   /*  WILDCARD: tile-zero, query--1 → free match */
+        {  0,  1, 1 },   /*  query abstains, tile asserts */
+        {  0, -1, 1 },   /*  query abstains, tile asserts */
+        {  1, -1, 2 },   /*  full mismatch */
+        { -1,  1, 2 },   /*  full mismatch */
+    };
+    int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+    for (int c = 0; c < n_cases; c++) {
+        m4t_trit_t q_trits[4] = { (m4t_trit_t)cases[c][0], 0, 0, 0 };
+        m4t_trit_t t_trits[4] = { (m4t_trit_t)cases[c][1], 0, 0, 0 };
+        uint8_t q_packed = pack4(q_trits);
+        uint8_t t_packed = pack4(t_trits);
+        /* Mask: only position 0 is active (sig_dim = 1, packed_bytes = 1
+         * with low 2 bits set). Other 3 fields in the byte are masked off. */
+        uint8_t mask = 0x03u;  /* low 2 bits active = position 0 only */
+        int32_t got = m4t_route_wildcard_dist(&q_packed, &t_packed, &mask, 1);
+        ASSERT_EQ_I32(got, cases[c][2], "wildcard cost-table cell");
+    }
+    return 0;
+}
+
+/* §19.6(b) behavior-difference test: same inputs MUST produce different
+ * results from m4t_popcount_dist where the wildcard interpretation
+ * differs. Specifically: q=±1, t=0 costs 1 in popcount_dist but 0 in
+ * wildcard_dist. */
+static int test_wildcard_vs_hamming_behavior_diff(void) {
+    /* Signature: 8 trits, all positions set up so that tile has 4 zeros
+     * and query has 4 ±1s aligned with them. Standard Hamming = 4
+     * (one cost-1 per tile-zero-vs-query-±1). Wildcard = 0 (all are
+     * wildcards). */
+    m4t_trit_t q_trits[8] = {  1, -1,  1, -1,  1, -1,  1, -1 };
+    m4t_trit_t t_trits[8] = {  0,  0,  0,  0,  0,  0,  0,  0 };
+    uint8_t q_packed[2] = { pack4(q_trits), pack4(q_trits + 4) };
+    uint8_t t_packed[2] = { pack4(t_trits), pack4(t_trits + 4) };
+    uint8_t mask[2] = { 0xFFu, 0xFFu };
+
+    int32_t hamming  = m4t_popcount_dist(q_packed, t_packed, mask, 2);
+    int32_t wildcard = m4t_route_wildcard_dist(q_packed, t_packed, mask, 8);
+
+    ASSERT_EQ_I32(hamming,  8, "popcount_dist on q=±1 t=0  — should be 8 (4 cells × cost 1, but actually...)");
+    /* WAIT: ternary Hamming costs (q=±1, t=0) at popcount(XOR & mask)
+     * where XOR(0b01, 0b00) = 0b01 (popcount=1) and XOR(0b10, 0b00) =
+     * 0b10 (popcount=1). So 8 trits × cost 1 each = 8. ✓ */
+    ASSERT_EQ_I32(wildcard, 0, "wildcard_dist on q=±1 t=0 — all wildcard matches, cost 0");
+    /* Behavior difference: hamming=8, wildcard=0. The kernels are
+     * operationally distinct on this input. §19.6(b) gate satisfied. */
+    return 0;
+}
+
+/* Equivalence test: when tile has NO zeros (all ±1), wildcard and
+ * Hamming must produce identical results — the wildcard correction
+ * is zero by construction. */
+static int test_wildcard_equals_hamming_no_tile_zeros(void) {
+    m4t_trit_t q_trits[16] = {  1, -1,  1,  0,  1, -1,  0,  1,
+                                 -1, -1,  1,  1,  0,  1, -1,  0 };
+    m4t_trit_t t_trits[16] = {  1,  1, -1,  1, -1, -1,  1, -1,
+                                  1, -1,  1,  1, -1,  1,  1, -1 };
+    uint8_t q_packed[4], t_packed[4];
+    for (int i = 0; i < 4; i++) {
+        q_packed[i] = pack4(q_trits + i*4);
+        t_packed[i] = pack4(t_trits + i*4);
+    }
+    uint8_t mask[4] = { 0xFFu, 0xFFu, 0xFFu, 0xFFu };
+    int32_t hamming  = m4t_popcount_dist(q_packed, t_packed, mask, 4);
+    int32_t wildcard = m4t_route_wildcard_dist(q_packed, t_packed, mask, 16);
+    ASSERT_EQ_I32(wildcard, hamming, "wildcard==hamming when tile has no zeros");
+    return 0;
+}
+
+/* Mask-respect test: positions outside the mask must contribute zero
+ * to both kernels, including the wildcard correction. */
+static int test_wildcard_respects_mask(void) {
+    /* sig_dim=4. Position 0: q=+1, t=0 (would be wildcard correction).
+     * Positions 1-3: q=±1, t=±1 mismatches (would contribute Hamming). */
+    m4t_trit_t q_trits[4] = {  1,  1,  1,  1 };
+    m4t_trit_t t_trits[4] = {  0, -1, -1, -1 };
+    uint8_t q_packed = pack4(q_trits);
+    uint8_t t_packed = pack4(t_trits);
+
+    /* Mask only position 0 active. */
+    uint8_t mask_pos0 = 0x03u;
+    int32_t got = m4t_route_wildcard_dist(&q_packed, &t_packed, &mask_pos0, 1);
+    /* With only position 0 active and that being q=+1 t=0 (wildcard match),
+     * cost should be 0. */
+    ASSERT_EQ_I32(got, 0, "wildcard cost 0 with only wildcard position active");
+
+    /* Mask only positions 1-3 active. */
+    uint8_t mask_pos123 = 0xFCu;  /* 0b11111100 — fields 1, 2, 3 active */
+    got = m4t_route_wildcard_dist(&q_packed, &t_packed, &mask_pos123, 4);
+    /* Three full-mismatches (q=+1, t=-1) at cost 2 each = 6. */
+    ASSERT_EQ_I32(got, 6, "wildcard cost from 3 full-mismatches with wildcard masked off");
+    return 0;
+}
+
+/* Multi-byte test exercising the 8-byte and 4-byte loops. */
+static int test_wildcard_multi_byte(void) {
+    /* sig_dim = 64 → packed_bytes = 16. Build a signature where:
+     *   - First 32 trits: tile=0 (wildcard), query alternates +1/-1.
+     *     Hamming would be 32 (each cost 1); wildcard is 0.
+     *   - Last 32 trits: q=t=+1 (full match). Both 0.
+     * Wildcard total = 0; Hamming total = 32. */
+    m4t_trit_t q_trits[64], t_trits[64];
+    for (int i = 0; i < 32; i++) {
+        q_trits[i] = (m4t_trit_t)((i & 1) ? -1 : 1);
+        t_trits[i] = 0;
+    }
+    for (int i = 32; i < 64; i++) {
+        q_trits[i] = 1;
+        t_trits[i] = 1;
+    }
+    uint8_t q_packed[16], t_packed[16];
+    for (int i = 0; i < 16; i++) {
+        q_packed[i] = pack4(q_trits + i*4);
+        t_packed[i] = pack4(t_trits + i*4);
+    }
+    uint8_t mask[16];
+    memset(mask, 0xFFu, 16);
+
+    int32_t hamming  = m4t_popcount_dist(q_packed, t_packed, mask, 16);
+    int32_t wildcard = m4t_route_wildcard_dist(q_packed, t_packed, mask, 64);
+    ASSERT_EQ_I32(hamming,  32, "multi-byte Hamming sanity");
+    ASSERT_EQ_I32(wildcard,  0, "multi-byte wildcard total — all 32 trits wildcard-matched");
+    return 0;
+}
+
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -530,6 +693,11 @@ int main(void) {
     if (test_signature_update())      return 1;
     if (test_route_e2e())             return 1;
     if (test_decisions_emit_coverage()) return 1;
+    if (test_wildcard_dist_cost_table())               return 1;
+    if (test_wildcard_vs_hamming_behavior_diff())      return 1;
+    if (test_wildcard_equals_hamming_no_tile_zeros())  return 1;
+    if (test_wildcard_respects_mask())                 return 1;
+    if (test_wildcard_multi_byte())                    return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }
