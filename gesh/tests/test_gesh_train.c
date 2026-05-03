@@ -12,6 +12,7 @@
 #include "gesh_train.h"
 #include "gesh_forward.h"
 #include "gesh_bank.h"
+#include "gesh_project.h"
 #include "synth_proto.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
@@ -432,12 +433,138 @@ static int test_no_catastrophic_regression(void) {
     return 0;
 }
 
+/* P0-3 H2 fix: training-variant tests for the geometric variant.
+ * The geometric loss must (a) be optimizable (final ≥ initial) and
+ * (b) actually move R from its starting state. */
+
+#include "m4t_route.h"
+
+static int test_geometric_train_increases_margin(void) {
+    synth_proto_config_t cfg = synth_proto_default();
+    int D = cfg.input_dim, C = cfg.n_classes, n_train = 1000;
+    int sig_dim = 32;
+    int Dp = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    m4t_trit_t* train = malloc((size_t)n_train * D * sizeof(m4t_trit_t));
+    int* train_lbl = malloc((size_t)n_train * sizeof(int));
+    synth_proto_generate_samples(train, train_lbl, n_train, protos, &cfg, 0x11111111u);
+
+    m4t_trit_t* R = malloc((size_t)sig_dim * D * sizeof(m4t_trit_t));
+    gesh_init_random_projection(R, sig_dim, D, 0xc0ffeebbu);
+
+    /* Initial bank + initial margin. */
+    gesh_bank_t bank;
+    bank.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    bank.labels = malloc((size_t)C * sizeof(int));
+    bank.n_tiles = C; bank.sig_dim = sig_dim;
+    m4t_trit_t* proj = malloc((size_t)n_train * sig_dim * sizeof(m4t_trit_t));
+    gesh_project_batch_unpacked(proj, train, n_train, R, sig_dim, D);
+    gesh_bank_build_class_mean(&bank, proj, train_lbl, n_train, C);
+    free(proj);
+    uint8_t mask[16]; memset(mask, 0xFF, (size_t)Dp);
+    int tail = sig_dim & 3;
+    if (tail > 0) mask[Dp - 1] = (uint8_t)((1u << (tail * 2)) - 1u);
+    int32_t init_margin = m4t_route_pairwise_hamming_sum(bank.tiles_packed, mask, C, sig_dim);
+
+    /* Snapshot R for change-detection. */
+    m4t_trit_t* R_init = malloc((size_t)sig_dim * D * sizeof(m4t_trit_t));
+    memcpy(R_init, R, (size_t)sig_dim * D * sizeof(m4t_trit_t));
+
+    /* Train geometric. */
+    gesh_train_config_t cfg2 = gesh_train_default();
+    cfg2.n_epochs = 10;
+    cfg2.n_flip_evals_per_epoch = 100;
+    cfg2.early_stop_patience = 0;
+    cfg2.log_per_epoch = 0;
+    cfg2.seed = 0xabcdabcdu;
+    int32_t final_margin = gesh_train_lattice_update_geometric(
+        R, &bank, train, train_lbl, n_train, C, sig_dim, D, &cfg2);
+
+    /* (a) margin must not decrease. Greedy ascent guarantees ≥. */
+    if (final_margin < init_margin) {
+        printf("FAIL geometric_train_increases_margin: init=%d final=%d\n",
+               init_margin, final_margin);
+        return 1;
+    }
+    /* (b) R must have changed (training actually flipped some trits). */
+    int n_diff = 0;
+    for (int i = 0; i < sig_dim * D; i++) if (R[i] != R_init[i]) n_diff++;
+    if (n_diff == 0) {
+        printf("FAIL geometric_train_increases_margin: R unchanged after training\n");
+        return 1;
+    }
+    printf("INFO geometric_train: init_margin=%d final_margin=%d n_flips_accepted=%d\n",
+           init_margin, final_margin, n_diff);
+
+    free(protos); free(train); free(train_lbl);
+    free(R); free(R_init);
+    free(bank.tiles_packed); free(bank.labels);
+    return 0;
+}
+
+static int test_geometric_train_determinism(void) {
+    /* Same seed → same final R + bank. */
+    synth_proto_config_t cfg = synth_proto_default();
+    int D = cfg.input_dim, C = cfg.n_classes, n_train = 500;
+    int sig_dim = 16;
+    int Dp = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    m4t_trit_t* protos = malloc((size_t)C * D * sizeof(m4t_trit_t));
+    synth_proto_generate_prototypes(protos, &cfg);
+    m4t_trit_t* train = malloc((size_t)n_train * D * sizeof(m4t_trit_t));
+    int* train_lbl = malloc((size_t)n_train * sizeof(int));
+    synth_proto_generate_samples(train, train_lbl, n_train, protos, &cfg, 0x33333333u);
+
+    m4t_trit_t* R1 = malloc((size_t)sig_dim * D * sizeof(m4t_trit_t));
+    m4t_trit_t* R2 = malloc((size_t)sig_dim * D * sizeof(m4t_trit_t));
+    gesh_init_random_projection(R1, sig_dim, D, 0xfacefeed);
+    gesh_init_random_projection(R2, sig_dim, D, 0xfacefeed);
+
+    gesh_bank_t b1, b2;
+    b1.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    b1.labels = malloc((size_t)C * sizeof(int));
+    b1.n_tiles = C; b1.sig_dim = sig_dim;
+    b2.tiles_packed = malloc((size_t)C * (size_t)Dp);
+    b2.labels = malloc((size_t)C * sizeof(int));
+    b2.n_tiles = C; b2.sig_dim = sig_dim;
+
+    gesh_train_config_t cfg2 = gesh_train_default();
+    cfg2.n_epochs = 5;
+    cfg2.n_flip_evals_per_epoch = 50;
+    cfg2.seed = 0x12345678;
+
+    gesh_train_lattice_update_geometric(R1, &b1, train, train_lbl,
+                                           n_train, C, sig_dim, D, &cfg2);
+    gesh_train_lattice_update_geometric(R2, &b2, train, train_lbl,
+                                           n_train, C, sig_dim, D, &cfg2);
+
+    if (memcmp(R1, R2, (size_t)sig_dim * D * sizeof(m4t_trit_t)) != 0) {
+        printf("FAIL geometric_train_determinism: R1 != R2\n");
+        return 1;
+    }
+    if (memcmp(b1.tiles_packed, b2.tiles_packed,
+               (size_t)C * (size_t)Dp) != 0) {
+        printf("FAIL geometric_train_determinism: banks differ\n");
+        return 1;
+    }
+
+    free(protos); free(train); free(train_lbl);
+    free(R1); free(R2);
+    free(b1.tiles_packed); free(b1.labels);
+    free(b2.tiles_packed); free(b2.labels);
+    return 0;
+}
+
 int main(void) {
     if (test_trains_reduces_loss())          return 1;
     if (test_beats_random_baseline())        return 1;
     if (test_train_determinism())            return 1;
     if (test_multi_seed_stability())         return 1;
     if (test_no_catastrophic_regression())   return 1;
-    printf("gesh_train: all 5 tests passed\n");
+    if (test_geometric_train_increases_margin()) return 1;
+    if (test_geometric_train_determinism())  return 1;
+    printf("gesh_train: all 7 tests passed\n");
     return 0;
 }

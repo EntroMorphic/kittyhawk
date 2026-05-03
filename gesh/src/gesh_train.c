@@ -18,6 +18,7 @@
 #include "gesh_forward.h"
 #include "gesh_bank.h"
 #include "gesh_project.h"
+#include "m4t_route.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
@@ -451,8 +452,6 @@ int gesh_train_lattice_update(
 
 /* ── P0-3: lattice-native geometric training ──────────────────────────── */
 
-#include "m4t_route.h"
-
 int gesh_train_lattice_update_geometric(
     m4t_trit_t* R,
     gesh_bank_t* out_bank,
@@ -495,6 +494,12 @@ int gesh_train_lattice_update_geometric(
     int32_t base_loss = m4t_route_pairwise_hamming_sum(
         out_bank->tiles_packed, mask, n_classes, sig_dim);
 
+    /* Saved bank for flip-revert (H3 fix: avoid unconditional rebuild
+     * when a flip didn't improve). Snapshot before each flip-eval
+     * cluster, restore from snapshot if no value beat orig. */
+    int Dp_save = M4T_TRIT_PACKED_BYTES(sig_dim);
+    uint8_t* saved_bank_tiles = malloc((size_t)n_classes * (size_t)Dp_save);
+
     /* Seed for trit-position sampling. */
     uint32_t state = cfg->seed ? cfg->seed : 0x12345678u;
 
@@ -511,14 +516,20 @@ int gesh_train_lattice_update_geometric(
             int j = trit_idx % input_dim;
             m4t_trit_t orig = R[i * input_dim + j];
 
+            /* H3 fix: snapshot the current bank tiles BEFORE any trial
+             * flip. If no trial improves loss, restore from snapshot
+             * instead of rebuilding from scratch. */
+            memcpy(saved_bank_tiles, out_bank->tiles_packed,
+                   (size_t)n_classes * (size_t)Dp_save);
+
             int best_loss_local = base_loss;
             m4t_trit_t best_value = orig;
+            int best_v_idx = 0;
 
             for (int v_idx = -1; v_idx <= 1; v_idx++) {
                 m4t_trit_t v = (m4t_trit_t)v_idx;
                 if (v == orig) continue;
                 R[i * input_dim + j] = v;
-                /* Rebuild bank from scratch and recompute loss. */
                 gesh_project_batch_unpacked_scratch(
                     scratch_proj, train_samples, n_samples,
                     R, sig_dim, input_dim, &pscratch);
@@ -529,18 +540,27 @@ int gesh_train_lattice_update_geometric(
                 if (this_loss > best_loss_local) {
                     best_loss_local = this_loss;
                     best_value = v;
+                    best_v_idx = v_idx;
                 }
             }
             R[i * input_dim + j] = best_value;
             if (best_value != orig) {
                 base_loss = best_loss_local;
+                /* If best wasn't the LAST trial, the current bank state
+                 * doesn't match the chosen R[i,j]; rebuild for the chosen. */
+                if (best_v_idx != 1 ||
+                    (best_v_idx == 1 && best_value == orig)) {
+                    gesh_project_batch_unpacked_scratch(
+                        scratch_proj, train_samples, n_samples,
+                        R, sig_dim, input_dim, &pscratch);
+                    gesh_bank_build_class_mean(out_bank, scratch_proj,
+                                                  train_labels, n_samples,
+                                                  n_classes);
+                }
             } else {
-                /* Restore bank to current-R state since we left R as orig. */
-                gesh_project_batch_unpacked_scratch(
-                    scratch_proj, train_samples, n_samples,
-                    R, sig_dim, input_dim, &pscratch);
-                gesh_bank_build_class_mean(out_bank, scratch_proj, train_labels,
-                                              n_samples, n_classes);
+                /* Restore from snapshot (no rebuild). */
+                memcpy(out_bank->tiles_packed, saved_bank_tiles,
+                       (size_t)n_classes * (size_t)Dp_save);
             }
         }
 
@@ -570,6 +590,7 @@ int gesh_train_lattice_update_geometric(
     int32_t final_loss = m4t_route_pairwise_hamming_sum(
         out_bank->tiles_packed, mask, n_classes, sig_dim);
 
+    free(saved_bank_tiles);
     free(mask);
     free(scratch_proj);
     gesh_project_scratch_free(&pscratch);

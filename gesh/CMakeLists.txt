@@ -10,6 +10,7 @@
 add_library(gesh_bench STATIC
     bench/synth_proto.c
     bench/synth_wildcard.c
+    bench/synth_close_proto.c
 )
 target_include_directories(gesh_bench PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
@@ -132,3 +133,7 @@ target_link_libraries(gesh_mnist_confidence PRIVATE gesh gesh_image_canon)
 # P0-3 verification: lattice-native geometric training on synth_proto.
 add_executable(gesh_geometric_probe bench/geometric_probe.c)
 target_link_libraries(gesh_geometric_probe PRIVATE gesh gesh_bench m)
+
+# P0-3 Gate 4: MNIST regression check for geometric training.
+add_executable(gesh_mnist_geometric bench/mnist_geometric.c)
+target_link_libraries(gesh_mnist_geometric PRIVATE gesh gesh_image_canon)
