@@ -183,6 +183,34 @@ int32_t m4t_route_wildcard_dist(
     int sig_dim
 );
 
+/* ── Wildcard-positions selector mask (compositional routing) ───────────── */
+
+/* Extract the wildcard positions of a packed-trit selector into a
+ * 2-bit-per-field "active" mask suitable for distance kernels.
+ *
+ * For each trit field in `selector_packed`:
+ *   - If the field is 0b00 (wildcard): output field = 0b11 (active).
+ *   - If the field is 0b01 or 0b10  : output field = 0b00 (inactive).
+ *
+ * The output `mask` has the same byte layout (4 fields per byte) as
+ * the standard distance-kernel mask. Trailing fields beyond `sig_dim`
+ * are zeroed.
+ *
+ * Substrate-distinct usage: in compositional routing (P0-4), `selector`
+ * is the stage-1 winning tile signature. Wildcards in stage-1 mark dims
+ * where the bucket varies; passing this mask to a distance kernel makes
+ * stage-2 compare ONLY on those dims. The third state acts as the
+ * dim-selection signal — same channel as the class hint, no extra mask
+ * channel needed.
+ *
+ * Preconditions:
+ *   mask, selector_packed non-NULL; sig_dim >= 0. */
+void m4t_route_wildcard_select_mask(
+    uint8_t* mask,
+    const uint8_t* selector_packed,
+    int sig_dim
+);
+
 /* ── Pairwise Hamming sum (lattice-native geometric loss) ──────────────── */
 
 /* Sum of ternary Hamming distances over all (i, j) tile pairs with i<j.

@@ -874,6 +874,65 @@ static int test_pairwise_hamming_sum_edge_cases(void) {
 }
 
 
+/* ── wildcard_select_mask (P0-4) ───────────────────────────────────────
+ *
+ * Extracts the wildcard positions of a packed-trit selector into a
+ * 2-bit-per-field active mask. Used in compositional routing: stage-1
+ * winning tile's wildcards drive stage-2's dim selection. */
+
+static int test_wildcard_select_mask_basic(void) {
+    /* Selector: (+1, 0, -1, 0) — fields 0b01, 0b00, 0b10, 0b00.
+     * Byte: high to low fields = position 3 to position 0:
+     *   pos 0: 0b01, pos 1: 0b00, pos 2: 0b10, pos 3: 0b00
+     *   byte = 0b00_10_00_01 = 0x21
+     * Wildcards at positions 1 and 3 → output:
+     *   pos 0: 0b00, pos 1: 0b11, pos 2: 0b00, pos 3: 0b11
+     *   byte = 0b11_00_11_00 = 0xCC
+     */
+    uint8_t selector = 0x21u;
+    uint8_t mask = 0;
+    m4t_route_wildcard_select_mask(&mask, &selector, 4);
+    ASSERT_EQ_I32(mask, 0xCCu, "select_mask basic 4-trit");
+    return 0;
+}
+
+static int test_wildcard_select_mask_all_zero(void) {
+    /* All-zero selector → all-active output. */
+    uint8_t selector[4] = {0, 0, 0, 0};
+    uint8_t mask[4] = {0};
+    m4t_route_wildcard_select_mask(mask, selector, 16);
+    for (int i = 0; i < 4; i++) ASSERT_EQ_I32(mask[i], 0xFFu, "select_mask all-wildcard");
+    return 0;
+}
+
+static int test_wildcard_select_mask_no_zeros(void) {
+    /* Selector with no wildcards (all ±1) → all-inactive output. */
+    uint8_t selector[2] = {0x55u, 0xAAu};  /* all 0b01 / all 0b10 */
+    uint8_t mask[2] = {0xFFu, 0xFFu};
+    m4t_route_wildcard_select_mask(mask, selector, 8);
+    ASSERT_EQ_I32(mask[0], 0x00u, "select_mask no-wildcard byte 0");
+    ASSERT_EQ_I32(mask[1], 0x00u, "select_mask no-wildcard byte 1");
+    return 0;
+}
+
+static int test_wildcard_select_mask_distance_composition(void) {
+    /* End-to-end check: select_mask + popcount_dist should restrict
+     * Hamming to wildcard positions of the selector. */
+    int8_t a_trits[4] = { +1, +1, -1, -1 };
+    int8_t b_trits[4] = { +1, -1, +1, -1 };  /* differs at pos 1, 2 */
+    int8_t s_trits[4] = {  0, +1,  0, -1 };  /* wildcards at pos 0, 2 */
+    uint8_t a_packed = pack4(a_trits);
+    uint8_t b_packed = pack4(b_trits);
+    uint8_t s_packed = pack4(s_trits);
+    uint8_t mask = 0;
+    m4t_route_wildcard_select_mask(&mask, &s_packed, 4);
+    /* Selector active at pos 0 and 2; differences are at pos 1 and 2;
+     * intersection = pos 2 → distance = 2 (one ±1 vs ∓1 trit flip). */
+    int32_t d = m4t_popcount_dist(&a_packed, &b_packed, &mask, 1);
+    ASSERT_EQ_I32(d, 2, "select_mask composes with popcount_dist");
+    return 0;
+}
+
 int main(void) {
     if (test_threshold_extract_tau0())             return 1;
     if (test_threshold_extract_tau5())             return 1;
@@ -902,6 +961,10 @@ int main(void) {
     if (test_confidence_weighted_equals_hamming_no_confidence())   return 1;
     if (test_pairwise_hamming_sum_basic())                         return 1;
     if (test_pairwise_hamming_sum_edge_cases())                    return 1;
+    if (test_wildcard_select_mask_basic())                         return 1;
+    if (test_wildcard_select_mask_all_zero())                      return 1;
+    if (test_wildcard_select_mask_no_zeros())                      return 1;
+    if (test_wildcard_select_mask_distance_composition())          return 1;
     printf("m4t_route: all tests passed\n");
     return 0;
 }

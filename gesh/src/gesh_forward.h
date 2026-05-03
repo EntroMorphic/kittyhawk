@@ -79,6 +79,47 @@ int gesh_forward_classify_wildcard(
     int top_k
 );
 
+/* Hierarchical (two-stage compositional) forward pass. P0-4.
+ *
+ * ⚠ P0-4 NEGATIVE RESULT — DO NOT USE FOR CLASSIFICATION ⚠
+ *
+ * This design FAILS Gate 1 on synth_close_proto by -15.64pp vs
+ * single-stage wildcard (CI [-19.19, -12.09]). The substrate-novelty
+ * hook (stage-1 wildcards parameterize stage-2 dim selection) is
+ * anti-discriminative: class-mean wildcards mark within-class noise,
+ * not between-class boundaries. Even with the wildcard binding
+ * removed (full mask), the hierarchical structure adds -8.66pp.
+ *
+ * Kept in source for archival reference (so the negative result is
+ * documented at the API surface, not lost) and for the regression
+ * probe (compose_probe.c). See journal/gesh_compositional_routing_design.md
+ * for the full verdict and what it teaches.
+ *
+ * Per query:
+ *   1. Project to sig.
+ *   2. Stage-1: m4t_route_wildcard_dist over hbank->stage1 → t1.
+ *   3. Stage-2: m4t_popcount_dist over hbank->stage2[t1] using
+ *      hbank->stage2_masks[t1] as the active-dim selector. The mask is
+ *      derived from stage-1's tile-c wildcard positions — i.e., the
+ *      third state in stage-1 IS the dim-selection signal for stage-2.
+ *   4. Predict = label of stage-2's nearest tile in bucket t1.
+ *
+ * Empty-bucket fallback: if the stage-2 sub-bank has all-zero tiles
+ * (no samples landed there at build time), fall back to stage-1's
+ * tile label (`hbank->stage1.labels[t1]`).
+ *
+ * Storage: stage1_tile_match arg is the t1 from stage-1, useful for
+ * inspection / per-bucket statistics. May be NULL.
+ */
+int gesh_forward_classify_hierarchical(
+    int* out_predictions,
+    int* out_stage1_tile_match,        /* nullable: [n_queries] */
+    const m4t_trit_t* queries,
+    int n_queries,
+    const gesh_bank_hier_t* hbank,
+    const gesh_projection_t* proj
+);
+
 #ifdef __cplusplus
 }
 #endif

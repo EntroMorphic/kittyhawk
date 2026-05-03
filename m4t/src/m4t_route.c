@@ -222,6 +222,43 @@ int32_t m4t_route_wildcard_dist(
     return total - correction;
 }
 
+/* ── Wildcard-select mask extraction (compositional routing) ───────────── */
+
+void m4t_route_wildcard_select_mask(
+    uint8_t* mask,
+    const uint8_t* selector_packed,
+    int sig_dim)
+{
+    assert(mask && selector_packed);
+    assert(sig_dim >= 0);
+
+    int packed_bytes = M4T_TRIT_PACKED_BYTES(sig_dim);
+    int full_bytes = sig_dim / 4;
+    int tail_trits = sig_dim - full_bytes * 4;
+
+    /* For each byte: low_bit_of_field is 1 iff field is 0b00 (wildcard).
+     * Expanding low | (low << 1) fills the 2-bit field with 0b11 (active)
+     * iff the selector field was a wildcard. Other fields → 0b00 (inactive).
+     */
+    for (int i = 0; i < full_bytes; i++) {
+        uint8_t s = selector_packed[i];
+        uint8_t low = (uint8_t)((~(s | (s >> 1))) & 0x55u);
+        mask[i] = (uint8_t)(low | (low << 1));
+    }
+
+    if (full_bytes < packed_bytes) {
+        /* Tail byte: only the first `tail_trits` fields are valid. The
+         * remaining fields in the packed byte must be zero (selector
+         * itself zeros the tail by construction). Apply the same
+         * extraction, then mask off the dead high fields. */
+        uint8_t s = selector_packed[full_bytes];
+        uint8_t low = (uint8_t)((~(s | (s >> 1))) & 0x55u);
+        uint8_t out = (uint8_t)(low | (low << 1));
+        uint8_t valid_field_mask = (uint8_t)((1u << (tail_trits * 2)) - 1u);
+        mask[full_bytes] = (uint8_t)(out & valid_field_mask);
+    }
+}
+
 /* ── Pairwise Hamming sum ──────────────────────────────────────────────── */
 
 int32_t m4t_route_pairwise_hamming_sum(

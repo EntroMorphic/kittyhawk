@@ -137,3 +137,7 @@ target_link_libraries(gesh_geometric_probe PRIVATE gesh gesh_bench m)
 # P0-3 Gate 4: MNIST regression check for geometric training.
 add_executable(gesh_mnist_geometric bench/mnist_geometric.c)
 target_link_libraries(gesh_mnist_geometric PRIVATE gesh gesh_image_canon)
+
+# P0-4 verification: hierarchical (compositional) routing on synth_close_proto.
+add_executable(gesh_compose_probe bench/compose_probe.c)
+target_link_libraries(gesh_compose_probe PRIVATE gesh gesh_bench m)

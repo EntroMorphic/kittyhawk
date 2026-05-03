@@ -187,6 +187,83 @@ void gesh_bank_build_kmeans_per_class(
     uint32_t seed
 );
 
+/* Hierarchical (two-stage compositional) bank for P0-4.
+ *
+ * Stage-1: a wildcard bank with one tile per class (built via
+ *          gesh_bank_build_class_wildcard). Samples route to stage-1
+ *          tiles by m4t_route_wildcard_dist.
+ *
+ * Stage-2: per stage-1 tile, a class-mean sub-bank built from the
+ *          samples that land in that stage-1 bucket. Distance at
+ *          stage-2 uses m4t_popcount_dist with a mask derived from
+ *          the stage-1 tile's WILDCARD POSITIONS — i.e., stage-2
+ *          differentiates only on the dims where stage-1 marked
+ *          intra-bucket variation.
+ *
+ * Substrate-novel composition: the third state in stage-1's tile IS
+ * the stage-2 dim-selection signal. No separate mask channel; the
+ * wildcard pattern routes itself.
+ *
+ * Storage:
+ *   stage1               — gesh_bank_t with n_stage1 tiles
+ *   stage2[n_stage1]     — per-bucket sub-banks (class-mean)
+ *   stage2_masks[n_stage1 × Dp] — precomputed wildcard-select masks,
+ *                          one per stage-1 tile.
+ *
+ * The caller is responsible for memory ownership; gesh_bank_hier_alloc /
+ * gesh_bank_hier_free are convenience helpers. */
+typedef struct {
+    gesh_bank_t  stage1;
+    gesh_bank_t* stage2;          /* [n_stage1] sub-banks */
+    uint8_t*     stage2_masks;    /* [n_stage1 × Dp] precomputed dim-selectors */
+    int          n_stage1;
+    int          sig_dim;
+} gesh_bank_hier_t;
+
+/* Allocate the hierarchical bank's owned buffers. After this call,
+ * stage1.{tiles_packed,labels}, stage2[*].{tiles_packed,labels}, and
+ * stage2_masks are heap-allocated and ready to be filled by the build
+ * routine. n_stage1 == n_classes (one stage-1 tile per class).
+ *
+ * stage2[c].n_tiles == n_classes (one stage-2 tile per class within
+ * each bucket; sparse buckets get all-zero stage-2 tiles which act
+ * as inactive, see gesh_forward note). */
+int gesh_bank_hier_alloc(
+    gesh_bank_hier_t* hbank,
+    int n_classes,
+    int sig_dim
+);
+
+void gesh_bank_hier_free(gesh_bank_hier_t* hbank);
+
+/* Build the hierarchical bank from projected training samples.
+ *
+ * Steps:
+ *   1. Build stage-1 wildcard bank via gesh_bank_build_class_wildcard.
+ *   2. For each stage-1 tile c:
+ *      a. Precompute stage2_masks[c] = wildcard_select_mask(stage1.tiles[c]).
+ *      b. Find samples whose nearest stage-1 tile (by wildcard_dist) is c.
+ *      c. Build stage2[c] as a class-mean bank over those samples
+ *         (full sig_dim; the mask gates compare-time, not build-time).
+ *
+ * If a stage-1 bucket has zero assigned samples, the corresponding
+ * stage2[c] is left zero-filled and the forward pass should fall back
+ * to stage-1's tile label.
+ *
+ * Substrate-discipline: build operates on packed-trit signatures; no
+ * float, no random projection.
+ *
+ * Determinism: same inputs → same output (stable assignment by
+ * lowest tile index on distance tie). */
+void gesh_bank_build_hierarchical(
+    gesh_bank_hier_t* hbank,
+    const m4t_trit_t* samples,    /* [n_samples × sig_dim], unpacked */
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int snr_threshold_permille
+);
+
 #ifdef __cplusplus
 }
 #endif

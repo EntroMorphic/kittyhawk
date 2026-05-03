@@ -7,6 +7,7 @@
 
 #include "gesh_bank.h"
 #include "gesh_project.h"
+#include "m4t_route.h"
 #include "m4t_trit_pack.h"
 
 #include <assert.h>
@@ -360,4 +361,156 @@ void gesh_bank_build_kmeans_per_class(
     free(centroids_unpacked);
     free(centroids_packed);
     free(tile_buf);
+}
+
+/* ── Hierarchical bank (P0-4 compositional routing) ────────────────────── */
+
+int gesh_bank_hier_alloc(
+    gesh_bank_hier_t* hbank,
+    int n_classes,
+    int sig_dim)
+{
+    assert(hbank && n_classes > 0 && sig_dim > 0);
+    int Dp = M4T_TRIT_PACKED_BYTES(sig_dim);
+
+    hbank->n_stage1 = n_classes;
+    hbank->sig_dim  = sig_dim;
+
+    hbank->stage1.n_tiles      = n_classes;
+    hbank->stage1.sig_dim      = sig_dim;
+    hbank->stage1.tiles_packed = calloc((size_t)n_classes, (size_t)Dp);
+    hbank->stage1.labels       = calloc((size_t)n_classes, sizeof(int));
+
+    hbank->stage2 = calloc((size_t)n_classes, sizeof(gesh_bank_t));
+    hbank->stage2_masks = calloc((size_t)n_classes, (size_t)Dp);
+
+    if (!hbank->stage1.tiles_packed || !hbank->stage1.labels
+        || !hbank->stage2 || !hbank->stage2_masks) return -1;
+
+    for (int c = 0; c < n_classes; c++) {
+        hbank->stage2[c].n_tiles      = n_classes;
+        hbank->stage2[c].sig_dim      = sig_dim;
+        hbank->stage2[c].tiles_packed = calloc((size_t)n_classes, (size_t)Dp);
+        hbank->stage2[c].labels       = calloc((size_t)n_classes, sizeof(int));
+        if (!hbank->stage2[c].tiles_packed || !hbank->stage2[c].labels) return -1;
+        for (int k = 0; k < n_classes; k++) hbank->stage2[c].labels[k] = k;
+    }
+    return 0;
+}
+
+void gesh_bank_hier_free(gesh_bank_hier_t* hbank) {
+    if (!hbank) return;
+    free(hbank->stage1.tiles_packed); hbank->stage1.tiles_packed = NULL;
+    free(hbank->stage1.labels);       hbank->stage1.labels = NULL;
+    if (hbank->stage2) {
+        for (int c = 0; c < hbank->n_stage1; c++) {
+            free(hbank->stage2[c].tiles_packed);
+            free(hbank->stage2[c].labels);
+        }
+        free(hbank->stage2); hbank->stage2 = NULL;
+    }
+    free(hbank->stage2_masks); hbank->stage2_masks = NULL;
+    hbank->n_stage1 = 0;
+}
+
+void gesh_bank_build_hierarchical(
+    gesh_bank_hier_t* hbank,
+    const m4t_trit_t* samples,
+    const int* labels,
+    int n_samples,
+    int n_classes,
+    int snr_threshold_permille)
+{
+    assert(hbank && samples && labels);
+    assert(n_classes == hbank->n_stage1);
+    int D  = hbank->sig_dim;
+    int Dp = M4T_TRIT_PACKED_BYTES(D);
+
+    /* Step 1: build stage-1 wildcard bank in-place. */
+    gesh_bank_build_class_wildcard(&hbank->stage1, samples, labels,
+                                      n_samples, n_classes,
+                                      snr_threshold_permille);
+
+    /* Step 2a: precompute per-stage-1-tile dim-selector masks via the
+     * substrate kernel. Wildcard positions in stage-1 tile c become
+     * the active dims for stage-2 sub-bank c's distance compare. */
+    for (int c = 0; c < n_classes; c++) {
+        m4t_route_wildcard_select_mask(
+            hbank->stage2_masks + (size_t)c * Dp,
+            hbank->stage1.tiles_packed + (size_t)c * Dp,
+            D);
+    }
+
+    /* Step 2b: assign each sample to its nearest stage-1 tile (by
+     * wildcard distance). Stable tie-breaker: lowest tile index wins.
+     * Build a full-active mask once for stage-1 routing. */
+    uint8_t* full_mask = malloc((size_t)Dp);
+    memset(full_mask, 0xFF, (size_t)Dp);
+    int tail_trits = D - (D / 4) * 4;
+    if (tail_trits > 0) {
+        uint8_t tail = (uint8_t)((1u << (tail_trits * 2)) - 1u);
+        full_mask[Dp - 1] = tail;
+    }
+
+    int* assign = malloc((size_t)n_samples * sizeof(int));
+    uint8_t* sample_packed = malloc((size_t)Dp);
+    m4t_trit_t* sample_buf = malloc((size_t)D * sizeof(m4t_trit_t));
+
+    for (int i = 0; i < n_samples; i++) {
+        for (int j = 0; j < D; j++) sample_buf[j] = samples[(size_t)i * D + j];
+        m4t_pack_trits_1d(sample_packed, sample_buf, D);
+        int best_t = 0;
+        int32_t best_d = INT32_MAX;
+        for (int t = 0; t < n_classes; t++) {
+            int32_t d = m4t_route_wildcard_dist(
+                sample_packed,
+                hbank->stage1.tiles_packed + (size_t)t * Dp,
+                full_mask, D);
+            if (d < best_d) { best_d = d; best_t = t; }
+        }
+        assign[i] = best_t;
+    }
+    free(sample_packed);
+    free(sample_buf);
+    free(full_mask);
+
+    /* Step 2c: build stage-2 sub-bank per stage-1 bucket.
+     * Sub-bank is class-mean over the bucket's samples (full sig_dim).
+     * The mask gates compare-time, not build-time. */
+    int* bucket_labels = malloc((size_t)n_samples * sizeof(int));
+    m4t_trit_t* bucket_samples = NULL;
+    int bucket_cap = 0;
+
+    for (int c = 0; c < n_classes; c++) {
+        int n_in = 0;
+        for (int i = 0; i < n_samples; i++) if (assign[i] == c) n_in++;
+
+        if (n_in == 0) {
+            /* Empty bucket: stage2[c] tiles already zero from calloc;
+             * forward will fall back to stage-1 tile label. */
+            continue;
+        }
+
+        if (n_in > bucket_cap) {
+            free(bucket_samples);
+            bucket_samples = malloc((size_t)n_in * (size_t)D * sizeof(m4t_trit_t));
+            bucket_cap = n_in;
+        }
+        int idx = 0;
+        for (int i = 0; i < n_samples; i++) {
+            if (assign[i] != c) continue;
+            memcpy(bucket_samples + (size_t)idx * D,
+                   samples + (size_t)i * D,
+                   (size_t)D * sizeof(m4t_trit_t));
+            bucket_labels[idx] = labels[i];
+            idx++;
+        }
+        gesh_bank_build_class_mean(&hbank->stage2[c],
+                                      bucket_samples, bucket_labels,
+                                      n_in, n_classes);
+    }
+
+    free(bucket_samples);
+    free(bucket_labels);
+    free(assign);
 }

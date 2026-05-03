@@ -248,3 +248,92 @@ int gesh_forward_classify_wildcard(
                                   dist_wildcard_trampoline,
                                   /*dist_kernel_arg_is_sig_dim=*/1);
 }
+
+/* ── Hierarchical (compositional) forward — P0-4 ─────────────────────── */
+
+static int stage2_bucket_is_empty(const gesh_bank_t* sub, int Dp) {
+    /* All-zero tiles_packed → empty bucket. Sub-bank labels are always
+     * pre-filled by gesh_bank_hier_alloc. */
+    int n_bytes = sub->n_tiles * Dp;
+    for (int i = 0; i < n_bytes; i++) if (sub->tiles_packed[i] != 0) return 0;
+    return 1;
+}
+
+int gesh_forward_classify_hierarchical(
+    int* out_predictions,
+    int* out_stage1_tile_match,
+    const m4t_trit_t* queries,
+    int n_queries,
+    const gesh_bank_hier_t* hbank,
+    const gesh_projection_t* proj)
+{
+    assert(out_predictions && hbank && proj);
+    assert(n_queries >= 0);
+    assert(hbank->stage1.sig_dim == proj->sig_dim);
+    if (n_queries == 0) return 0;
+    assert(queries);
+
+    int input_dim = proj->input_dim;
+    int sig_dim   = hbank->sig_dim;
+    int Dp        = M4T_TRIT_PACKED_BYTES(sig_dim);
+    int N1        = hbank->n_stage1;
+
+    uint8_t* packed_sig = malloc((size_t)Dp);
+    uint8_t* full_mask  = malloc((size_t)Dp);
+    memset(full_mask, 0xFF, (size_t)Dp);
+    int tail_trits = sig_dim & 3;
+    if (tail_trits > 0) {
+        uint8_t tail = (uint8_t)((1u << (tail_trits * 2)) - 1u);
+        full_mask[Dp - 1] = tail;
+    }
+
+    for (int q = 0; q < n_queries; q++) {
+        const m4t_trit_t* x = queries + (size_t)q * input_dim;
+        if (proj->R != NULL) {
+            gesh_project_one_packed(packed_sig, x, proj->R, sig_dim, input_dim);
+        } else {
+            m4t_pack_trits_1d(packed_sig, x, sig_dim);
+        }
+
+        /* Stage-1: nearest-tile by wildcard distance. */
+        int t1 = 0;
+        int32_t best_d1 = INT32_MAX;
+        for (int t = 0; t < N1; t++) {
+            int32_t d = m4t_route_wildcard_dist(
+                packed_sig,
+                hbank->stage1.tiles_packed + (size_t)t * Dp,
+                full_mask, sig_dim);
+            if (d < best_d1) { best_d1 = d; t1 = t; }
+        }
+        if (out_stage1_tile_match) out_stage1_tile_match[q] = t1;
+
+        const gesh_bank_t* sub = &hbank->stage2[t1];
+        const uint8_t* sel_mask = hbank->stage2_masks + (size_t)t1 * Dp;
+
+        /* If the sub-bucket has no samples (empty), or the stage-1 tile
+         * has zero wildcards (sel_mask all zero → no comparable dims),
+         * fall back to stage-1's tile label. */
+        int sel_has_active = 0;
+        for (int i = 0; i < Dp; i++) if (sel_mask[i]) { sel_has_active = 1; break; }
+        if (!sel_has_active || stage2_bucket_is_empty(sub, Dp)) {
+            out_predictions[q] = hbank->stage1.labels[t1];
+            continue;
+        }
+
+        /* Stage-2: nearest tile in sub-bank using wildcard-positions mask. */
+        int best_t2 = 0;
+        int32_t best_d2 = INT32_MAX;
+        for (int t = 0; t < sub->n_tiles; t++) {
+            int32_t d = m4t_popcount_dist(
+                packed_sig,
+                sub->tiles_packed + (size_t)t * Dp,
+                sel_mask, Dp);
+            if (d < best_d2) { best_d2 = d; best_t2 = t; }
+        }
+        out_predictions[q] = sub->labels[best_t2];
+    }
+
+    free(packed_sig);
+    free(full_mask);
+    return 0;
+}
