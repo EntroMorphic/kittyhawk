@@ -4,6 +4,28 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — shift3 NEON divide path (full LMM cycle: prototype → 8-gate productionization)
+- `journal/shift3_neon_{raw,nodes,reflect,synthesize,closeout}.md` — full Lincoln Manifold Method cycle on the proposed `m4t_div_3pk_neon` (substitute for custom silicon for shift3 divide direction). RAW dump → 31 atomic NODES → REFLECT cold-eye → SYNTHESIZE 8 pre-committed gates → CLOSEOUT all 8 PASS.
+- **STRUCTURAL CHANGE:** `m4t_mtfp_shift3` divide-direction path (k < 0) now uses NEON magic-multiply when `M4T_HAS_NEON && abs_k ∈ [1, 19]`. Pipeline: `vmull_s32 → vaddq_s64(bias) → vshlq_s64 → vmovn_s64`. Compiler fuses vmull+vaddq into `smlal.2d`. Scalar reference path retained as fallback + bit-exact oracle.
+- **NEW: `m4t/src/m4t_pow3_magic.h`** — committed magic table (`M4T_POW3_DIV_M[20]`, `M4T_POW3_DIV_N[20]`). Single source of truth (G7); both production substrate and prototype test include it.
+- **NEW: `m4t/tools/gen_pow3_magic.c`** — generator that derives `(M, N)` per `k ∈ [1, 19]` and exhaustively verifies bit-exact against the substrate's `m4t_pow3_round_div` reference across 1.16 × 10⁹ × 19 = 2.2 × 10¹⁰ test points (~25s runtime).
+- **NEW: `m4t/tests/test_m4t_shift3_neon_proto.c`** — bit-exact NEON-vs-scalar property test, alias test (`dst == src`), workload-shape-explicit perf bench. Wired as ctest `m4t_shift3_neon`.
+- **G1 (exhaustive bit-exact):** 22.08 × 10⁹ test points across 19 k values, NEON output matches scalar `m4t_mtfp_shift3` bit-by-bit. Run on demand via `./test_m4t_shift3_neon x`.
+- **G2 (saturation):** worst |x*M+bias| = 2⁶¹ (vs INT64_MAX = 2⁶³, 2-bit headroom); worst |result| = 2²⁷·⁵ (vs INT32_MAX = 2³¹, 3.47-bit headroom). `vmovn_s64` narrowing safe.
+- **G3 (aliasing):** 12/12 cases (k ∈ {1,10,19} × n ∈ {4,5,64,65}) — `dst == src` works.
+- **G4 (disasm):** scalar uses `sdiv x11, x10, x8` (hardware divide, NOT auto-vectorized for the divide direction); NEON uses `smlal.2d + sshl.2d`. Comparison is fair. (Side finding: AppleClang DOES auto-vectorize the multiply direction k > 0 — a future optimization opportunity.)
+- **G5 (bench discipline):** workload-shape declared per measurement, min-of-5 sampling. BATCHED (n=4096): **9.5–9.6× speedup** across k ∈ {1, 7, 13, 19}. TIGHT-LOOP (n=4 per call): **6.3–6.5× speedup**. Per V4-residual-3 methodology.
+- **G6 (productionized):** `m4t/src/m4t_mtfp.c` divide-direction path branches into NEON. 18/18 ctest PASS (was 17, +1 for `m4t_shift3_neon`).
+- **G7 (single source):** magic table in `m4t/src/m4t_pow3_magic.h`; production substrate, prototype test, and generator all coordinate around it. No drift possible.
+- **G8 (no regression):** `bench_m4t_tier2_perf`, `gesh_confidence_probe`, `gesh_expr_routing_probe` all produce identical outputs before and after.
+- **REFRAMING from earlier session estimate:** the original "~40× speedup" estimate was wrong — assumed scalar used hardware `sdiv` only (~12 cycles); the substrate's actual scalar uses `sdiv` plus round-to-nearest logic and runs faster than the naive estimate. Real speedup is ~9.5× BATCHED, ~6.5× TIGHT-LOOP. The number is honest; the original framing was anchored on the wrong baseline.
+
+### Methodology lifted from shift3 NEON cycle
+- **For magic-multiply division: 64-bit intermediate (`vmull + bias + arith-shift`) over 32-bit-with-rounding (`vqrdmulh + vrshl`).** The latter has compound rounding error that's hard to make bit-exact; the former is one rounding step end-to-end. Trade ~1.5× perf for bit-exactness simplicity.
+- **Always exhaustively verify the NEON kernel against the scalar reference, not just the emulator.** Emulator is one bridge; NEON intrinsics are another. Both must match.
+- **`vmovn_s64` narrowing requires a written saturation argument.** The compiler doesn't insert saturation; if the int64 value exceeds int32, you get garbage. Bound the worst case explicitly.
+- **Generated constants live in committed headers, regenerable via committed tools.** No copies in test source. Drift is impossible if the pattern is followed (G7 source-of-truth).
+
 ### Added — Outstanding-concerns sweep (4 of 4 closed)
 Post-V4-residuals, four outstanding concerns surfaced in conversation review. All four closed methodically; each got its own commit.
 

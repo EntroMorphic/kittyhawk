@@ -17,6 +17,7 @@
 
 #include "m4t_mtfp.h"
 #include "m4t_internal.h"
+#include "m4t_pow3_magic.h"   /* divide-by-3^k magic-multiply table (shift3 NEON path) */
 
 #include <string.h>
 
@@ -427,6 +428,47 @@ void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
         memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
         return;
     }
+
+#if M4T_HAS_NEON
+    /* NEON magic-multiply path. abs_k ∈ [1, 19]. Per shift3_neon LMM
+     * cycle (G1–G8): bit-exact vs the scalar reference for all x in the
+     * substrate input range, ~9.5x speedup at n≥4096. Pipeline:
+     *   prod_64 = (int64_t)x * M
+     *   adj_64  = prod_64 + (1 << (N-1))      // round-half-up bias
+     *   result  = (int32_t)(adj_64 >> N)       // arith right shift
+     * Constants in m4t_pow3_magic.h (single source of truth, generated
+     * exhaustively by m4t/tools/gen_pow3_magic.c). */
+    {
+        int32_t M = M4T_POW3_DIV_M[abs_k];
+        int     N = M4T_POW3_DIV_N[abs_k];
+        int32x2_t Mv = vdup_n_s32(M);
+        int64x2_t bias = vdupq_n_s64((int64_t)1 << (N - 1));
+        int64x2_t neg_N = vdupq_n_s64(-(int64_t)N);
+
+        int i = 0;
+        for (; i + 4 <= n; i += 4) {
+            int32x4_t x = vld1q_s32((const int32_t*)(src + i));
+            int64x2_t prod_lo = vmull_s32(vget_low_s32(x), Mv);
+            int64x2_t prod_hi = vmull_s32(vget_high_s32(x), Mv);
+            prod_lo = vaddq_s64(prod_lo, bias);
+            prod_hi = vaddq_s64(prod_hi, bias);
+            prod_lo = vshlq_s64(prod_lo, neg_N);
+            prod_hi = vshlq_s64(prod_hi, neg_N);
+            int32x4_t result = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
+            vst1q_s32((int32_t*)(dst + i), result);
+        }
+        /* Scalar tail (n not multiple of 4). */
+        for (; i < n; i++) {
+            int64_t prod = (int64_t)src[i] * (int64_t)M;
+            int64_t adj  = prod + ((int64_t)1 << (N - 1));
+            dst[i] = (m4t_mtfp_t)(adj >> N);
+        }
+        return;
+    }
+#endif
+
+    /* Fallback: scalar reference path. Kept as the bit-exact oracle and
+     * for any future non-NEON target. */
     int64_t divisor = M4T_POW3_TABLE[abs_k];
     for (int i = 0; i < n; i++) {
         int had_rem = 0;
