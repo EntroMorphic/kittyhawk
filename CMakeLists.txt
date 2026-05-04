@@ -33,8 +33,14 @@ endif()
 # out to be a TEST CODE BUG (side-effecting load_mnist() inside assert(),
 # which is removed under -DNDEBUG). Once the test was fixed, full LTO works
 # clean. See journal/tier2_residuals_v2_pinpoint.md for the trace.
-add_compile_options(-flto)
-add_link_options(-flto)
+#
+# Gated by GESH_LTO option (default ON) so the V4-residual-3 LTO microbench
+# can build a parallel no-LTO tree via -DGESH_LTO=OFF for direct comparison.
+option(GESH_LTO "Enable link-time optimization" ON)
+if(GESH_LTO)
+    add_compile_options(-flto)
+    add_link_options(-flto)
+endif()
 
 enable_testing()
 

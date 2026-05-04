@@ -4,6 +4,22 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — V4 residual #3 closure: LTO microbench reveals 3× speedup is achievable
+- `journal/v4_residual_3_lto_microbench_closeout.md` — full cycle: design → discover -fno-lto silently overridden → fix CMake gating → measure → discover variant A no delta (matching V4-G5) → red-team → add variant B → discover 3× LTO speedup → red-team again → document.
+- **STRUCTURAL FIX:** `CMakeLists.txt` (top-level) — gated `add_compile_options(-flto)` and `add_link_options(-flto)` behind `option(GESH_LTO "Enable link-time optimization" ON)`. Default behavior unchanged. Build a no-LTO comparison tree via `-DGESH_LTO=OFF`. Surfaced because my first attempt at no-LTO via `-DCMAKE_C_FLAGS=-fno-lto` was silently overridden — CMake prepends user flags but the project's own `add_compile_options` appends, so the compile line ended up with both `-fno-lto` and `-flto` and clang took the later (LTO won).
+- **NEW MICROBENCH:** `m4t/tests/bench_m4t_lto.c` with two workload variants targeting `m4t_mtfp_block_add` (small cross-TU function, ~6 NEON ops). Variant A: carry-dependent (single dst accumulated). Variant B: pipelined (round-robin across 64 independent dsts). Min-of-3 sampling per variant. Build target only (perf, not regression).
+- **HEADLINE FINDING:** Variant A LTO ≈ no-LTO at 1.36 ns/call (matches V4-G5: data-dep-bound workload, LTO has nothing to fix). Variant B LTO 0.23 ns/call vs no-LTO 0.68 ns/call → **3× LTO speedup** on pipelined workload (call-overhead bound). LTO IS doing useful cross-TU inlining; the original V4-G5 finding was right narrowly but not a general statement about LTO.
+- **DISASM PROOF:** `otool -tv` confirms LTO build inlines block_add (no `bl _m4t_mtfp_block_add` in main; symbol absent from binary). no-LTO build retains `bl _m4t_mtfp_block_add` and the function symbol. Cross-TU inlining is real, just hidden by data dependency in (A)-shaped workloads.
+- **RED-TEAM:** Five findings examined. RT-1 variant B may not represent any real consumer — DOCUMENTED in bench source. RT-2 variant B's 0.8 cycles/iter — VERIFIED via disasm to be Apple Silicon's 8-wide superscalar issue, not unexpected unrolling. RT-10 the 3× could come from cross-TU OR intra-TU LTO contributions — DOCUMENTED as honest concern (cross-TU inlining is the proven first suspect; mixed configs would isolate further).
+- **CONSEQUENCE for V4-G5:** the V4 finding "LTO produces no observable bench delta" is correct narrowly (for the substrate's actual carry-dep consumers) but the V4 closeout's framing of "LTO has nothing to add" is wrong as a general claim — LTO does add 3× on pipelined workloads, just none currently exist in the substrate's hot path.
+- **16/16 ctest PASS** with no collateral damage.
+
+### Methodology lifted from V4 residual #3
+- **Always prove LTO actually applied.** Verbose make output is the source of truth. CMake user-flag prepending vs project-flag appending bit me; fix by gating with `option()` so the `add_compile_options` is conditional, not silently overridden.
+- **Compiler flags can lie about their effect; disasm cannot.** Always cross-check optimization claims with `otool -tv`.
+- **Workload shape determines bottleneck, not the compiler.** A workload's bottleneck (data dep, memory BW, call overhead, etc.) determines what optimizations CAN help. Measuring in only one shape under-determines the conclusion.
+- **"No delta" findings should be tested with at least one adversarial variant.** If a workload designed adversarially in favor of optimization X ALSO shows no delta, the finding generalizes. If it shows a delta, the original "no delta" was scoped to that workload shape.
+
 ### Added — V4 residual #1 closure: parameterized assert-live meta-test
 - `journal/v4_residual_1_assert_live_closeout.md` — full cycle: remediate → red-team → fix → non-tautology validation → document.
 - **STRUCTURAL FIX:** `m4t/tests/test_m4t_assert_live.c` rewritten from single-case to parameterized. Five cases, one per substrate source file with asserts (`m4t_route.c`, `m4t_mtfp.c`, `m4t_mtfp4.c`, `m4t_ternary_matmul.c`, `m4t_trit_pack.c`). Each case violates a DIFFERENT precondition pattern — T-overflow (route), negative-size (mtfp/mtfp4), aliasing (ternary_matmul), out-of-range trit (trit_pack) — for variety beyond just "negative everywhere."

@@ -132,13 +132,19 @@ if(M4T_BUILD_TESTS)
     add_executable(bench_m4t_tier2_perf tests/bench_m4t_tier2_perf.c)
     target_link_libraries(bench_m4t_tier2_perf PRIVATE m4t)
 
-    # V4-G2: Deliberate-abort meta-test. Forks a child that violates a
-    # substrate precondition (m4t_route_topk_abs with T > M4T_ROUTE_MAX_T)
-    # and verifies SIGABRT. Proves substrate asserts are actually live in
-    # m4t_test — without this, "tests link against m4t_test" is only a
-    # build assertion; this is the runtime check.
+    # V4-G2 + V4-residual-1: Parameterized assert-live meta-test. Forks
+    # one child per substrate source file with asserts; each violates a
+    # different precondition, parent verifies SIGABRT. Proves substrate
+    # asserts are uniformly live in m4t_test across every source.
     add_executable(test_m4t_assert_live tests/test_m4t_assert_live.c)
     target_link_libraries(test_m4t_assert_live PRIVATE m4t_test)
     gesh_test_undebug(test_m4t_assert_live)
     add_test(NAME m4t_assert_live COMMAND test_m4t_assert_live)
+
+    # V4-residual-3: LTO microbench targeting cross-TU inlining
+    # specifically. Build target only (not ctest — perf, not regression).
+    # Compare timings between LTO-on (default) and LTO-off builds via
+    # parallel build trees. See journal/v4_residual_3_lto_microbench_*.md.
+    add_executable(bench_m4t_lto tests/bench_m4t_lto.c)
+    target_link_libraries(bench_m4t_lto PRIVATE m4t)
 endif()
