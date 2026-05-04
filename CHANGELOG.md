@@ -4,6 +4,20 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — V4 residual #1 closure: parameterized assert-live meta-test
+- `journal/v4_residual_1_assert_live_closeout.md` — full cycle: remediate → red-team → fix → non-tautology validation → document.
+- **STRUCTURAL FIX:** `m4t/tests/test_m4t_assert_live.c` rewritten from single-case to parameterized. Five cases, one per substrate source file with asserts (`m4t_route.c`, `m4t_mtfp.c`, `m4t_mtfp4.c`, `m4t_ternary_matmul.c`, `m4t_trit_pack.c`). Each case violates a DIFFERENT precondition pattern — T-overflow (route), negative-size (mtfp/mtfp4), aliasing (ternary_matmul), out-of-range trit (trit_pack) — for variety beyond just "negative everywhere."
+- **HARNESS:** `assert_case_t` struct binds source-file → label → violate function pointer. `run_case` forks-and-verifies-SIGABRT for each case. Distinguishes "assert silenced" (child exits cleanly with `EXIT_ASSERT_SILENCED = 42` sentinel) from "child crashed for other reason" (different signal/exit), so a regression points to the actual cause.
+- **RED-TEAM (1 fix, 6 verified/documented):** RT-1 stdio buffer duplication (child inherits parent's unflushed stdout, re-emits on exit) FIXED via `fflush()` before `fork()`. RT-2 verified each violation reaches the intended assert (output names file:line). RT-3 verified earlier preconditions don't short-circuit. RT-4 verified -UNDEBUG uniformly applied (5/5 PASS test variant, 0/5 PASS production). RT-5/6/9 documented as honest concerns.
+- **NON-TAUTOLOGY CHECK:** built the parameterized test against production `libm4t.a` (NDEBUG). All 5 cases reported `assert SILENCED (child returned cleanly)`. Inversion is the proof: 5/5 against m4t_test, 0/5 against m4t. Each case is not vacuous; each depends on -UNDEBUG actually being applied.
+- **COVERAGE NOTE:** `m4t_trit_ops.c` and `m4t_trit_reducers.c` have 0 asserts by design (pure compute, no preconditions). All 5 source files with asserts are now runtime-verified.
+- **16/16 ctest PASS** with no collateral damage.
+
+### Methodology lifted from V4 residual #1
+- **Parameterized meta-tests cover surface area; per-case assertions verify each cell of that surface.** A single case proves a mechanism; an enumerated set of cases proves uniform application. Use the latter when the claim is "X holds across N entities."
+- **Non-tautology checks belong in red-team.** Building the same test source against the inverse build configuration should produce the OPPOSITE result. If both paths PASS, the test is vacuous.
+- **Stdio buffering and fork interact badly.** `fflush()` before `fork()` whenever either side writes to stdio.
+
 ### Added — V4 residual #2 closure: tight bound now data-derived
 - `journal/v4_residual_2_tight_bound_closeout.md` — full cycle: remediate → red-team → fix → validate → document.
 - **STRUCTURAL FIX:** `gesh/tests/test_image_canon.c` replaced hardcoded `tight_bound = 10*dim` (pinned to the specific synthetic pixel pattern) with `derive_tight_bound()` — a per-image bound derived from the actual data's pre-normalize standard deviation. New `test_isqrt64` helper (Newton iteration) for the sd computation.
