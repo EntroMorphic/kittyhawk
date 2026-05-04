@@ -141,6 +141,19 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_assert_live)
     add_test(NAME m4t_assert_live COMMAND test_m4t_assert_live)
 
+    # Concern-#3 closure: auto-coverage check. Verifies that
+    # test_m4t_assert_live.c's cases[] enumerates every substrate .c with
+    # assert() call sites — and only those. Catches both forms of drift:
+    # new source gains asserts but no case added (silent coverage loss),
+    # and case lingers for source that no longer has asserts (stale).
+    add_test(
+        NAME m4t_assert_coverage
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_assert_coverage.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_m4t_assert_live.c
+    )
+
     # V4-residual-3: LTO microbench targeting cross-TU inlining
     # specifically. Build target only (not ctest — perf, not regression).
     # Compare timings between LTO-on (default) and LTO-off builds via
