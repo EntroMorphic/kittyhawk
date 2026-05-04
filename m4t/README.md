@@ -124,6 +124,18 @@ Ten ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-
 
 Tests link against `libm4t_test.a`, a parallel STATIC library compiled from the same sources as `libm4t.a` but with `-UNDEBUG` applied. This makes substrate-internal asserts (precondition checks) actually fire when tests trigger them — without it, `assert(EXPR)` under the substrate's production `-DNDEBUG` becomes `((void)0)` and EXPR is never evaluated. Production binaries (perf benches, gesh probes) keep linking against `libm4t.a` (NDEBUG). The split is enforced via `add_library(m4t_test STATIC ...)` plus `target_compile_options(m4t_test PRIVATE -UNDEBUG)` in `CMakeLists.txt`. The same pattern exists for `gesh_test`, `gesh_bench_test`, `gesh_image_canon_test` in `gesh/CMakeLists.txt`. Verified at three levels: build-time (`nm` shows `___assert_rtn` refs only in `_test` variants), link-time (production binaries link 0 assert symbols), runtime (`test_m4t_assert_live` confirms asserts actually fire).
 
+## Reading perf measurements
+
+Substrate perf claims rest on a specific workload shape: **carry-dependent, single-pass accumulation** (each iteration's output depends on the previous iteration's output). That's how the substrate's actual consumers use these kernels — they accumulate into state. The bench harness `bench_m4t_tier2_perf` measures that shape.
+
+Two consequences for reading bench numbers:
+
+1. **"Substrate is well-optimized" is a property of measurement under that shape, not a global claim.** A future consumer that pipelines block ops across independent buffers (e.g., batched matmul over many small tiles) sees a different bottleneck profile. Separate measurements are warranted; existing numbers don't transfer.
+
+2. **Compiler optimizations that target call overhead can be invisible.** LTO inlines `m4t_mtfp_block_add` cleanly, but on the carry-dep workload the data dependency between iterations dominates and the inlining win is hidden. On a pipelined workload (independent dsts, no carry), LTO produces a **3× speedup** for the same target function — proven by `bench_m4t_lto`. See `journal/v4_residual_3_lto_microbench_closeout.md` for the controlled comparison and `journal/tier2_residuals_v4_closeout.md` (with its V4-residual-3 update) for the corrected framing.
+
+Bottom line: when reading "kernel X takes Y ns/call," check that Y was measured under the workload shape that matches your intended consumer.
+
 ## What's not here
 
 Deliberately archived (see `01MAY26_archived/`):

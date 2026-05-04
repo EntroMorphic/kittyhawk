@@ -14,6 +14,14 @@
  *   - Three data distributions (M2): random, structured, sparse-zero.
  *   - Pool of 8 distinct data arrays, pseudo-randomly indexed per iter (M3).
  *   - Median of 5 trials per measurement (Risk B mitigation).
+ *
+ * READING THE NUMBERS: this bench measures carry-dependent, single-pass
+ * workloads — the shape matching the substrate's actual consumers. A
+ * different workload shape (e.g., pipelined / batched independent ops)
+ * surfaces a different bottleneck profile and may show very different
+ * timings for the same kernel. See "Reading perf measurements" in
+ * m4t/README.md, or m4t/tests/bench_m4t_lto.c for a controlled
+ * comparison across two shapes.
  */
 
 #include "m4t_route.h"

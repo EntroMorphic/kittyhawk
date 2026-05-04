@@ -4,6 +4,19 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — Outstanding-concerns sweep (4 of 4 closed)
+Post-V4-residuals, four outstanding concerns surfaced in conversation review. All four closed methodically; each got its own commit.
+
+- **Concern #1** (`b24c90e`): `journal/tier2_residuals_v4_closeout.md` framed "LTO has nothing to add" too generally. Added header forward-pointer + bottom "Update (V4-residual-3)" section explicitly correcting the framing. Original analysis preserved; correction appended with methodology lesson on adversarial-variant testing of "no delta" findings.
+- **Concern #2** (`bcc01f0`): `.github/workflows/build.yml` now runs a 2-job matrix with `GESH_LTO=ON` and `GESH_LTO=OFF`. Without this, the OFF path was only exercised by hand. Verified locally and confirmed in CI: both jobs green (`build-test (LTO=ON)` 28s, `build-test (LTO=OFF)` 17s).
+- **Concern #3** (`19c5e73`): `m4t/tests/check_assert_coverage.sh` + ctest entry `m4t_assert_coverage`. Compares the set of substrate `.c` files with `assert(` call sites against `cases[].source_file` in `test_m4t_assert_live.c`. Symmetric — catches both missing cases (silent coverage loss) and stale cases (no asserts left). Caught my own regex bug on first run (`[a-z_]+` excluded digits, missed `m4t_mtfp4.c`); fixed and negative-tested. 16/17 ctest now (was 16; +1 for coverage gate).
+- **Concern #4** (this commit): `m4t/README.md` "Reading perf measurements" section + pointer in `m4t/tests/bench_m4t_tier2_perf.c` header. Names the workload-shape dependency explicitly: substrate perf claims rest on carry-dependent, single-pass accumulation; pipelined / batched-independent shapes have a different bottleneck profile and may show very different numbers for the same kernel. Points to `bench_m4t_lto` and the V4-residual-3 closeout as the controlled demonstration.
+
+### Methodology lifted from outstanding-concerns sweep
+- **"No delta" perf findings should always carry a workload-shape caveat in the doc that ships them.** Without it, future readers generalize from one shape's measurements.
+- **Hand-enumerated coverage lists need automated drift detection.** When a test exhaustively lists "every X with property Y," add a check that compares the list against the actual set. The list will drift; the check catches it.
+- **CI matrix on optional build flags catches "only-the-default-is-tested" silent regressions.** Cheap to add, expensive to skip.
+
 ### Added — V4 residual #3 closure: LTO microbench reveals 3× speedup is achievable
 - `journal/v4_residual_3_lto_microbench_closeout.md` — full cycle: design → discover -fno-lto silently overridden → fix CMake gating → measure → discover variant A no delta (matching V4-G5) → red-team → add variant B → discover 3× LTO speedup → red-team again → document.
 - **STRUCTURAL FIX:** `CMakeLists.txt` (top-level) — gated `add_compile_options(-flto)` and `add_link_options(-flto)` behind `option(GESH_LTO "Enable link-time optimization" ON)`. Default behavior unchanged. Build a no-LTO comparison tree via `-DGESH_LTO=OFF`. Surfaced because my first attempt at no-LTO via `-DCMAKE_C_FLAGS=-fno-lto` was silently overridden — CMake prepends user flags but the project's own `add_compile_options` appends, so the compile line ended up with both `-fno-lto` and `-flto` and clang took the later (LTO won).
