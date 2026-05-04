@@ -8,12 +8,21 @@ on:
 
 jobs:
   build:
+    # Matrix exercises both LTO=ON (production default) and LTO=OFF.
+    # Concern: a future code path that only works under LTO would silently
+    # break the OFF configuration; only the bench_m4t_lto microbench
+    # currently uses OFF, and it's manually run. CI catches regressions.
+    strategy:
+      fail-fast: false
+      matrix:
+        lto: [ON, OFF]
+    name: build-test (LTO=${{ matrix.lto }})
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DGESH_LTO=${{ matrix.lto }}
 
       - name: Build
         run: cmake --build build -j
