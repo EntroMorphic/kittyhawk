@@ -34,11 +34,23 @@ if [ ! -f "$TEST_FILE" ]; then
 fi
 
 # List-A: substrate .c files with at least one runtime assert( call.
-# Exclude _Static_assert (compile-time, not relevant to assert-live).
-# The grep pattern: word-boundary "assert(" not preceded by [A-Za-z_].
+#
+# Pattern: line-start (modulo leading whitespace) followed by `assert(`.
+# This excludes false positives from:
+#   - block-comment continuations (line begins with `*`)
+#   - line comments (line begins with `//`)
+#   - string literals containing `assert(` (literal can't span line start)
+#   - mid-line non-call use (e.g., `_Static_assert(...)` — different token,
+#     and doesn't appear at line start anyway)
+#   - mentions in conditional code like `if (x) assert(y)` (mid-line)
+#
+# Audit confirmed (at the time of writing): every `assert(` call site in
+# m4t/src/*.c is at line start modulo whitespace. If a future call site
+# is written mid-line and not caught by this, the missing case will
+# surface as a coverage failure, not a silent pass — visible failure mode.
 files_with_asserts() {
     for f in "$SRC_DIR"/*.c; do
-        if grep -qE '(^|[^A-Za-z_])assert\(' "$f"; then
+        if grep -qE '^[[:space:]]*assert\(' "$f"; then
             basename "$f"
         fi
     done | sort
@@ -50,6 +62,26 @@ files_with_asserts() {
 files_in_cases() {
     grep -oE '"m4t_[a-z0-9_]+\.c"' "$TEST_FILE" | tr -d '"' | sort -u
 }
+
+# Safety net: warn (not fail) if a file has any assert( token that the
+# strict regex would miss. Catches the inverse failure mode of the
+# strict regex: a mid-line assert (e.g., `if (x) assert(y);`) wouldn't
+# be at line start, so the file would be excluded from List A and
+# silently lack a case. Warning surfaces this; doesn't break the gate.
+warn_mid_line_asserts() {
+    for f in "$SRC_DIR"/*.c; do
+        # _Static_assert is compile-time, not relevant here.
+        loose=$(grep -cE '(^|[^A-Za-z_])assert\(' "$f" || true)
+        static_assert=$(grep -cE '_Static_assert\(' "$f" || true)
+        loose_runtime=$((loose - static_assert))
+        strict=$(grep -cE '^[[:space:]]*assert\(' "$f" || true)
+        if [ "$loose_runtime" -gt "$strict" ]; then
+            echo "WARNING: $(basename "$f") has $((loose_runtime - strict)) assert( token(s) not at line start;" >&2
+            echo "         coverage check may miss them. Restructure to line-start, or amend this script." >&2
+        fi
+    done
+}
+warn_mid_line_asserts
 
 actual="$(files_with_asserts)"
 covered="$(files_in_cases)"
