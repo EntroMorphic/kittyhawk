@@ -392,6 +392,68 @@ void m4t_mtfp_vec_sub_aligning(
 
 /* ── shift3: base-3 positional shift (elemental floor primitive) ───────── */
 
+/* Scalar divide loop. Used by m4t_mtfp_shift3_scalar_ref directly and as
+ * the non-NEON fallback inside m4t_mtfp_shift3. abs_k ∈ [1, 19]. */
+static void shift3_div_scalar(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                              int abs_k, int n) {
+    int64_t divisor = M4T_POW3_TABLE[abs_k];
+    for (int i = 0; i < n; i++) {
+        int had_rem = 0;
+        int64_t q = m4t_pow3_round_div((int64_t)src[i], divisor, &had_rem);
+        dst[i] = (m4t_mtfp_t)q;  /* |q| ≤ MAX_VAL/divisor + 1 ≤ MAX_VAL */
+    }
+}
+
+#if M4T_HAS_NEON
+/* NEON magic-multiply divide path. abs_k ∈ [1, 19].
+ *
+ * Pipeline per 4 lanes:
+ *   prod_64 = (int64_t)x * M_table[abs_k]
+ *   adj_64  = prod_64 + (1 << (N_table[abs_k] - 1))     // round-half-up
+ *   result  = (int32_t)(adj_64 >> N_table[abs_k])        // arith right shift
+ * (Compiler typically fuses vmull + vaddq into smlal under -O3 -mcpu=native.)
+ *
+ * Bit-exact vs shift3_div_scalar across the full substrate input range
+ * (verified by the m4t_shift3_neon ctest's exhaustive mode and by
+ * gen_pow3_magic.c). Constants in m4t_pow3_magic.h.
+ *
+ * Why vmull (64-bit intermediate) instead of vqrdmulhq + vrshlq (32-bit
+ * with rounding): vqrdmulhq + vrshlq composes two round-to-nearest steps,
+ * which accumulate compound rounding error and can't be made bit-exact
+ * across all magnitudes for k > 1 without per-k specialization. The
+ * 64-bit-intermediate path has ONE rounding step end-to-end and is
+ * bit-exact by construction. Trade ~1.5x speed for bit-exactness
+ * simplicity. See journal/shift3_neon_reflect.md and
+ * journal/shift3_neon_synthesize.md. */
+static void shift3_div_neon(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                            int abs_k, int n) {
+    int32_t M = M4T_POW3_DIV_M[abs_k];
+    int     N = M4T_POW3_DIV_N[abs_k];
+    int32x2_t Mv = vdup_n_s32(M);
+    int64x2_t bias = vdupq_n_s64((int64_t)1 << (N - 1));
+    int64x2_t neg_N = vdupq_n_s64(-(int64_t)N);
+
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t x = vld1q_s32((const int32_t*)(src + i));
+        int64x2_t prod_lo = vmull_s32(vget_low_s32(x),  Mv);
+        int64x2_t prod_hi = vmull_s32(vget_high_s32(x), Mv);
+        prod_lo = vaddq_s64(prod_lo, bias);
+        prod_hi = vaddq_s64(prod_hi, bias);
+        prod_lo = vshlq_s64(prod_lo, neg_N);
+        prod_hi = vshlq_s64(prod_hi, neg_N);
+        int32x4_t result = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
+        vst1q_s32((int32_t*)(dst + i), result);
+    }
+    /* Scalar tail (n not a multiple of 4). */
+    for (; i < n; i++) {
+        int64_t prod = (int64_t)src[i] * (int64_t)M;
+        int64_t adj  = prod + ((int64_t)1 << (N - 1));
+        dst[i] = (m4t_mtfp_t)(adj >> N);
+    }
+}
+#endif
+
 void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
     assert(n >= 0);
     if (n == 0) return;
@@ -428,51 +490,49 @@ void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
         memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
         return;
     }
-
 #if M4T_HAS_NEON
-    /* NEON magic-multiply path. abs_k ∈ [1, 19]. Per shift3_neon LMM
-     * cycle (G1–G8): bit-exact vs the scalar reference for all x in the
-     * substrate input range, ~9.5x speedup at n≥4096. Pipeline:
-     *   prod_64 = (int64_t)x * M
-     *   adj_64  = prod_64 + (1 << (N-1))      // round-half-up bias
-     *   result  = (int32_t)(adj_64 >> N)       // arith right shift
-     * Constants in m4t_pow3_magic.h (single source of truth, generated
-     * exhaustively by m4t/tools/gen_pow3_magic.c). */
-    {
-        int32_t M = M4T_POW3_DIV_M[abs_k];
-        int     N = M4T_POW3_DIV_N[abs_k];
-        int32x2_t Mv = vdup_n_s32(M);
-        int64x2_t bias = vdupq_n_s64((int64_t)1 << (N - 1));
-        int64x2_t neg_N = vdupq_n_s64(-(int64_t)N);
+    shift3_div_neon(dst, src, abs_k, n);
+#else
+    shift3_div_scalar(dst, src, abs_k, n);
+#endif
+}
 
-        int i = 0;
-        for (; i + 4 <= n; i += 4) {
-            int32x4_t x = vld1q_s32((const int32_t*)(src + i));
-            int64x2_t prod_lo = vmull_s32(vget_low_s32(x), Mv);
-            int64x2_t prod_hi = vmull_s32(vget_high_s32(x), Mv);
-            prod_lo = vaddq_s64(prod_lo, bias);
-            prod_hi = vaddq_s64(prod_hi, bias);
-            prod_lo = vshlq_s64(prod_lo, neg_N);
-            prod_hi = vshlq_s64(prod_hi, neg_N);
-            int32x4_t result = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
-            vst1q_s32((int32_t*)(dst + i), result);
+/* Scalar-only reference. Same semantics as m4t_mtfp_shift3 (per the
+ * header doc-comment) but ALWAYS uses the scalar divide path, never
+ * dispatches to NEON. Test-only: production must call m4t_mtfp_shift3.
+ * Per journal/shift3_neon_redteam.md C1/C2/C3 + remediation R-G1. */
+void m4t_mtfp_shift3_scalar_ref(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                                int k, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
+
+    if (k == 0) {
+        if (dst != src) memcpy(dst, src, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+    if (k > 0) {
+        if (k >= 20) {
+            for (int i = 0; i < n; i++) {
+                if (src[i] > 0)      dst[i] =  M4T_MTFP_MAX_VAL;
+                else if (src[i] < 0) dst[i] = -M4T_MTFP_MAX_VAL;
+                else                  dst[i] = 0;
+            }
+            return;
         }
-        /* Scalar tail (n not multiple of 4). */
-        for (; i < n; i++) {
-            int64_t prod = (int64_t)src[i] * (int64_t)M;
-            int64_t adj  = prod + ((int64_t)1 << (N - 1));
-            dst[i] = (m4t_mtfp_t)(adj >> N);
+        int64_t scale = M4T_POW3_TABLE[k];
+        for (int i = 0; i < n; i++) {
+            int64_t v = (int64_t)src[i] * scale;
+            dst[i] = m4t_mtfp_clamp64(v);
         }
         return;
     }
-#endif
 
-    /* Fallback: scalar reference path. Kept as the bit-exact oracle and
-     * for any future non-NEON target. */
-    int64_t divisor = M4T_POW3_TABLE[abs_k];
-    for (int i = 0; i < n; i++) {
-        int had_rem = 0;
-        int64_t q = m4t_pow3_round_div((int64_t)src[i], divisor, &had_rem);
-        dst[i] = (m4t_mtfp_t)q;  /* |q| ≤ MAX_VAL/divisor + 1 ≤ MAX_VAL */
+    int abs_k = -k;
+    if (abs_k >= 20) {
+        memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
     }
+    shift3_div_scalar(dst, src, abs_k, n);
 }

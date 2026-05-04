@@ -58,7 +58,9 @@ The headline 9.5× (BATCHED) is the regime where shift3 is most useful — bulk 
 
 ## What's structurally true now
 
-**The substrate's divide-by-3^k primitive runs at NEON throughput on Apple Silicon.** Pre-cycle, `m4t_mtfp_shift3` for the divide direction was ~5.8 cycles/element (hardware `sdiv` + round-to-nearest logic). Post-cycle, it's ~0.6 cycles/element (NEON `smlal + sshl + vmovn`). The substrate's elemental floor primitive `shift3` no longer has a slow direction.
+**The substrate's `m4t_mtfp_shift3` divide direction now runs at NEON throughput on Apple Silicon.** Pre-cycle, the divide direction was scalar `sdiv` + round-to-nearest logic (~5.8 cycles/element). Post-cycle, it's NEON `smlal + sshl + vmovn` (~0.6 cycles/element on the BATCHED workload). The multiply direction (k > 0) is partly auto-vectorized by AppleClang already (per G4 finding) but uses scalar 64-bit muls inside NEON shuffles — further headroom remains there for a future cycle.
+
+**Update (2026-05-04, post-redteam remediation):** the original framing here said "no longer has a slow direction" — too strong, since the multiply direction's auto-vectorization isn't true SIMD multiply. Corrected per `journal/shift3_neon_redteam.md` M4 / `shift3_neon_remediation_*.md` R-G10.
 
 **The magic table is the formal record.** `m4t/src/m4t_pow3_magic.h` is the committed, exhaustively-verified source. Anyone needing to verify the table can re-run `gen_pow3_magic.c` and diff. No surprise drift.
 

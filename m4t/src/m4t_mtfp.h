@@ -277,6 +277,21 @@ void m4t_mtfp_shift3(
     int n
 );
 
+/* Scalar-only reference. Same semantics as m4t_mtfp_shift3 above; never
+ * dispatches to the NEON path even when M4T_HAS_NEON. Exposed for tests:
+ * after productionization, m4t_mtfp_shift3 runs NEON for the divide
+ * direction, so a bit-exact gate needs an independent scalar oracle.
+ *
+ * Production code MUST NOT call this — it is intentionally slower than
+ * m4t_mtfp_shift3 and exists solely for verification. Per
+ * journal/shift3_neon_redteam.md C1/C2/C3 + remediation R-G1. */
+void m4t_mtfp_shift3_scalar_ref(
+    m4t_mtfp_t* dst,
+    const m4t_mtfp_t* src,
+    int k,
+    int n
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4,6 +4,23 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — shift3 NEON cycle remediation (100/100, 12 R-G gates PASS)
+Per `journal/shift3_neon_redteam.md` (3 critical, 2 high, 4 medium, 4 low findings) and `journal/shift3_neon_remediation_{precommit,closeout}.md`. The original cycle's 8 gates passed but G6 (productionization) silently invalidated G1's bit-exact verification — replacing the function under test against itself produced a NEON-vs-NEON tautology. Remediation closes all 13 findings.
+
+- **STRUCTURAL FIX (C1, C2, C3, foundation):** `m4t/src/m4t_mtfp.h` declares `m4t_mtfp_shift3_scalar_ref` (always-scalar oracle, test-only). `m4t/src/m4t_mtfp.c` refactored: `static shift3_div_scalar` and `static shift3_div_neon` helpers; `m4t_mtfp_shift3` dispatches; new `m4t_mtfp_shift3_scalar_ref` always uses scalar. LTO can no longer DCE the scalar path (test references it).
+- **HELPER EXTRACTION (M2):** NEON path lifted out of `m4t_mtfp_shift3` body into its own static helper with extensive comment explaining the vqrdmulhq → vmull pivot.
+- **TEST REWRITE (C1, H1, R-G3, R-G6):** `m4t/tests/test_m4t_shift3_neon.c` (renamed from `_proto.c` per R-G8) now compares production `m4t_mtfp_shift3` against `m4t_mtfp_shift3_scalar_ref`. Prototype kernel copy deleted — single NEON kernel in repo.
+- **PERF BENCH FIX (C2, R-G4):** `perf_compare` uses `m4t_mtfp_shift3_scalar_ref` for the scalar measurement.
+- **EXHAUSTIVE VERIFY (R-G5):** 22.08 × 10⁹ test points (1.16e9 × 19 k) bit-exact production NEON ≡ scalar_ref. Invokable via `./build/m4t/test_m4t_shift3_neon x` (~25s).
+- **HONEST RE-MEASURED SPEEDUP (R-G7, H2):** Production NEON vs scalar_ref, min-of-5: **BATCHED (n=4096): 9.2–9.6×** speedup across k ∈ {1, 7, 13, 19} — confirms the original headline claim. **TIGHT-LOOP (n=4): 1.6×** — corrects the prior 6.3× claim (which was an inlining-asymmetry artifact between the prototype's inlinable copy and the substrate-boundary call). Both numbers reported with workload shape per CONTRIBUTING.md scope-match rule.
+- **DOC UPDATES (M4, R-G10; L1, R-G11):** `journal/shift3_neon_closeout.md` framing softened ("divide direction is NEON; multiply direction partly auto-vectorized but has further headroom" — was overstated as "no slow direction"). `m4t/docs/M4T_SUBSTRATE.md` tree updated for `m4t_pow3_magic.h`, `tools/gen_pow3_magic.c`, `test_m4t_shift3_neon.c`, `bench_m4t_lto.c`.
+- **PIVOT DOCUMENTED IN PRODUCTION CODE (L2, R-G12):** `m4t_mtfp.c::shift3_div_neon` now contains the inline rationale for the vmull-over-vqrdmulhq choice plus journal pointers.
+- **18/18 ctest PASS** (renamed test entry, no count change).
+
+### Methodology lifted from shift3 NEON remediation (cycle-level lesson)
+- **When a productionization gate replaces the implementation under test, the bit-exact verification gate must:** (a) run AFTER productionization, AND (b) compare against a separately-preserved reference oracle that productionization does NOT replace. Pre-productionization "bit-exact" claims do not transfer to post-productionization unless one of these conditions holds.
+- **Concrete pattern:** when productionizing an optimization, expose the original reference implementation as a permanent test-only oracle in the public API (e.g., `m4t_mtfp_shift3_scalar_ref`). LTO can't DCE it because the test references it externally; future modifications can re-verify against it.
+
 ### Added — shift3 NEON divide path (full LMM cycle: prototype → 8-gate productionization)
 - `journal/shift3_neon_{raw,nodes,reflect,synthesize,closeout}.md` — full Lincoln Manifold Method cycle on the proposed `m4t_div_3pk_neon` (substitute for custom silicon for shift3 divide direction). RAW dump → 31 atomic NODES → REFLECT cold-eye → SYNTHESIZE 8 pre-committed gates → CLOSEOUT all 8 PASS.
 - **STRUCTURAL CHANGE:** `m4t_mtfp_shift3` divide-direction path (k < 0) now uses NEON magic-multiply when `M4T_HAS_NEON && abs_k ∈ [1, 19]`. Pipeline: `vmull_s32 → vaddq_s64(bias) → vshlq_s64 → vmovn_s64`. Compiler fuses vmull+vaddq into `smlal.2d`. Scalar reference path retained as fallback + bit-exact oracle.

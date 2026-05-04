@@ -128,17 +128,28 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_elemental_floor)
     add_test(NAME m4t_elemental_floor COMMAND test_m4t_elemental_floor)
 
-    # shift3 NEON divide path (productionized per shift3_neon synthesize G6).
-    # Bit-exact NEON-vs-scalar property test + sample-based verification.
-    # The test's m4t_shift3_div_neon is a copy of the production NEON path
-    # for direct comparison; production uses the same magic table.
-    # The exhaustive variant (./test_m4t_shift3_neon x) ran G1 (2.2e10 test
-    # points, 25s) — too slow for ctest, run by hand when the magic table
-    # changes. ctest runs the sample-based + alias check (~0.5s).
-    add_executable(test_m4t_shift3_neon tests/test_m4t_shift3_neon_proto.c)
+    # shift3 NEON divide path test. Compares production m4t_mtfp_shift3
+    # (NEON via dispatch) against m4t_mtfp_shift3_scalar_ref (always-scalar,
+    # exposed for tests). Per remediation R-G3/R-G4/R-G6/R-G8.
+    #
+    # Two ctest entries:
+    #   m4t_shift3_neon            — sample bit-exact + alias test (~0.3s, default)
+    #   m4t_shift3_neon_exhaustive — full sweep across the substrate input
+    #                                range (1.16e9 × 19 = 22.08e9 test
+    #                                points, ~25s). Disabled by default;
+    #                                invoke explicitly when the magic table
+    #                                or NEON kernel changes:
+    #                                  ctest -R m4t_shift3_neon_exhaustive
+    add_executable(test_m4t_shift3_neon tests/test_m4t_shift3_neon.c)
     target_link_libraries(test_m4t_shift3_neon PRIVATE m4t_test)
     gesh_test_undebug(test_m4t_shift3_neon)
     add_test(NAME m4t_shift3_neon COMMAND test_m4t_shift3_neon)
+    # Exhaustive bit-exact verify (1.16e9 × 19 = 22.08e9 test points, ~25s)
+    # is invoked by passing 'x' as argv:
+    #   ./build/m4t/test_m4t_shift3_neon x
+    # NOT in ctest (would balloon CI runtime). Per remediation R-G9: this
+    # is the sole surviving artifact of the exhaustive verify; re-run by
+    # hand whenever the magic table or NEON kernel changes.
 
     # Tier 2 perf harness. LTO inherited from top-level (V2-G1).
     add_executable(bench_m4t_tier2_perf tests/bench_m4t_tier2_perf.c)
