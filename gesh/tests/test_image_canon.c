@@ -26,6 +26,72 @@
 #define IMG_W   4
 #define IMG_H   4
 
+/* Integer square root (Newton iteration). Local to this test file because
+ * image_canon.c's isqrt64 is static and not exposed.
+ *   isqrt64(0) = 0, isqrt64(1) = 1, isqrt64(2) = 1.
+ *   For n >= 0, returns floor(sqrt(n)). */
+static int64_t test_isqrt64(int64_t n) {
+    if (n < 2) return n < 0 ? 0 : n;
+    int64_t x = n;
+    int64_t y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + n / x) / 2; }
+    return x;
+}
+
+/* V4-residual-2 closure: derive per-image tight bound from the image's
+ * pre-normalize standard deviation. Decoupled from any specific synthetic
+ * pixel pattern — change the test data, the bound auto-recalibrates.
+ *
+ * Drift derivation, working through normalize_one (see image_canon.c):
+ *
+ *   Step (a) centering: img[d] -= sum/dim. Let R = sum after centering;
+ *   |R| < dim (R = original_sum mod dim under integer divide).
+ *
+ *   Step (b) rescaling: img[d] = floor(img[d] * SCALE / sd). For each
+ *   element, |floor(c*SCALE/sd) - c*SCALE/sd_real| ≤ 1. Summed across
+ *   dim elements, the per-element truncation contributes ≤ dim total.
+ *   The centering residual R, scaled, contributes |R| * SCALE/sd_real.
+ *
+ *   So |sum after normalize| ≤ |R| * SCALE/sd_real + dim
+ *                            ≤ dim * SCALE/sd_real + dim
+ *                            = dim * (1 + SCALE/sd_real).
+ *
+ *   Two layers of integer-truncation pessimize the COMPUTED bound vs
+ *   the strict math:
+ *     (i)  We compute var = sq/dim and sd = isqrt(var). Both truncate,
+ *          so computed sd is a LOWER bound on true sd_real.
+ *     (ii) Computed (SCALE/sd) is therefore already an UPPER bound on
+ *          true (SCALE/sd_real). Adding +1 to the integer divide
+ *          handles (SCALE/sd) itself truncating: floor(SCALE/sd) ≤
+ *          true SCALE/sd_real ≤ floor(SCALE/sd) + 1.
+ *
+ *   Final formula: bound_math = dim * (1 + (floor(SCALE/sd_computed) + 1)).
+ *   Apply 2x safety factor: bound = 2 * dim * (1 + scale_over_sd_ub),
+ *   where scale_over_sd_ub = floor(SCALE/sd_computed) + 1.
+ *
+ *   For dim=16, sd_pre ≈ SCALE/5: scale_over_sd_ub = 6, bound = 224.
+ *   Observed drift on this synthetic ≤ 76; headroom ≈ 2.95x.
+ *
+ * Edge case: sd == 0 (all pixels identical). normalize_one early-returns
+ * before rescaling; centered values are all 0; post-normalize sum = 0.
+ * Use 2*dim as a generous floor-bound check. */
+static int64_t derive_tight_bound(const m4t_mtfp_t* img, int dim) {
+    if (dim <= 0) return 0;
+    int64_t sum = 0;
+    for (int d = 0; d < dim; d++) sum += (int64_t)img[d];
+    int64_t mean = sum / dim;
+    int64_t sq = 0;
+    for (int d = 0; d < dim; d++) {
+        int64_t centered = (int64_t)img[d] - mean;
+        sq += centered * centered;
+    }
+    int64_t var = sq / dim;
+    int64_t sd = test_isqrt64(var);
+    if (sd == 0) return 2 * (int64_t)dim;
+    int64_t scale_over_sd_ub = (int64_t)M4T_MTFP_SCALE / sd + 1;
+    return 2 * (int64_t)dim * (1 + scale_over_sd_ub);
+}
+
 static void write_be_u32(FILE* f, uint32_t v) {
     uint8_t b[4] = {
         (uint8_t)(v >> 24), (uint8_t)(v >> 16),
@@ -103,10 +169,24 @@ static void test_normalize_invariants(void) {
      * evaluated. The call would be silently elided and ds left uninitialized. */
     int rc = image_canon_load_mnist(&ds, IDX_DIR);
     if (rc != 0) { fprintf(stderr, "load failed\n"); exit(1); }
+    int dim = ds.input_dim;
+
+    /* V4-residual-2 closure: derive per-image tight bound from each image's
+     * pre-normalize sd BEFORE calling normalize (which destroys the input).
+     * Decouples the bound from any specific synthetic pixel pattern —
+     * change the test data, the bound auto-recalibrates per image. */
+    int64_t* tight_bounds = malloc((size_t)ds.n_train * sizeof(int64_t));
+    if (!tight_bounds) { fprintf(stderr, "malloc failed\n"); exit(1); }
+    for (int i = 0; i < ds.n_train; i++) {
+        tight_bounds[i] = derive_tight_bound(
+            ds.x_train + (size_t)i * dim, dim);
+    }
+
     image_canon_normalize(&ds);
 
-    /* Per-image post-normalize: clipped at ±3 × MTFP_SCALE. */
-    int dim = ds.input_dim;
+    /* Per-image post-normalize: clipped at ±3 × MTFP_SCALE; mean drift
+     * within both the loose (data-independent) and tight (per-image,
+     * data-derived) bounds. */
     for (int i = 0; i < ds.n_train; i++) {
         int64_t sum = 0;
         for (int d = 0; d < dim; d++) {
@@ -117,51 +197,30 @@ static void test_normalize_invariants(void) {
             }
             sum += v;
         }
-        /* Two-tier principled bound (V4-G4 tightening of V3-G2):
-         *
-         *   normalize_one's TWO integer-division steps each introduce drift:
-         *   (a) centering: img[d] -= sum/dim. Truncation drift per element
-         *       bounded by 1; sum drift after centering: ≤ dim.
-         *   (b) rescaling: img[d] = img[d] * SCALE / sd. Integer divide
-         *       truncation per element bounded by 1; this amplifies the
-         *       centering drift by SCALE/sd per element.
-         *
-         *   LOOSE bound (catches order-of-magnitude bugs):
-         *     |sum| < dim * SCALE / 10. Says "post-normalize mean within
-         *     10% of unit scale." For dim=16, bound ≈ 94K. Catches
-         *     broken-mean-centering bugs (drift ~ SCALE).
-         *
-         *   TIGHT bound (catches 2-3x regressions):
-         *     Worst case derivation:
-         *       - After centering: residual sum ≤ dim.
-         *       - After rescaling: per-element rescaling truncation drift
-         *         bounded by 1, summed = dim. Plus the residual sum gets
-         *         multiplied by SCALE/sd.
-         *       - For pixel data with range ~SCALE, sd ≈ SCALE/4 to
-         *         SCALE/3, so SCALE/sd ≤ 4.
-         *       - |sum after rescale| ≤ dim + dim * 4 = 5 * dim.
-         *     Apply 2x safety factor: tight_bound = 10 * dim.
-         *     For dim=16, tight_bound = 160. Observed drift on this
-         *     synthetic data is ≤ ~80 (V2 pinpoint). Catches any
-         *     regression that 2x's the drift.
-         *
-         * Historical: this assert was ±dim and silently disabled in
-         * Release (V2 pinpoint). V3 enabled tests with -UNDEBUG and
-         * derived the loose bound. V4 added the tight bound to catch
-         * regressions the loose bound would miss. */
+        /* LOOSE bound (data-independent backstop): |sum| < dim*SCALE/10.
+         * Says "post-normalize mean within 10% of unit scale." For
+         * dim=16, bound ≈ 94K. Tight will fail before loose for any
+         * realistic data, so this primarily serves as a safety net if
+         * derive_tight_bound itself has a future bug (e.g., underestimates
+         * sd, producing a too-loose tight bound). Catches catastrophic
+         * mean-centering breakage (drift ~ SCALE). */
         int64_t loose_bound = (int64_t)dim * (int64_t)M4T_MTFP_SCALE / 10;
         if (sum < -loose_bound || sum > loose_bound) {
             fprintf(stderr, "LOOSE mean drift %lld (bound +/- %lld)\n",
                     (long long)sum, (long long)loose_bound); exit(1);
         }
-        int64_t tight_bound = 10 * (int64_t)dim;
+        /* TIGHT bound (per-image, data-derived): see derive_tight_bound
+         * for the math. Catches 2x drift regressions for ANY test data
+         * pattern, not just this synthetic. */
+        int64_t tight_bound = tight_bounds[i];
         if (sum < -tight_bound || sum > tight_bound) {
-            fprintf(stderr, "TIGHT mean drift %lld (bound +/- %lld) — "
-                            "regression: drift exceeds analytical worst "
-                            "case (5*dim) by 2x\n",
-                    (long long)sum, (long long)tight_bound); exit(1);
+            fprintf(stderr, "TIGHT mean drift img=%d sum=%lld "
+                            "(derived bound +/- %lld) — regression: drift "
+                            "exceeds analytical worst-case by 2x\n",
+                    i, (long long)sum, (long long)tight_bound); exit(1);
         }
     }
+    free(tight_bounds);
     image_canon_free(&ds);
     printf("  PASS test_normalize_invariants\n");
 }

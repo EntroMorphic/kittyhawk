@@ -4,6 +4,20 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — V4 residual #2 closure: tight bound now data-derived
+- `journal/v4_residual_2_tight_bound_closeout.md` — full cycle: remediate → red-team → fix → validate → document.
+- **STRUCTURAL FIX:** `gesh/tests/test_image_canon.c` replaced hardcoded `tight_bound = 10*dim` (pinned to the specific synthetic pixel pattern) with `derive_tight_bound()` — a per-image bound derived from the actual data's pre-normalize standard deviation. New `test_isqrt64` helper (Newton iteration) for the sd computation.
+- **MATH:** `bound = 2 * dim * (1 + scale_over_sd_ub)` where `scale_over_sd_ub = floor(SCALE/sd) + 1`. Walks through the two integer-truncation layers (var/dim then isqrt; SCALE/sd) explicitly. For dim=16, sd ≈ SCALE/5: bound = 224 (vs. previous hardcoded 160). Observed drift ≤ 76; headroom ≈ 2.95×.
+- **RED-TEAM (4 findings, all addressed):** R-A off-by-one in formula (code had extra `+1` term unjustified by math; tightened from 256 → 224). R-B comment didn't explain the `+1` as an upper-bound trick. R-C integer `var/dim` ALSO truncates (extra source of conservativeness, now documented). R-D loose bound is now redundant for realistic data (kept as backstop against future `derive_tight_bound` bugs, with explicit role doc).
+- **POSITIVE CONTROL:** scratch test injects +15 per pixel → post-normalize sum = 245 > bound 224, tight check correctly fires. Bound is meaningful, not vacuous.
+- **RECALIBRATION VALIDATION:** scratch test computes bounds across four data shapes. Low-sd (slowly varying): bound = 472,448. High-sd (alternating): bound = 128. Uniform (sd=0): bound = 32 (edge case via `2*dim` floor). Original synthetic: bound = 224. Bound varies by orders of magnitude — formula is data-shape-aware.
+- **16/16 ctest PASS** with no collateral damage.
+
+### Methodology lifted from V4 residual #2
+- **Test bounds tied to specific synthetic data are landmines.** Replace hardcoded constants with bounds derived from the actual data when the math is tractable. Future test-data changes auto-recalibrate.
+- **Walk through every integer-truncation source in derived bounds.** Each integer divide silently shifts the bound; document the direction (lower/upper) and why the resulting computed bound is conservative.
+- **Validate derived bounds three ways: positive injection (does the check fire?), recalibration across data shapes (does the bound move when data changes?), full regression (no other test broken?).**
+
 ### Added — V4 remediation: closed all 4 -UNDEBUG residual threats from V3
 - `journal/tier2_residuals_v4_{precommit,closeout}.md` — methodical closure of the four threats inherent in V3's `-UNDEBUG` residual.
 - **STRUCTURAL FIX (T1):** added parallel `_test` library variants — `m4t_test`, `gesh_test`, `gesh_bench_test`, `gesh_image_canon_test` — compiled from the same sources as the production libs but with `-UNDEBUG` applied. Test executables now link against the `_test` variants. Substrate-internal asserts (e.g., `m4t_route_topk_abs`'s `T <= M4T_ROUTE_MAX_T` precondition) actually fire when triggered from tests. Pre-V4, these asserts were silenced — `libm4t.a` was compiled with `-DNDEBUG` and the test executable's own `-UNDEBUG` only affected its own .o files, not the lib's.
