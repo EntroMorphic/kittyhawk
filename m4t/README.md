@@ -105,7 +105,7 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets fail
 
 ## Tests — Tiers 1 + 2 + 3
 
-Eight ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-3 tests use bit-exact `int64` reference implementations as the oracle (no fp in any test path).
+Ten ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-3 tests use bit-exact `int64` reference implementations as the oracle (no fp in any test path).
 
 | Binary | Coverage |
 |---|---|
@@ -117,6 +117,12 @@ Eight ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tie
 | `test_m4t_mtfp_accum_aligning` | 14 properties (10k samples per random property + curated boundary cases): correctness, invariant, determinism, per-block flags, trailing-block-bits-zero, long-sequence (K=256), boundary, n=0, wrapper, roundtrip, dst==a aliasing, NULL out_e, sub-via-negation, sub-self. All bit-exact vs an int64 reference. |
 | `test_m4t_mtfp4` | 12 tests: clamp boundaries, SDOT golden 2×4×3, SDOT random vs int64 reference (200 trials, K up to 1024), SDOT high-magnitude (K=4096), SDOT long-K stress (K=1M vs int64 reference), zero-dim, widen exact, narrow round, narrow saturate, narrow flags, **narrow property** (10k random samples + boundary-targeted), widen-narrow roundtrip. |
 | `test_m4t_ternary_matmul` | 9 tests: golden 2×4×3, random vs reference (200 trials), long-K stress (K=1M), saturation clamp, saturation flags, **partial-block** (M·N=5 trailing-bits-stay-zero), **invalid trit code** (0b11 reserved → identical NEON/scalar handling), zero-dim, determinism. |
+| `test_m4t_elemental_floor` | three property tests on the cell-level elemental floor (`shift3`, `select`, neg-via-select composite re-derivation), plus the R-G3 path test for the cross-exponent accumulator's flags=NULL fast path. |
+| `test_m4t_assert_live` | V4 deliberate-abort meta-test: forks a child, calls `m4t_route_topk_abs(T=200)` (T > `M4T_ROUTE_MAX_T = 64`), verifies `WIFSIGNALED && WTERMSIG == SIGABRT`. Proves substrate asserts are actually compiled into `libm4t_test` and fire when triggered. |
+
+### Test-build discipline (V3 + V4)
+
+Tests link against `libm4t_test.a`, a parallel STATIC library compiled from the same sources as `libm4t.a` but with `-UNDEBUG` applied. This makes substrate-internal asserts (precondition checks) actually fire when tests trigger them — without it, `assert(EXPR)` under the substrate's production `-DNDEBUG` becomes `((void)0)` and EXPR is never evaluated. Production binaries (perf benches, gesh probes) keep linking against `libm4t.a` (NDEBUG). The split is enforced via `add_library(m4t_test STATIC ...)` plus `target_compile_options(m4t_test PRIVATE -UNDEBUG)` in `CMakeLists.txt`. The same pattern exists for `gesh_test`, `gesh_bench_test`, `gesh_image_canon_test` in `gesh/CMakeLists.txt`. Verified at three levels: build-time (`nm` shows `___assert_rtn` refs only in `_test` variants), link-time (production binaries link 0 assert symbols), runtime (`test_m4t_assert_live` confirms asserts actually fire).
 
 ## What's not here
 

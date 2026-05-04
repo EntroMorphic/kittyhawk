@@ -98,7 +98,11 @@ static void test_load_basic(void) {
 
 static void test_normalize_invariants(void) {
     image_canon_dataset_t ds;
-    assert(image_canon_load_mnist(&ds, IDX_DIR) == 0);
+    /* IMPORTANT: load_mnist() must NOT be inside assert() — under -DNDEBUG
+     * (Release builds), assert(EXPR) becomes ((void)0) and EXPR is never
+     * evaluated. The call would be silently elided and ds left uninitialized. */
+    int rc = image_canon_load_mnist(&ds, IDX_DIR);
+    if (rc != 0) { fprintf(stderr, "load failed\n"); exit(1); }
     image_canon_normalize(&ds);
 
     /* Per-image post-normalize: clipped at ±3 × MTFP_SCALE. */
@@ -113,10 +117,49 @@ static void test_normalize_invariants(void) {
             }
             sum += v;
         }
-        /* Mean should be near zero (post-subtract), modulo integer drift
-         * from int division. Tolerance: ±dim. */
-        if (sum < -(int64_t)dim || sum > (int64_t)dim) {
-            fprintf(stderr, "mean drift %lld\n", (long long)sum); exit(1);
+        /* Two-tier principled bound (V4-G4 tightening of V3-G2):
+         *
+         *   normalize_one's TWO integer-division steps each introduce drift:
+         *   (a) centering: img[d] -= sum/dim. Truncation drift per element
+         *       bounded by 1; sum drift after centering: ≤ dim.
+         *   (b) rescaling: img[d] = img[d] * SCALE / sd. Integer divide
+         *       truncation per element bounded by 1; this amplifies the
+         *       centering drift by SCALE/sd per element.
+         *
+         *   LOOSE bound (catches order-of-magnitude bugs):
+         *     |sum| < dim * SCALE / 10. Says "post-normalize mean within
+         *     10% of unit scale." For dim=16, bound ≈ 94K. Catches
+         *     broken-mean-centering bugs (drift ~ SCALE).
+         *
+         *   TIGHT bound (catches 2-3x regressions):
+         *     Worst case derivation:
+         *       - After centering: residual sum ≤ dim.
+         *       - After rescaling: per-element rescaling truncation drift
+         *         bounded by 1, summed = dim. Plus the residual sum gets
+         *         multiplied by SCALE/sd.
+         *       - For pixel data with range ~SCALE, sd ≈ SCALE/4 to
+         *         SCALE/3, so SCALE/sd ≤ 4.
+         *       - |sum after rescale| ≤ dim + dim * 4 = 5 * dim.
+         *     Apply 2x safety factor: tight_bound = 10 * dim.
+         *     For dim=16, tight_bound = 160. Observed drift on this
+         *     synthetic data is ≤ ~80 (V2 pinpoint). Catches any
+         *     regression that 2x's the drift.
+         *
+         * Historical: this assert was ±dim and silently disabled in
+         * Release (V2 pinpoint). V3 enabled tests with -UNDEBUG and
+         * derived the loose bound. V4 added the tight bound to catch
+         * regressions the loose bound would miss. */
+        int64_t loose_bound = (int64_t)dim * (int64_t)M4T_MTFP_SCALE / 10;
+        if (sum < -loose_bound || sum > loose_bound) {
+            fprintf(stderr, "LOOSE mean drift %lld (bound +/- %lld)\n",
+                    (long long)sum, (long long)loose_bound); exit(1);
+        }
+        int64_t tight_bound = 10 * (int64_t)dim;
+        if (sum < -tight_bound || sum > tight_bound) {
+            fprintf(stderr, "TIGHT mean drift %lld (bound +/- %lld) — "
+                            "regression: drift exceeds analytical worst "
+                            "case (5*dim) by 2x\n",
+                    (long long)sum, (long long)tight_bound); exit(1);
         }
     }
     image_canon_free(&ds);
@@ -125,7 +168,8 @@ static void test_normalize_invariants(void) {
 
 static void test_quantize_density(void) {
     image_canon_dataset_t ds;
-    assert(image_canon_load_mnist(&ds, IDX_DIR) == 0);
+    int rc = image_canon_load_mnist(&ds, IDX_DIR);
+    if (rc != 0) { fprintf(stderr, "load failed\n"); exit(1); }
     image_canon_normalize(&ds);
     int dim = ds.input_dim;
 
@@ -159,7 +203,8 @@ static void test_aliasing_assert_disabled_in_release(void) {
      * out_trits == x_batch would abort. We don't trip the assert here;
      * we just confirm the normal path works. */
     image_canon_dataset_t ds;
-    assert(image_canon_load_mnist(&ds, IDX_DIR) == 0);
+    int rc = image_canon_load_mnist(&ds, IDX_DIR);
+    if (rc != 0) { fprintf(stderr, "load failed\n"); exit(1); }
     image_canon_normalize(&ds);
     int dim = ds.input_dim;
     int64_t tau = image_canon_quantize_tau(ds.x_train, ds.n_train, dim, 0.50);

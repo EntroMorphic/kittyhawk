@@ -28,7 +28,37 @@ if(APPLE)
     add_compile_options(-mcpu=native)
 endif()
 
+# Link-time optimization. Full LTO (cross-TU inlining + IR-level opt).
+# Per V2-G1 root-cause investigation: the prior "full-LTO segfault" turned
+# out to be a TEST CODE BUG (side-effecting load_mnist() inside assert(),
+# which is removed under -DNDEBUG). Once the test was fixed, full LTO works
+# clean. See journal/tier2_residuals_v2_pinpoint.md for the trace.
+add_compile_options(-flto)
+add_link_options(-flto)
+
 enable_testing()
+
+# Tests must run with assertions enabled regardless of the substrate's
+# Release-build NDEBUG. Per V2-pinpoint red-team C1: assert(EXPR) under
+# -DNDEBUG becomes ((void)0) and EXPR is never evaluated, silently disabling
+# all test validation in Release builds. Apply -UNDEBUG to test executables
+# only — production binaries (probes, benches, future tools) stay compiled
+# with NDEBUG.
+#
+# V4 expansion (per journal/tier2_residuals_v4_*.md): -UNDEBUG on a test
+# executable only affects code compiled INTO that executable's own .o files.
+# It does not re-enable asserts inside static libraries the test links
+# against. To make substrate-internal asserts (e.g., m4t_route_topk_abs's
+# T <= M4T_ROUTE_MAX_T precondition) actually fire when triggered from
+# tests, we ship parallel `_test` library variants that compile the same
+# sources with -UNDEBUG. Test executables link against the `_test`
+# variants (m4t_test, gesh_test, gesh_bench_test, gesh_image_canon_test);
+# production binaries link against the production variants. The
+# test_m4t_assert_live deliberate-abort meta-test verifies this end-to-end.
+function(gesh_test_undebug target)
+    target_compile_options(${target} PRIVATE -UNDEBUG)
+endfunction()
+
 add_subdirectory(m4t)
 
 # Gesh — base-3 native routing layer; substrate's first measured consumer.

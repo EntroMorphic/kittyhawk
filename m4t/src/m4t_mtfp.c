@@ -186,11 +186,22 @@ void m4t_mtfp_vec_accum_aligning(
     int8_t e_run = *running_exp;
 
     if (addend_exp == e_run) {
-        /* Same-block-exp accumulation. No rescale, no rounding. */
+        /* Same-block-exp accumulation. No rescale, no rounding.
+         *
+         * Fast path: if the caller doesn't need flag tracking, this is
+         * exactly m4t_mtfp_vec_add_inplace (NEON-vectorized via
+         * m4t_mtfp_block_add). T2-C in journal/tier2_perf_precommit.md.
+         *
+         * If flags are tracked, fall back to scalar so we can detect
+         * per-cell saturation events. */
+        if (flags == NULL) {
+            m4t_mtfp_vec_add_inplace(running, addend, n);
+            return;
+        }
         for (int i = 0; i < n; i++) {
             int64_t sum = (int64_t)running[i] + (int64_t)addend[i];
             m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
-            if (flags && sum != (int64_t)out) {
+            if (sum != (int64_t)out) {
                 m4t_flag_or(flags, i, M4T_FLAG_SATURATED);
             }
             running[i] = out;
@@ -376,4 +387,50 @@ void m4t_mtfp_vec_sub_aligning(
         dst[i] = out;
     }
     if (out_e) *out_e = e;
+}
+
+/* ── shift3: base-3 positional shift (elemental floor primitive) ───────── */
+
+void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
+
+    if (k == 0) {
+        if (dst != src) memcpy(dst, src, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+    if (k > 0) {
+        /* Multiply by 3^k. Beyond k=19 the smallest nonzero mantissa
+         * already overflows MTFP19; collapse to saturation. */
+        if (k >= 20) {
+            for (int i = 0; i < n; i++) {
+                if (src[i] > 0)      dst[i] =  M4T_MTFP_MAX_VAL;
+                else if (src[i] < 0) dst[i] = -M4T_MTFP_MAX_VAL;
+                else                  dst[i] = 0;
+            }
+            return;
+        }
+        int64_t scale = M4T_POW3_TABLE[k];
+        for (int i = 0; i < n; i++) {
+            int64_t v = (int64_t)src[i] * scale;
+            dst[i] = m4t_mtfp_clamp64(v);
+        }
+        return;
+    }
+
+    /* k < 0: divide by 3^|k| with base-3 round-to-nearest-even. */
+    int abs_k = -k;
+    if (abs_k >= 20) {
+        /* MAX_VAL / 3^20 < 1, all values round to 0. */
+        memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+    int64_t divisor = M4T_POW3_TABLE[abs_k];
+    for (int i = 0; i < n; i++) {
+        int had_rem = 0;
+        int64_t q = m4t_pow3_round_div((int64_t)src[i], divisor, &had_rem);
+        dst[i] = (m4t_mtfp_t)q;  /* |q| ≤ MAX_VAL/divisor + 1 ≤ MAX_VAL */
+    }
 }

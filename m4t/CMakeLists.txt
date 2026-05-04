@@ -62,41 +62,83 @@ set_target_properties(m4t PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+# Test variant of libm4t. Same sources, but compiled with -UNDEBUG so the
+# substrate's internal asserts (precondition checks like `assert(K <= ...)`)
+# actually fire when tests trigger them. Per V4-G1 from
+# journal/tier2_residuals_v4_precommit.md.
+add_library(m4t_test STATIC ${M4T_CORE_SRCS})
+target_include_directories(m4t_test PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+target_compile_options(m4t_test PRIVATE -UNDEBUG)
+set_target_properties(m4t_test PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 option(M4T_BUILD_TESTS "Build M4T tests" ON)
 if(M4T_BUILD_TESTS)
     add_executable(test_m4t_trit_pack tests/test_m4t_trit_pack.c)
-    target_link_libraries(test_m4t_trit_pack PRIVATE m4t)
+    target_link_libraries(test_m4t_trit_pack PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_trit_pack)
     add_test(NAME m4t_trit_pack COMMAND test_m4t_trit_pack)
 
     add_executable(test_m4t_trit_ops tests/test_m4t_trit_ops.c)
-    target_link_libraries(test_m4t_trit_ops PRIVATE m4t)
+    target_link_libraries(test_m4t_trit_ops PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_trit_ops)
     add_test(NAME m4t_trit_ops COMMAND test_m4t_trit_ops)
 
     add_executable(test_m4t_trit_reducers tests/test_m4t_trit_reducers.c)
-    target_link_libraries(test_m4t_trit_reducers PRIVATE m4t)
+    target_link_libraries(test_m4t_trit_reducers PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_trit_reducers)
     add_test(NAME m4t_trit_reducers COMMAND test_m4t_trit_reducers)
 
     add_executable(test_m4t_mtfp tests/test_m4t_mtfp.c)
-    target_link_libraries(test_m4t_mtfp PRIVATE m4t)
+    target_link_libraries(test_m4t_mtfp PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_mtfp)
     add_test(NAME m4t_mtfp COMMAND test_m4t_mtfp)
 
     add_executable(test_m4t_route tests/test_m4t_route.c)
-    target_link_libraries(test_m4t_route PRIVATE m4t)
+    target_link_libraries(test_m4t_route PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_route)
     add_test(NAME m4t_route COMMAND test_m4t_route)
 
     # Property tests for the §14.2 cross-exponent accumulator. Bit-exact
     # int64 reference; no fp in the test path. 14 properties.
     add_executable(test_m4t_mtfp_accum_aligning tests/test_m4t_mtfp_accum_aligning.c)
-    target_link_libraries(test_m4t_mtfp_accum_aligning PRIVATE m4t)
+    target_link_libraries(test_m4t_mtfp_accum_aligning PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_mtfp_accum_aligning)
     add_test(NAME m4t_mtfp_accum_aligning COMMAND test_m4t_mtfp_accum_aligning)
 
     # SDOT MTFP4 matmul + cell-width conversions (§8.4 Case W).
     add_executable(test_m4t_mtfp4 tests/test_m4t_mtfp4.c)
-    target_link_libraries(test_m4t_mtfp4 PRIVATE m4t)
+    target_link_libraries(test_m4t_mtfp4 PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_mtfp4)
     add_test(NAME m4t_mtfp4 COMMAND test_m4t_mtfp4)
 
     # MTFP19 × packed-ternary matmul (§8.5 Case S).
     add_executable(test_m4t_ternary_matmul tests/test_m4t_ternary_matmul.c)
-    target_link_libraries(test_m4t_ternary_matmul PRIVATE m4t)
+    target_link_libraries(test_m4t_ternary_matmul PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_ternary_matmul)
     add_test(NAME m4t_ternary_matmul COMMAND test_m4t_ternary_matmul)
+
+    # Elemental floor primitives: shift3 + select.
+    # See journal/elemental_floor_synthesize.md.
+    add_executable(test_m4t_elemental_floor tests/test_m4t_elemental_floor.c)
+    target_link_libraries(test_m4t_elemental_floor PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_elemental_floor)
+    add_test(NAME m4t_elemental_floor COMMAND test_m4t_elemental_floor)
+
+    # Tier 2 perf harness. LTO inherited from top-level (V2-G1).
+    add_executable(bench_m4t_tier2_perf tests/bench_m4t_tier2_perf.c)
+    target_link_libraries(bench_m4t_tier2_perf PRIVATE m4t)
+
+    # V4-G2: Deliberate-abort meta-test. Forks a child that violates a
+    # substrate precondition (m4t_route_topk_abs with T > M4T_ROUTE_MAX_T)
+    # and verifies SIGABRT. Proves substrate asserts are actually live in
+    # m4t_test — without this, "tests link against m4t_test" is only a
+    # build assertion; this is the runtime check.
+    add_executable(test_m4t_assert_live tests/test_m4t_assert_live.c)
+    target_link_libraries(test_m4t_assert_live PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_assert_live)
+    add_test(NAME m4t_assert_live COMMAND test_m4t_assert_live)
 endif()

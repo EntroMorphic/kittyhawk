@@ -343,6 +343,63 @@ void m4t_route_signature_update(
     int D
 );
 
+/* ── select: trit-controlled mux at cell level (elemental floor primitive) ──
+ *
+ * Per journal/elemental_floor_synthesize.md. select is one of the ~5
+ * elemental ops that can't be built from the others (along with add, neg,
+ * shift3, sign). It's the substrate's clean conditional/branching primitive.
+ *
+ * Semantics, per cell position i:
+ *   if c_packed trit i = +1 → out[i] = a[i]
+ *   if c_packed trit i = -1 → out[i] = b[i]
+ *   if c_packed trit i =  0 → out[i] = d[i]
+ *   if c_packed trit i = 0b11 (reserved) → treated as 0; out[i] = d[i]
+ *
+ * c_packed: M4T_TRIT_PACKED_BYTES(n_cells) bytes of control trits.
+ * a, b, d, out: n_cells MTFP19 cells each.
+ *
+ * Substrate-discipline: pure routing; no arithmetic, no rounding, no
+ * saturation. The cleanest possible primitive — equivalent to a per-cell
+ * 3-way multiplexer.
+ *
+ * Aliasing: out may alias any of a, b, d (each cell is read before being
+ * written).
+ *
+ * Preconditions:
+ *   n_cells > 0; out, c_packed, a, b, d non-NULL.
+ */
+void m4t_route_select(
+    m4t_mtfp_t* out,
+    const uint8_t* c_packed,
+    const m4t_mtfp_t* a,
+    const m4t_mtfp_t* b,
+    const m4t_mtfp_t* d,
+    int n_cells);
+
+/* Scalar-only reference for fair-comparison benchmarking. Same signature
+ * and semantics as m4t_route_select; used by bench_m4t_tier2_perf to
+ * avoid the inline-vs-lib-call asymmetry that contaminated the original
+ * Tier 2 measurement. NOT for production use — call m4t_route_select. */
+void m4t_route_select_scalar_ref(
+    m4t_mtfp_t* out,
+    const uint8_t* c_packed,
+    const m4t_mtfp_t* a,
+    const m4t_mtfp_t* b,
+    const m4t_mtfp_t* d,
+    int n_cells);
+
+/* Branchless-per-byte reference for fair-comparison benchmarking. Same
+ * signature and semantics as m4t_route_confidence_weighted_dist; used by
+ * the bench harness to fairly compare against the branchy production
+ * version. See journal/tier2_perf_redteam.md for the rationale. */
+int32_t m4t_route_confidence_weighted_dist_branchless(
+    const uint8_t* query_trit_packed,
+    const uint8_t* query_conf_bits,
+    const uint8_t* tile_trit_packed,
+    const uint8_t* tile_conf_bits,
+    const uint8_t* mask,
+    int sig_dim);
+
 /* ── Emission-coverage helper (§18 testability) ────────────────────────── */
 
 /* Inspect a decisions[] array and report which sign states actually appeared.

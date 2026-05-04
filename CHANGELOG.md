@@ -4,6 +4,173 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — V4 remediation: closed all 4 -UNDEBUG residual threats from V3
+- `journal/tier2_residuals_v4_{precommit,closeout}.md` — methodical closure of the four threats inherent in V3's `-UNDEBUG` residual.
+- **STRUCTURAL FIX (T1):** added parallel `_test` library variants — `m4t_test`, `gesh_test`, `gesh_bench_test`, `gesh_image_canon_test` — compiled from the same sources as the production libs but with `-UNDEBUG` applied. Test executables now link against the `_test` variants. Substrate-internal asserts (e.g., `m4t_route_topk_abs`'s `T <= M4T_ROUTE_MAX_T` precondition) actually fire when triggered from tests. Pre-V4, these asserts were silenced — `libm4t.a` was compiled with `-DNDEBUG` and the test executable's own `-UNDEBUG` only affected its own .o files, not the lib's.
+- **RUNTIME PROOF (V4-G2):** `m4t/tests/test_m4t_assert_live.c` — deliberate-abort meta-test. Forks a child, calls `m4t_route_topk_abs(decisions, scores, T=200, k=4)` (T > `M4T_ROUTE_MAX_T = 64`), `waitpid`s, asserts `WIFSIGNALED && WTERMSIG == SIGABRT`. Distinguishes "assert silenced" (child exits cleanly with code 42, parent reports FAIL) from "child crashed for unrelated reason" (different signal/exit). Sanity-verified by linking the meta-test against production `libm4t.a`: it correctly reports `substrate asserts are SILENCED` (exit 1).
+- **VERIFICATION UPGRADE (T2):** replaced grep-based assert auditing with `nm` symbol verification on the actual built libraries. Production libs (`libm4t.a`, `libgesh.a`, `libgesh_bench.a`, `libgesh_image_canon.a`): 0 references to `___assert_rtn` each. Test variants (`libm4t_test.a` / `libgesh_test.a` / `libgesh_bench_test.a` / `libgesh_image_canon_test.a`): 5 / 8 / 4 / 1. Concrete structural proof, not regex.
+- **TIGHT BOUND (T3):** `gesh/tests/test_image_canon.c` mean-drift check now has TWO bounds. Loose `dim*SCALE/10` (≈ 94K for dim=16) catches order-of-magnitude bugs; tight `10*dim` (= 160 for dim=16) catches 2× regressions. Tight bound derived from worst case `≤ 5*dim` (residual after centering ≤ dim, amplified by SCALE/sd ≤ 4 for typical pixel data) plus 2× safety. Observed drift on synthetic test data ≤ 80; tight bound holds with 2× headroom.
+- **LTO MEASUREMENT (T4):** built parallel no-LTO scratch tree (`-DCMAKE_C_FLAGS="-fno-lto"`) and compared to the production LTO build. Bench timings within ±5% noise across 10 measurement points. Binary size byte-identical (50936 vs 50936). `bl _m4t_route*` call counts identical (6 vs 6). LTO is enabled and applied (verified in verbose make output: `-flto` in compile + link commands), but produces no observable optimization on this bench. Substrate's hot paths are already aggressively per-TU-optimized at `-O3 -mcpu=native`; LTO has nothing to add at the bench's measurement granularity. Honest finding, not a fix.
+- **`CMakeLists.txt`** (top-level): expanded `gesh_test_undebug()` comment to document the V4 library-variant expansion.
+- **`m4t/CMakeLists.txt`**: added `m4t_test` STATIC library; relinked all 9 m4t test executables. `bench_m4t_tier2_perf` keeps linking against production `m4t` (asserts add overhead irrelevant to perf measurement).
+- **`gesh/CMakeLists.txt`**: added `gesh_test`, `gesh_bench_test`, `gesh_image_canon_test` STATIC libraries; relinked all 6 gesh test executables. The 22 gesh bench/probe binaries stay linked against production libraries.
+- **`m4t/README.md`**: ten ctest binaries (was eight); added rows for `test_m4t_elemental_floor` and `test_m4t_assert_live`; added test-build-discipline section.
+- **`m4t/docs/M4T_SUBSTRATE.md`**: refreshed `tests/` listing.
+- **16/16 ctest binaries PASS** (was 15; +1 for `m4t_assert_live`) under full LTO with substrate asserts now structurally live in test builds.
+
+### Methodology lifted from V4
+- **Substrate asserts must be live in tests.** When a substrate library has internal `assert()` precondition checks, ship a `_test` library variant compiled with `-UNDEBUG` and link tests against it. The test executable's own `-UNDEBUG` is not sufficient — that flag only affects code compiled directly into the executable.
+- **"Asserts are live" claims must include a runtime meta-test, not just build flags.** Build assertions ("we passed `-UNDEBUG`") and source assertions ("the source has an `assert(EXPR)`") are not the same as runtime assertions ("EXPR actually evaluates and aborts on failure"). The deliberate-abort meta-test is the runtime check.
+- **`nm` symbol verification beats source-level grep.** When auditing whether a build flag actually changed the binary, look at the symbols, not the source. Greps can miss; symbols can't lie.
+- **Pair loose + tight principled bounds where possible.** Loose catches catastrophic bugs; tight catches 2-3× regressions. Document derivations.
+- **Build-system audits should compare LTO-on vs LTO-off binaries.** Identical sizes/call-counts is a signal LTO is having no effect — flag the finding even when it's not a bug.
+
+### Added — vision claim #2 P0 (expression routing) + 100/100 remediation
+- `docs/PLAN_EXPRESSION_ROUTING.md` — plan for closing vision claim #2 (math expressions as signatures via routing), with P0 (4 pieces) and P1 (2 pieces). Plan was rewritten post-LMM-cycle to reflect the equivalence-class-lookup framing rather than the original drop-in-bank framing.
+- `journal/expression_routing_{raw,nodes,reflect,synthesize,closeout,redteam,remediation_precommit,remediation_closeout}.md` — full LMM cycle on the plan, plus red-team and 100/100 remediation cycle. Cycle surfaced the conceptual fix: data signatures are learned distributions; expression signatures are defined evaluations; the right primitive is equivalence-class lookup, not bank substitution.
+- **P0-2** `gesh/src/expr.{h,c}` — small expression tree types (var, const, neg, add, sub, mul, max, min) over substrate primitives. exp/log explicitly absent (P1-1). int64 evaluator.
+- **P0-1** `gesh/src/expr_signature.{h,c}` — behavior-based signature derivation. Evaluate at fixed test inputs, ternarize via `m4t_route_threshold_extract` at tau=0. Substrate-discipline preserved (no open-coded sign step).
+- **P0-3** `gesh/src/expr_bank.{h,c}` — equivalence-class bank constructor. Detects byte-equal signatures, picks first-in-order as representative, exposes candidate→class map. Reuses `gesh_bank_t`; only label semantics change.
+- **P0-4** `gesh/bench/expr_routing_probe.c` — probe binary with two pre-committed gates. Result: **EASY 60/60 + HARD 18/18 = PASS.**
+- **Red-team remediation** `gesh/src/expr_random.{h,c}` and `gesh/bench/expr_routing_remediation.c` — addresses 13 of 15 red-team findings (2 deferred with explicit rationale). Five gated sections: subagent-blind probes (C1, C2), scale-collapse (H3), multi-input-set sweep (H1), random-bank multi-seed (H2, M2), inter-class diagnostic (M1). All five sections PASS pre-committed gates. **OVERALL REMEDIATION: PASS (100/100).**
+- **Subagent-blind result is the load-bearing finding.** A subagent that never saw the signature math, test inputs, or any code designed 30 probes from mathematical intuition. Routing matched 29/30 (96.7%). Non-tautological evidence the rule aligns with independent math reasoning. The single MISS was the subagent's own self-flagged ambiguous probe.
+
+### Methodology lifted to project-wide rules
+- Pre-commit ALL gates in SYNTHESIZE before any code or run (per `journal/expression_routing_remediation_precommit.md`, addressing red-team finding H4). The pattern "easy gate passed → add hard gate after seeing results" should be flagged as a gate-revision event in the closeout, not normal tightening.
+- Subagent-blind probes are a high-value discipline tool for any cycle where the probe-author has full access to the system being tested. ~30 minutes of subagent time is enough to produce non-tautological evidence.
+
+### Deferred to P1
+- M3 (substrate's third state barely used by sign-only signatures): P1-1 design must let the third state carry information beyond exact-zero.
+- M5 (cost-blindness latent in compose-equivalence decision D5): P1 work using the bank for anything beyond identity-lookup must address.
+
+### Honest concerns surfaced by the remediation
+- Subagent's prompt was cooperative, not adversarial. The 96.7% is evidence that cooperative intuition aligns with the rule; adversarial intuition is untested.
+- 5-seed 100%-with-0pp-stddev on internal-consistency is partly artifact of test design (relative, not absolute discrimination).
+- Arity-1 inter-class minimum distance is 3 (below 4-trit headroom). Two of 10 arity-1 classes are close; future bank growth at this dim likely to start colliding.
+
+### Added — concerns remediation R2 plan + R1 cycle (PASS) + R1 red-team + R1 remediation (FAIL)
+- `docs/PLAN_EXPRESSION_ROUTING_R2.md` — three-track plan (R1, R2, R3) addressing 5 of 9 concerns surfaced after the original P0 PASS.
+- `journal/r1_signature_rule_{raw,nodes,reflect,synthesize,closeout,redteam,remediation_precommit,remediation_closeout}.md` — full LMM cycle on R1, plus red-team and 100/100 remediation.
+- **R1** `gesh/src/expr_signature.{h,c}::expr_to_signature_dual` and `gesh/src/expr_bank.{h,c}::expr_bank_dual_t` — per-expression-tau dual-threshold rule using `m4t_route_threshold_extract_dual` + `m4t_route_confidence_weighted_dist`. Initial verdict **R1 PASS** (R1-A 96.7%, R1-B 92%, R1-C by construction).
+- **R1 red-team** surfaced 13 findings (2 critical, 4 high, 4 medium, 3 low). The critical findings: R1-B's "information gain" gate is satisfied by ANY use of the conf channel (not by useful information); R1-A's backward-compat probe set doesn't exercise the rule's new behaviors.
+- **R1 100/100 remediation** ran 8 gated/diagnostic sections under sharper pre-committed gates. **Verdict: FAIL.** Two FAILs: §1 partition-change (mean 4.2% pair-change across 5 seeds, gate ≥30%) and §6 inter-class distance (arity-1 min=1 under dual vs 3 under sign-only). One WEAK: §4 granularity (76.7%, gate ≥80%). Two PASS, three diagnostics.
+- **What the FAIL teaches:** the dual rule's "information" is largely cosmetic (signatures look 92% different but the equivalence partition only changes 4.2%); discrimination got WORSE for arity-1 (min distance 3 → 1); arity-1 zero band dominates at 66.5% of cells; the rule is 5.68x slower than sign-only popcount path. Original R1 PASS was structurally weak because its gates didn't bite.
+- **R1 PASS verdict from `journal/r1_signature_rule_closeout.md` is functionally OVERTURNED for arity-1.** Arity-2 may be salvageable. R1 next step is open: revert to sign-only for arity-1 (Option A, ~2 days), redesign rule (Option B, ~2 weeks), or proceed to R3/R2 anyway accepting the broken foundation (Option C, risky).
+- **Discipline lesson:** the pattern PASS → red-team → remediation → honest FAIL is the discipline working. The original PASS was wrong; the remediation surfaced it; the verdict is honest. Per project norms (P0-4 negative result precedent), the dual-rule code remains in the codebase with FAIL documented at the verdict level.
+
+### Added — R1 path-forward LMM cycle + R1 fork experiment (F3 wins)
+- `journal/r1_path_forward_{raw,nodes,reflect,synthesize}.md` — LMM cycle on the post-FAIL question. Reduced 8 surface options (A–H) to 3 structural framings of the failure (F1 wrong rule, F2 wrong axis, F3 wrong layer). Synthesized: a focused 3-day fork experiment to distinguish the framings empirically.
+- `docs/PLAN_R1_FORK.md` — pre-committed plan for the fork experiment with three framing thresholds.
+- `gesh/bench/expr_routing_r1_fork.c` — fork experiment binary. Runs both signature rules at sig_dim ∈ {16, 32, 64} on curated arity-1 and arity-2 banks plus 100 random expressions × 3 seeds.
+- `journal/r1_fork_closeout.md` — **F3 wins (wrong layer).** Arity-1 sign-only inter-class min stays stuck at 3 across all dims (no improvement from sig_dim 16 → 64). Random-bank class count stuck at 27 for sign-only. Dual at sig_dim=64 reaches min=4 (only +1 over sign-only). The arity-1 expression set is intrinsically signature-saturated — the bank's discriminability ceiling is set by the EXPRESSION SET, not the SIGNATURE RULE.
+- **Concerns 2/3/7/8 from the R1 red-team era are recategorized:** substrate kernels work at the substrate layer; the expression-routing consumer doesn't have a problem they solve. Vision claim #3 must be demonstrated by a different consumer.
+- **R-track is closed.** R1 dual rule should be reverted for arity-1 (kept in codebase per ship-with-FAIL discipline). Original R3 (sig_dim sweep) and R2 (scale experiment) cycles cancelled as planned; replanning needed.
+
+### Added — P1-1 design cycle (full LMM, loop-back fired in SYNTHESIZE)
+- `journal/p1_1_primitives_floor_{raw,nodes,reflect,synthesize,closeout}.md` — full LMM cycle on closing the primitives floor with exp/log; closeout marks the cycle as superseded by the elemental-floor reframing.
+- **SYNTHESIZE surfaced that the substrate has no division operation.** Without division, true Taylor exp/log aren't expressible from the existing seven (`add, sub, mul, neg, max, min, eq`). Range reduction (`exp(x/2)^2`) requires division too. The cheap "Path B prototype" plan that REFLECT had endorsed was built on an assumption that didn't hold.
+- **Loop-back trigger fired per LMM.md.** Owner conversation then reframed twice: (a) the "no consumer demand" framing was wrong for foundational research and was retired with extreme prejudice; (b) mul itself is composite (iterated conditional add via shift), so the right question wasn't "add exp/log" but "what's actually elemental and what's missing from the substrate's elemental floor?"
+
+### Added — Elemental floor audit + close (PASS, ~5 ops floor)
+- `journal/elemental_floor_{raw,nodes,reflect,synthesize,closeout}.md` — LMM cycle on the audit. Established the cell-level elemental floor as **5 ops + 3 constants**: `add, neg, shift3, sign, select` plus `{-1, 0, +1}`.
+- **Substrate had add, neg, sign already; missing shift3 and select.** All other ops (mul, sub, div, max, min, eq, exp, log, sin, cos, sqrt, ...) are composite — derivable from elementals + iteration. Performance kernels for hot composites stay; documentation will name them as composite (deferred follow-on).
+- `m4t/src/m4t_mtfp.{h,c}::m4t_mtfp_shift3` — base-3 positional shift. `dst = src * 3^k`, saturation on positive overflow, base-3 round-to-nearest-even on negative k (reuses cross-exponent accumulator's `m4t_pow3_round_div` and the odd-divisor lemma).
+- `m4t/src/m4t_route.{h,c}::m4t_route_select` — trit-controlled cell-level mux. Pure routing, no arithmetic, may alias inputs.
+- `m4t/tests/test_m4t_elemental_floor.c` — three property tests (G1 shift3 correctness, G2 select correctness, G3 composite re-derivation). All PASS.
+- 15/15 ctest binaries green (was 14; +1 for `m4t_elemental_floor`). All prior probes still PASS.
+- **Vision claim #1 substantively addressed for the first time** with a defensible audited floor.
+
+### Methodology lifted from this turn
+- **Owner pressure on foundational analysis was the unlock** for catching mul's composite status. Without "Mul, if made of two conditions, is composite," the prior cycle would have shipped a plan treating mul as elemental. Foundational claims benefit from explicit owner pressure to test irreducibility.
+- **Iteration is not an operation, it's program structure.** Anything derivable by iterating elemental ops is composite, regardless of whether the substrate provides a fast kernel for it.
+- **The retirement of "no consumer demand" as a research blocker** unblocked the analysis and the implementation. The original rule (measurement-integrity: route consumer code through kernels) survives; the over-generalized form (don't build primitives without a consumer using them) does not apply to foundational research and was misapplied for cycles before this turn.
+
+### Added — Tier 2 NEON underuse remediation (2 of 3 PASS, 1 reverted)
+- `journal/tier2_perf_{precommit,closeout}.md` — methodical pass on three places where existing NEON hardware was underused. Pre-committed gates ahead of code; partial PASS verdict.
+- **T2-A NEON `m4t_route_select` — PASS.** Replaced scalar per-cell loop with NEON path using `vceqq_s32` mask construction + bit-select cascade. Measured **2.55x speedup** (9.258ms scalar vs 3.626ms NEON over 100K iterations on 64-cell vectors). G1 correctness PASS, G2 speedup PASS.
+- **T2-B branchless `confidence_weighted_dist` — REVERTED.** Branchless per-byte version with bitwise indicator + popcount initially measured 2.9x slower; reverted to branchy original. Post-revert red-team revealed the perf harness was unfair (inlined reference vs lib-call) — the apparent slowdown was largely function-call overhead artifact. True per-call speed at substrate scale unknown; revert is conservative. Inline note in `m4t_route.c` documents the revert reasoning.
+- **T2-C `accum_aligning` same-exp branch — PASS.** When `flags == NULL`, the same-exponent path now calls `m4t_mtfp_vec_add_inplace` (NEON-vectorized via `m4t_mtfp_block_add`) instead of per-cell scalar add+clamp. Saturation-tracking path preserved when flags non-null.
+- `m4t/tests/test_m4t_tier2_perf.c` — perf harness for G2/G4. Build target only (not ctest) since perf measurements aren't correctness regressions.
+- All 15 ctest binaries still PASS. No regression at any step.
+
+### Methodology lifted from Tier 2
+- **Perf measurement is itself a discipline that needs gates.** The pre-commit named WHAT to measure (speedup ratios) but didn't specify HOW (inlined vs lib-boundary). Cross-boundary comparisons are unreliable. Future perf gates should specify identical call mechanics for both versions.
+- **Pre-committed gates work even when they expose flaws in the gate itself.** T2-B's gate fired correctly; the failure mode it surfaced was the gate-design quality, not a real algorithmic regression. Net: code is in a defensible state, methodology is improved for next time.
+
+### Added — Tier 2 100/100 red-team remediation (PASS, with major finding overturning T2-B)
+- `journal/tier2_perf_redteam.md` — 13 findings (1 critical, 3 high, 6 medium, 3 low) on the prior Tier 2 closeout. Critical finding: T2-A's "2.55× speedup" measurement had the same unfair-comparison flaw the closeout flagged for T2-B but treated as fair.
+- `journal/tier2_remediation_{precommit,closeout}.md` — methodical remediation with pre-committed gates that explicitly red-team the gate design itself (R-G7).
+- **Fair-comparison perf harness** (`m4t/tests/bench_m4t_tier2_perf.c`, renamed from `test_*` per L2): both versions of each candidate now go through identical lib-call boundaries. Three data distributions (random, structured, sparse-zero), pool of 8 cycled arrays, `clock_gettime(CLOCK_MONOTONIC)`, median of 5 trials.
+- **Lib reference variants:** `m4t_route_select_scalar_ref` and `m4t_route_confidence_weighted_dist_branchless` added to libm4t for fair benchmarking. Documented "for benchmarking, NOT production use."
+- **R-G3 path-exercise test:** `test_accum_same_exp_flags_null` in `test_m4t_elemental_floor.c` — verifies T2-C's flags=NULL fast path against int64 reference. PASS.
+- **MAJOR FINDING (R-G2 diagnostic):** the branchless `confidence_weighted_dist` is **1.81–2.56× FASTER** than branchy across all three distributions. The original Tier 2 "branchless is 2.9× slower" was the artifact, not the truth. The substrate currently runs the slower (branchy) production version because of the original bad measurement. Fair re-measurement overturns the T2-B revert decision; production flip pending owner authorization (per H4: gate was diagnostic, not PASS/FAIL).
+- **R-G1 update:** T2-A's true select speedup is **1.82–5.57×** depending on data distribution (random shows largest NEON win), not 2.55× as the original closeout stated. Original number was a lower bound under unfair comparison.
+- All 16 ctest binaries PASS (was 15; +1 for new T2-C path test). No regression at any step.
+
+### Honest residual gap from this remediation
+- R-G5 cache-defeat verification has a design flaw (consecutive-runs check is uninformative). The pool-of-8 mitigation IS real; we can't verify how much it helped. Documented as partial fix.
+
+### Methodology lifted from Tier 2 remediation
+- **Reference variants for fair benchmarking go in the lib, not in the test file.** Benchmark harness compares two lib functions through equivalent call paths.
+- **Cache-defeat verification needs adversarial design, not naive consecutive-runs comparison.** Fresh-process-per-trial or explicit cache-invalidation are the real options.
+- **Diagnostic gates that surface major findings require explicit owner-action protocols.** R-G2 was diagnostic-only but produced a finding that overturns prior production code. Cycle delivers the data; substrate change requires owner authorization. Naming this protocol avoids future ambiguity.
+
+### Added — Tier 2 residuals closure (PASS, with stronger T2-B evidence)
+- `journal/tier2_residuals_{precommit,closeout}.md` — closes the three residuals (cache-defeat verification, adversarial distributions, LTO for accurate-AND-fair timings) from the Tier 2 remediation closeout.
+- **RES-1 cache-trashing:** explicit 32 MB buffer walk between trials. Result for select: warm/cold ratio 1.00× — workload fits in L1 even after eviction; steady-state numbers are honest for THIS workload size. Mechanism in place for larger-workload tests.
+- **RES-2 adversarial distributions:** subagent designed 6 distributions blind; 4 implemented (LFSR-cycled trits, sparse-zero bursts, sparse-opposite needle, triple-period resonance). **Two of four predictions of "vectorized loses to scalar/branchy" FAILED — NEON select still wins on sparse-zero (1.51× vs predicted 1.2-2× loss); branchless conf-dist still wins on sparse-opposite needle (5.23× vs predicted branchy-wins 3-5×).** The vectorized/branchless implementations are robustly faster across both cooperative AND adversarial inputs.
+- **RES-3 per-target LTO:** global `-flto` broke `gesh_image_canon` test (segfault, root-cause deferred). Working approach: per-target LTO on `bench_m4t_tier2_perf` only. All 15 ctest binaries unchanged.
+- **RES-4 no regression:** 15/15 ctest binaries PASS through every step.
+- Strengthened T2-B production-flip recommendation: **no tested distribution favors branchy.** Standard 1.89-2.75× faster, adversarial-designed-to-favor-branchy still 5.23× faster. Substrate currently runs the slower version because of bad measurement + wrong theoretical prior.
+
+### Honest residuals from this cycle
+- LTO global-vs-per-target: root cause of image_canon segfault under global LTO not investigated.
+- 2 of 6 adversarial distributions not implemented (cache-aliasing patterns; require careful aligned allocation).
+- Cache-defeat mechanism in place but its effect untested for L2/L3-stressing workload sizes.
+
+### Methodology lifted from residuals
+- **Subagent-blind adversarial distributions are a strong test of perf claims.** Two of four predicted inversions failed when measured — meaning the conventional intuitions ("branchy is better for sparse mismatches" / "branchy is better for predictable branches") don't hold under measurement. Pattern worth applying to any perf claim where cooperative-author bias is a risk.
+
+### Added — Tier 2 residuals v2 (atomics: LTO root-cause, adversarial completion, cache-defeat saturation)
+- `journal/tier2_residuals_v2_{precommit,closeout}.md` — addresses three honest residuals from the prior cycle.
+- **V2-G1 (LTO root-cause):** full `-flto` triggers SEGV in `image_canon_normalize` via SIMD-loop reading from a stale stack-string-buffer pointer (lldb confirmed: register x16 contained the path string content). Workarounds tested (`-fno-strict-aliasing`, `-fno-vectorize`, `-fno-inline`) didn't fix; only `-flto=thin` did. **Production solution: ThinLTO globally.** All 15 ctest binaries PASS under ThinLTO. The exact pointer-aliasing pattern in image_canon under aggressive full-LTO inlining is a documented residual — ThinLTO sidesteps it; future investigation could narrow it.
+- **V2-G2 (adversarial completion):** PASS-PARTIAL. Branch-pattern portions of subagent dists 2 and 5 implemented (run-length trap A3, confidence-stripe thrasher B3); cache-aliasing engineering (page-aligned conflicts on multiple buffers, verified L1 set-index collisions) deferred with rationale.
+- **V2-G3 (cache-defeat saturation):** DATA-PRODUCING; gate's hypothesis was wrong. Tested warm/cold across n_cells ∈ {64, 4096, 65536, 524288} — all show ratio ~1.00× regardless of working set size. The cache-defeat mechanism (32MB walk) works but isn't observable for select because the workload is bandwidth-bound (sequential access, prefetcher hides cache effects fully). RES-1's earlier "steady-state honest" finding generalizes further than originally claimed.
+
+### MAJOR FINDING from V2: T2-B production-flip recommendation REVERSED
+- Under ThinLTO with both functions inlined into the bench, branchy and branchless `m4t_route_confidence_weighted_dist` are **equivalent in speed across all 7 distributions tested** (3 standard + 4 adversarial). The previous "branchless 1.81-2.56× faster" finding was a function-call-overhead artifact; when both versions can be inlined, compiler-generated code is equally good for both source forms.
+- The substrate now ships with ThinLTO globally → the choice between branchy and branchless is cosmetic, not performance-driven. **No production flip needed.** Substrate keeps branchy as the original.
+- Without LTO, branchless WOULD have been faster (prior measurements were correct for that configuration). The project's switch to ThinLTO obviates the question.
+
+### Pinpointed: the "full-LTO bug" was a TEST CODE BUG (not substrate, not LTO)
+- `journal/tier2_residuals_v2_pinpoint.md` — full diagnostic trace, with V3 update section appended after red-team.
+- **Root cause:** three places in `gesh/tests/test_image_canon.c` put side-effecting `image_canon_load_mnist(&ds, IDX_DIR)` inside `assert()`. Under `-DNDEBUG` (CMake Release default), `assert(EXPR)` becomes `((void)0)` and EXPR is never evaluated. The call was eliminated; `ds` was uninitialized; reading garbage stack memory caused the SEGV under aggressive LTO optimization.
+- **Verified independently** via a 10-line test program: `assert((x = 42) == 42)` under NDEBUG leaves x=0 (assignment never runs).
+- **And empirically** (during red-team): the original broken test under no-LTO ran to "PASS" exit 0 with `zero rate nan%` — proof the test was running with uninitialized ds.
+- **Fixed in test code:** three side-effecting asserts replaced with explicit `if (rc != 0) { ...; exit(1); }`.
+- **Hidden second bug surfaced:** test's mean-drift tolerance was `±dim` (too tight; real drift is ~5×dim due to rescaling step).
+- **Full LTO now works globally.** Reverted from `-flto=thin` to `-flto`. 15/15 ctest binaries PASS.
+
+### Added — V3 remediation: closed all 11 V2-pinpoint-redteam findings (100/100)
+- `journal/tier2_residuals_v3_{precommit,closeout}.md` — methodical closure of red-team's 11 findings.
+- **STRUCTURAL FIX (C1, C2, M3):** added `gesh_test_undebug()` helper to top-level CMakeLists; applied to all 15 test executables. Tests now compile with `-UNDEBUG` after the substrate's `-DNDEBUG`, so all test asserts actually run in Release. Substrate code unchanged (still NDEBUG, production behavior).
+- **PRINCIPLED FIX (H1):** mean-drift tolerance derived from `dim * SCALE/10` ("post-normalize mean within 10% of unit scale"). Documented derivation. Replaces eyeballed `±10×dim`.
+- **AUDIT (H2 + M1 + M3):** wide grep across m4t/src, m4t/tests, gesh/src, gesh/bench, gesh/tests. Zero side-effecting asserts anywhere in the codebase. All asserts are pure precondition checks (substrate-internal, NDEBUG-disabled in production = correct).
+- **VERIFICATION (L1):** `otool -tv` shows 4 `bl _image_canon_load_mnist` calls in test binary — function is called (not eliminated). LTO chose external linkage; the bug was about ELIMINATION, not inlining-or-not.
+- **DOCS (H3, H4, L2, M2):** V2 pinpoint amended with: "undefined behavior" framing instead of "no-op for months"; full-LTO measurements re-confirming branchy ≈ branchless (T2-B flip remains unnecessary); methodology lesson on early-hypothesis anchoring; exit(1) vs abort() note.
+- **15/15 ctest binaries PASS** under full LTO with -UNDEBUG on all test executables.
+
+### Methodology lifted from V3
+- **Test executables should always compile with `-UNDEBUG`.** Codified via `gesh_test_undebug()` helper. Future tests should call it after `add_executable`.
+- **Side-effecting expressions inside `assert()` are forbidden** even with `-UNDEBUG` (Debug gets the side effect, Release doesn't — ambiguous behavior). Use `if (!cond) { ...; exit(1); }` for control flow that must execute.
+- **Test tolerance bounds should be derived, not eyeballed.** Document the derivation.
+- **Wide-grep audits before declaring "0 bugs."** A targeted fix can leave the same anti-pattern elsewhere.
+
+### Methodology lifted from V2
+- **Compiler optimization profile can completely change perf comparison results.** Future perf claims should specify the optimization profile they assume; conclusions only generalize within that profile.
+- **Cache-defeat verification needs workload-aware design.** Cache-trash is necessary but insufficient for prefetcher-friendly workloads.
+- **Subagent designs including cache-aliasing imply allocator-level engineering work.** Budget for the engineering, not just the pattern.
+
 ### Added
 - `01MAY26_archived/` snapshot of the prior implementation (gitignored, retained on disk as reference).
 - Repository scaffolding: `LICENSE`, `README.md`, `CONTRIBUTING.md`, `NORTH_STAR.md`, `.github/` (workflows, PR template, issue templates, CODEOWNERS), top-level CMake, `docs/` skeleton (`THESIS.md`, `FINDINGS.md`).

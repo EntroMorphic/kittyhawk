@@ -313,6 +313,11 @@ m4t/
     test_m4t_mtfp4.c
     test_m4t_ternary_matmul.c
     test_m4t_trit_pack.c
+    test_m4t_mtfp_accum_aligning.c   — Tier 3a properties (14)
+    test_m4t_elemental_floor.c       — cell-level elemental floor (shift3, select)
+    test_m4t_assert_live.c           — V4 deliberate-abort meta-test (proves
+                                        substrate asserts are live in libm4t_test)
+    bench_m4t_tier2_perf.c           — perf harness (build target only, not ctest)
   tools/                     — (DEFERRED in current tree; prior-cycle tools
                                 preserved in 01MAY26_archived/m4t/tools/. Returns
                                 when a profiling/golden-value consumer demands.)

@@ -244,6 +244,39 @@ void m4t_mtfp_vec_sub_aligning(
     int               n
 );
 
+/* ── shift3: base-3 positional shift (elemental floor primitive) ─────────
+ *
+ * Per journal/elemental_floor_synthesize.md. shift3 is one of the ~5
+ * elemental ops that can't be built from the others (along with add, neg,
+ * sign, select). It's the natural base-3 scaling primitive.
+ *
+ * Semantics: dst[i] = src[i] * 3^k, with saturation on positive k overflow
+ * and base-3 round-to-nearest-even on negative k.
+ *
+ *   k > 0  : multiply mantissa by 3^k. Saturates at ±MAX_VAL_MTFP19 if the
+ *            scaled value would exceed it.
+ *   k < 0  : divide mantissa by 3^|k|. Round-to-nearest-even; 3^|k| is odd
+ *            so halfway ties cannot occur at integer mantissas (same
+ *            invariant as the cross-exponent accumulator's m4t_pow3_round_div).
+ *   k = 0  : identity copy.
+ *   |k| > 19: clamps. Positive: collapses to ±MAX_VAL or 0. Negative: 0.
+ *
+ * Substrate-discipline: this is a positional/scaling operation, not
+ * arithmetic. Implementation uses the M4T_POW3_TABLE constants directly.
+ *
+ * Aliasing: dst may alias src.
+ *
+ * Preconditions:
+ *   dst, src non-NULL when n > 0.
+ *   |src[i]| ≤ M4T_MTFP_MAX_VAL (substrate invariant).
+ */
+void m4t_mtfp_shift3(
+    m4t_mtfp_t* dst,
+    const m4t_mtfp_t* src,
+    int k,
+    int n
+);
+
 #ifdef __cplusplus
 }
 #endif

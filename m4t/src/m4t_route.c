@@ -97,9 +97,9 @@ int32_t m4t_route_confidence_weighted_dist(
     int32_t base_cost = m4t_popcount_dist(query_trit_packed, tile_trit_packed,
                                             mask, packed_bytes);
 
-    /* Confidence weight: per-position scan to find opposite-sign
-     * mismatches and add 1 (XOR confidence) or 2 (both confident) to
-     * the cost. */
+    /* Confidence weight: per-position scan with early-exit on non-opposite.
+     * A branchless variant exists as `m4t_route_confidence_weighted_dist_branchless`
+     * for benchmarking; see journal/tier2_perf_redteam.md for history. */
     int32_t bonus = 0;
     for (int i = 0; i < sig_dim; i++) {
         int byte_idx_t = i >> 2;
@@ -453,6 +453,146 @@ void m4t_route_signature_update(
         m4t_route_threshold_extract(
             signatures + (size_t)t * Dp, cs, 0, D);
     }
+}
+
+/* ── select: trit-controlled cell-level mux (elemental floor primitive) ─── */
+
+void m4t_route_select(
+    m4t_mtfp_t* out,
+    const uint8_t* c_packed,
+    const m4t_mtfp_t* a,
+    const m4t_mtfp_t* b,
+    const m4t_mtfp_t* d,
+    int n_cells)
+{
+    assert(out && c_packed && a && b && d);
+    assert(n_cells > 0);
+
+    int i = 0;
+
+#if M4T_HAS_NEON
+    /* Process 4 cells (one MTFP19 block, one packed-trit nibble) per iter.
+     * For each block:
+     *   1. Extract the 4 trit codes from one byte of c_packed.
+     *   2. Build mask vectors: a_mask = (code == 0b01) ? all-1s : 0,
+     *      b_mask = (code == 0b10) ? all-1s : 0.
+     *   3. d_mask = NOT (a_mask | b_mask) — covers both 0b00 and reserved 0b11.
+     *   4. out = (a & a_mask) | (b & b_mask) | (d & d_mask).
+     *
+     * Mask construction per cell uses vceqq_s32 against the constants {1, 2}
+     * applied to the per-cell decoded code. ~12 NEON ops per 4 cells. */
+    const int32x4_t k_one = vdupq_n_s32(1);
+    const int32x4_t k_two = vdupq_n_s32(2);
+
+    for (; i + 4 <= n_cells; i += 4) {
+        /* Load packed trit byte covering positions i..i+3. */
+        uint8_t byte = c_packed[i >> 2];
+        /* Decode the 4 codes into a 4-lane int32 vector.
+         * Code at field f = (byte >> (f*2)) & 0x3 */
+        int32_t codes[4] = {
+            (int32_t)((byte >> 0) & 0x3u),
+            (int32_t)((byte >> 2) & 0x3u),
+            (int32_t)((byte >> 4) & 0x3u),
+            (int32_t)((byte >> 6) & 0x3u)
+        };
+        int32x4_t code_vec = vld1q_s32(codes);
+
+        /* Mask = all-1s in lanes where code matches. */
+        uint32x4_t a_mask = vceqq_s32(code_vec, k_one);   /* +1 trit */
+        uint32x4_t b_mask = vceqq_s32(code_vec, k_two);   /* -1 trit */
+        /* d_mask = NOT (a_mask OR b_mask) — covers code 0b00 (zero) and
+         * reserved 0b11 per the documented "treat as 0" fallback. */
+        uint32x4_t ab_mask = vorrq_u32(a_mask, b_mask);
+        uint32x4_t d_mask  = vmvnq_u32(ab_mask);
+
+        /* Load the three input cell vectors. */
+        int32x4_t va = vld1q_s32(a + i);
+        int32x4_t vb = vld1q_s32(b + i);
+        int32x4_t vd = vld1q_s32(d + i);
+
+        /* Bit-select per lane: out = (a & a_mask) | (b & b_mask) | (d & d_mask). */
+        int32x4_t result = vorrq_s32(
+            vandq_s32(va, vreinterpretq_s32_u32(a_mask)),
+            vorrq_s32(
+                vandq_s32(vb, vreinterpretq_s32_u32(b_mask)),
+                vandq_s32(vd, vreinterpretq_s32_u32(d_mask))));
+        vst1q_s32(out + i, result);
+    }
+#endif
+
+    /* Scalar tail (and the entire loop on non-NEON). */
+    for (; i < n_cells; i++) {
+        uint8_t code = (uint8_t)((c_packed[i >> 2] >> ((i & 3) * 2)) & 0x3u);
+        if (code == 0x01u)      out[i] = a[i];   /* trit = +1 */
+        else if (code == 0x02u) out[i] = b[i];   /* trit = -1 */
+        else                    out[i] = d[i];   /* trit = 0 (or reserved 0b11) */
+    }
+}
+
+/* Scalar reference for fair-comparison benchmarking. */
+void m4t_route_select_scalar_ref(
+    m4t_mtfp_t* out,
+    const uint8_t* c_packed,
+    const m4t_mtfp_t* a,
+    const m4t_mtfp_t* b,
+    const m4t_mtfp_t* d,
+    int n_cells)
+{
+    assert(out && c_packed && a && b && d);
+    assert(n_cells > 0);
+    for (int i = 0; i < n_cells; i++) {
+        uint8_t code = (uint8_t)((c_packed[i >> 2] >> ((i & 3) * 2)) & 0x3u);
+        if (code == 0x01u)      out[i] = a[i];
+        else if (code == 0x02u) out[i] = b[i];
+        else                    out[i] = d[i];
+    }
+}
+
+/* Branchless-per-byte reference for fair-comparison benchmarking against
+ * the production branchy m4t_route_confidence_weighted_dist. */
+int32_t m4t_route_confidence_weighted_dist_branchless(
+    const uint8_t* query_trit_packed,
+    const uint8_t* query_conf_bits,
+    const uint8_t* tile_trit_packed,
+    const uint8_t* tile_conf_bits,
+    const uint8_t* mask,
+    int sig_dim)
+{
+    assert(query_trit_packed && query_conf_bits);
+    assert(tile_trit_packed && tile_conf_bits && mask);
+    assert(sig_dim >= 0);
+
+    int packed_bytes = M4T_TRIT_PACKED_BYTES(sig_dim);
+    int32_t base_cost = m4t_popcount_dist(query_trit_packed, tile_trit_packed,
+                                            mask, packed_bytes);
+
+    int32_t bonus = 0;
+    for (int byte_idx = 0; byte_idx < packed_bytes; byte_idx++) {
+        uint8_t q_byte = query_trit_packed[byte_idx];
+        uint8_t t_byte = tile_trit_packed[byte_idx];
+        uint8_t m_byte = mask[byte_idx];
+
+        uint8_t xor_byte     = (uint8_t)(q_byte ^ t_byte);
+        uint8_t opposite_low = (uint8_t)((xor_byte & 0x55u) & ((xor_byte & 0xAAu) >> 1));
+        uint8_t tracked_low  = (uint8_t)((m_byte & 0x55u) & ((m_byte & 0xAAu) >> 1));
+        uint8_t indicator    = (uint8_t)(opposite_low & tracked_low);
+        if (indicator == 0) continue;
+
+        uint8_t indicator_nibble = (uint8_t)(
+              (indicator       & 0x1u)
+            | ((indicator >> 1) & 0x2u)
+            | ((indicator >> 2) & 0x4u)
+            | ((indicator >> 3) & 0x8u));
+
+        int conf_byte_idx = byte_idx >> 1;
+        int nibble_shift  = (byte_idx & 1) * 4;
+        uint8_t q_conf_nibble = (uint8_t)((query_conf_bits[conf_byte_idx] >> nibble_shift) & 0x0Fu);
+        uint8_t t_conf_nibble = (uint8_t)((tile_conf_bits[conf_byte_idx]  >> nibble_shift) & 0x0Fu);
+
+        bonus += __builtin_popcount((unsigned)(indicator_nibble & q_conf_nibble));
+        bonus += __builtin_popcount((unsigned)(indicator_nibble & t_conf_nibble));
+    }
+    return base_cost + bonus;
 }
 
 /* ── Emission-coverage helper ─────────────────────────────────────────── */

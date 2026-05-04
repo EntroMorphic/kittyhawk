@@ -25,6 +25,10 @@ add_library(gesh STATIC
     src/gesh_forward.c
     src/gesh_project.c
     src/gesh_train.c
+    src/expr.c
+    src/expr_signature.c
+    src/expr_bank.c
+    src/expr_random.c
 )
 target_include_directories(gesh PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -45,36 +49,87 @@ target_include_directories(gesh_image_canon PUBLIC
 target_link_libraries(gesh_image_canon PUBLIC m4t)
 set_target_properties(gesh_image_canon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Test variants of gesh, gesh_bench, gesh_image_canon. Same sources, but
+# compiled with -UNDEBUG so the libraries' internal asserts (precondition
+# checks) actually fire when tests trigger them. Each links against m4t_test
+# transitively so substrate asserts also fire when reached via these libs.
+# Per V4-G1 from journal/tier2_residuals_v4_precommit.md.
+add_library(gesh_bench_test STATIC
+    bench/synth_proto.c
+    bench/synth_wildcard.c
+    bench/synth_close_proto.c
+    bench/synth_compose_hier.c
+)
+target_include_directories(gesh_bench_test PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
+)
+target_compile_options(gesh_bench_test PRIVATE -UNDEBUG)
+target_link_libraries(gesh_bench_test PUBLIC m4t_test)
+set_target_properties(gesh_bench_test PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_library(gesh_test STATIC
+    src/gesh_bank.c
+    src/gesh_forward.c
+    src/gesh_project.c
+    src/gesh_train.c
+    src/expr.c
+    src/expr_signature.c
+    src/expr_bank.c
+    src/expr_random.c
+)
+target_include_directories(gesh_test PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+target_compile_options(gesh_test PRIVATE -UNDEBUG)
+target_link_libraries(gesh_test PUBLIC m4t_test)
+set_target_properties(gesh_test PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_library(gesh_image_canon_test STATIC
+    bench/image_canon.c
+)
+target_include_directories(gesh_image_canon_test PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/bench>
+)
+target_compile_options(gesh_image_canon_test PRIVATE -UNDEBUG)
+target_link_libraries(gesh_image_canon_test PUBLIC m4t_test)
+set_target_properties(gesh_image_canon_test PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Tests.
 option(GESH_BUILD_TESTS "Build Gesh tests" ON)
 if(GESH_BUILD_TESTS)
     add_executable(test_synth_proto tests/test_synth_proto.c)
-    target_link_libraries(test_synth_proto PRIVATE gesh_bench)
+    target_link_libraries(test_synth_proto PRIVATE gesh_bench_test)
+    gesh_test_undebug(test_synth_proto)
     add_test(NAME gesh_synth_proto COMMAND test_synth_proto)
 
     add_executable(test_gesh_bank tests/test_gesh_bank.c)
-    target_link_libraries(test_gesh_bank PRIVATE gesh gesh_bench)
+    target_link_libraries(test_gesh_bank PRIVATE gesh_test gesh_bench_test)
+    gesh_test_undebug(test_gesh_bank)
     add_test(NAME gesh_bank COMMAND test_gesh_bank)
 
     add_executable(test_gesh_forward tests/test_gesh_forward.c)
-    target_link_libraries(test_gesh_forward PRIVATE gesh gesh_bench)
+    target_link_libraries(test_gesh_forward PRIVATE gesh_test gesh_bench_test)
+    gesh_test_undebug(test_gesh_forward)
     add_test(NAME gesh_forward COMMAND test_gesh_forward)
 
     add_executable(test_gesh_train tests/test_gesh_train.c)
-    target_link_libraries(test_gesh_train PRIVATE gesh gesh_bench)
+    target_link_libraries(test_gesh_train PRIVATE gesh_test gesh_bench_test)
+    gesh_test_undebug(test_gesh_train)
     add_test(NAME gesh_train COMMAND test_gesh_train)
 
     # Smoke test for image_canon (MNIST loader + normalize + quantize).
     # Lifted from M3 in the Phase B red-team.
     add_executable(test_image_canon tests/test_image_canon.c)
-    target_link_libraries(test_image_canon PRIVATE gesh_image_canon)
+    target_link_libraries(test_image_canon PRIVATE gesh_image_canon_test)
+    gesh_test_undebug(test_image_canon)
     add_test(NAME gesh_image_canon COMMAND test_image_canon)
 
     # Bit-equivalence test: kernel-routed projection vs reference loop.
     # Establishes that the substrate-discipline cleanup is semantically
     # neutral (identical ternary outputs for all sampled shapes/seeds).
     add_executable(test_gesh_project tests/test_gesh_project.c)
-    target_link_libraries(test_gesh_project PRIVATE gesh)
+    target_link_libraries(test_gesh_project PRIVATE gesh_test)
+    gesh_test_undebug(test_gesh_project)
     add_test(NAME gesh_project COMMAND test_gesh_project)
 endif()
 
@@ -151,3 +206,33 @@ target_link_libraries(gesh_compose_ablation PRIVATE gesh gesh_bench m)
 # P0-4 Gate 4 (red-team C3): MNIST regression check for P0-4 hier.
 add_executable(gesh_mnist_compose bench/mnist_compose.c)
 target_link_libraries(gesh_mnist_compose PRIVATE gesh gesh_image_canon)
+
+# Vision claim #2 P0-4: equivalence-recognition probe for expression routing.
+# See docs/PLAN_EXPRESSION_ROUTING.md and journal/expression_routing_*.md.
+add_executable(gesh_expr_routing_probe bench/expr_routing_probe.c)
+target_link_libraries(gesh_expr_routing_probe PRIVATE gesh)
+
+# Vision claim #2 P0-4 RED-TEAM REMEDIATION: addresses C1, C2, H1, H2, H3,
+# M1, M2 from journal/expression_routing_redteam.md against pre-committed
+# gates in journal/expression_routing_remediation_precommit.md.
+add_executable(gesh_expr_routing_remediation bench/expr_routing_remediation.c)
+target_link_libraries(gesh_expr_routing_remediation PRIVATE gesh m)
+
+# R1: per-expression-tau dual-threshold signature rule.
+# Addresses red-team concerns 2, 3, 7, partial 8 from
+# journal/expression_routing_redteam.md per the LMM cycle in
+# journal/r1_signature_rule_synthesize.md, against pre-committed gates
+# R1-A/B/C in docs/PLAN_EXPRESSION_ROUTING_R2.md.
+add_executable(gesh_expr_routing_r1 bench/expr_routing_r1.c)
+target_link_libraries(gesh_expr_routing_r1 PRIVATE gesh)
+
+# R1 RED-TEAM REMEDIATION: addresses 13 findings from
+# journal/r1_signature_rule_redteam.md per pre-committed gates in
+# journal/r1_remediation_precommit.md.
+add_executable(gesh_expr_routing_r1_remediation bench/expr_routing_r1_remediation.c)
+target_link_libraries(gesh_expr_routing_r1_remediation PRIVATE gesh m)
+
+# R1 FORK EXPERIMENT: distinguishes F1/F2/F3 framings of R1 FAIL per
+# docs/PLAN_R1_FORK.md and journal/r1_path_forward_synthesize.md.
+add_executable(gesh_expr_routing_r1_fork bench/expr_routing_r1_fork.c)
+target_link_libraries(gesh_expr_routing_r1_fork PRIVATE gesh)
