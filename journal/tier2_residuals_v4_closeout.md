@@ -1,5 +1,7 @@
 # Closeout: V4 — -UNDEBUG residual remediation
 
+> **Update note (post-V4-residual-3):** the T4 finding below — "LTO has nothing to add at the granularity the bench measures" — is correct narrowly but reads as a general statement and is wrong as one. A subsequent microbench (see `journal/v4_residual_3_lto_microbench_closeout.md`) demonstrated LTO produces a **3× speedup** on pipelined workloads. The "no delta" finding is a property of the substrate's carry-dependent workload shape, not a property of LTO. See `## Update (V4-residual-3)` at the bottom of this doc for the corrected framing.
+
 Per `journal/tier2_residuals_v4_precommit.md` against the four threats inherent in V3's `-UNDEBUG` residual.
 
 ## Verdict: PASS — all four threats closed; one finding surfaced
@@ -70,3 +72,22 @@ V4-G6 (no regression)                                    : PASS — 16/16 ctest 
 CLOSED — all four threats inherent in the V3 `-UNDEBUG` residual are remediated. The substrate-internal asserts are now actually compiled into the test build and verified to fire at runtime via a deliberate-abort meta-test. The verification methodology is upgraded from grep to nm. The mean-drift bound has a regression-tight tier. LTO impact is measured (and found to be observationally null on this bench).
 
 16/16 ctest binaries PASS under full LTO with substrate asserts now structurally live in test builds.
+
+---
+
+## Update (V4-residual-3, post-cycle correction)
+
+The T4 finding above ("LTO has nothing to add at the granularity the bench measures") is correct narrowly but framed too generally. A subsequent microbench (`journal/v4_residual_3_lto_microbench_closeout.md`) tested two workload shapes against the same target function (`m4t_mtfp_block_add`):
+
+| Workload | LTO ns/call | no-LTO ns/call | LTO speedup |
+|----------|------------:|---------------:|------------:|
+| Carry-dependent (single dst accumulated; like the V4-G5 bench) | 1.36 | 1.35 | ~1.0× — no delta |
+| Pipelined (64 independent dsts round-robin; no carry dep) | 0.23 | 0.68 | **~3.0×** |
+
+Disasm confirms LTO inlines `m4t_mtfp_block_add` cleanly into the bench main (no `bl _m4t_mtfp_block_add` in LTO build, present in no-LTO build). The 3× speedup on the pipelined workload is real.
+
+**The corrected framing:** LTO is doing meaningful cross-TU work. It's invisible on V4-G5's bench because the substrate's actual hot path is carry-dependent (accumulating into a state) — that workload shape is bottlenecked by the data dependency between iterations, not by per-call overhead. LTO has nothing to fix THERE, but it has plenty to fix on workloads with independent ops.
+
+**What this corrects:** the original V4 closeout reads "LTO has nothing to add" as if it were a property of LTO. It's actually a property of the substrate's measured workload shape. The takeaway is unchanged operationally (keep LTO enabled — it's free here, and 3× elsewhere), but the framing was misleading.
+
+**Methodology lesson:** "no observable delta" findings should be tested with at least one adversarial workload variant before generalizing. If the adversarial variant ALSO shows no delta, the finding generalizes; otherwise the original finding was scoped to the original workload.
