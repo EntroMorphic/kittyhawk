@@ -82,30 +82,43 @@ typedef struct {
     int K;
     double w_zero;
     double a_zero;
+    int reps;
 } Config;
 
 /* K values must be multiples of 80 (Path D inner-loop alignment).
  * 80 = 16 × 5: also aligns to Path A/B/C inner block (16-cell).
- * 320, 1280: same alignment. */
+ *
+ * Cache analysis at N_HIDDEN=64 (with 2 bits/cell Path A packing):
+ *   K=80,320,1280:    W ≤ 20KB    fits in L1 (192KB on M-series).
+ *   K=12800:          W ≈ 200KB   exceeds L1, fits in L2.
+ *   K=25600:          W ≈ 400KB   exceeds L1, fits in L2.
+ *   K=51200:          W ≈ 800KB   exceeds L1, fits in L2.
+ *
+ * Per-config reps scaled to keep total runtime ~constant per config. */
 static const Config CONFIGS[] = {
-    {   80,  0.20,   0.20 },
-    {   80,  0.20,   0.60 },
-    {   80,  0.60,   0.20 },
-    {   80,  0.60,   0.60 },
-    {  320,  0.20,   0.20 },
-    {  320,  0.20,   0.60 },
-    {  320,  0.60,   0.20 },
-    {  320,  0.60,   0.60 },
-    { 1280,  0.20,   0.20 },
-    { 1280,  0.20,   0.60 },
-    { 1280,  0.60,   0.20 },
-    { 1280,  0.60,   0.60 },
+    /* L1-resident regime (compute-bound). Multi-distribution sweep. */
+    {     80,  0.20,   0.20, 2000 },
+    {     80,  0.20,   0.60, 2000 },
+    {     80,  0.60,   0.20, 2000 },
+    {     80,  0.60,   0.60, 2000 },
+    {    320,  0.20,   0.20, 2000 },
+    {    320,  0.20,   0.60, 2000 },
+    {    320,  0.60,   0.20, 2000 },
+    {    320,  0.60,   0.60, 2000 },
+    {   1280,  0.20,   0.20, 2000 },
+    {   1280,  0.20,   0.60, 2000 },
+    {   1280,  0.60,   0.20, 2000 },
+    {   1280,  0.60,   0.60, 2000 },
+    /* Memory-bandwidth-bound regime (W exceeds L1).
+     * BitNet-typical distribution (w_zero=0.60, a_zero=0.60). */
+    {  12800,  0.60,   0.60,  200 },
+    {  25600,  0.60,   0.60,  100 },
+    {  51200,  0.60,   0.60,   50 },
 };
 #define N_CONFIGS (int)(sizeof(CONFIGS)/sizeof(CONFIGS[0]))
 #define N_SEEDS  5
 #define M_BATCH 8
 #define N_HIDDEN 64
-#define REPS 2000
 
 int main(void) {
     printf("config_idx,K,w_zero,a_zero,seed,"
@@ -162,7 +175,7 @@ int main(void) {
 
             /* Path A — base-3 packed via SDOT. */
             double t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 base3_packed_matmul_neon(Ya, X, Wp_a, M, K, N);
             }
             double t1 = monotonic_ms();
@@ -170,7 +183,7 @@ int main(void) {
 
             /* Path B — B2-B honest. */
             t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 b2b_honest_matmul_neon(Yb, X, Wp_b, M, K, N);
             }
             t1 = monotonic_ms();
@@ -179,7 +192,7 @@ int main(void) {
             /* Path B' — B2-B with skip. Capture skip count from one rep. */
             b2b_skip_matmul_neon(Yk, X, Wp_b, M, K, N, &skip_count);
             t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 b2b_skip_matmul_neon(Yk, X, Wp_b, M, K, N, NULL);
             }
             t1 = monotonic_ms();
@@ -187,7 +200,7 @@ int main(void) {
 
             /* Path C — B2-B optimal (unified TBL). */
             t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 b2b_optimal_matmul_neon(Yo, X, Wp_b, M, K, N);
             }
             t1 = monotonic_ms();
@@ -195,7 +208,7 @@ int main(void) {
 
             /* Substrate cross-check (R-G2 external grounding). */
             t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 /* m4t_ternary_dot_matmul_bt takes UNPACKED ternary X and W.
                  * X stride is K (already unpacked); W stride is K (also
                  * unpacked here — substrate kernel doesn't take packed). */
@@ -206,7 +219,7 @@ int main(void) {
 
             /* Path D — base-3 5-in-8 (sub-2-bit) packed. */
             t0 = monotonic_ms();
-            for (int r = 0; r < REPS; r++) {
+            for (int r = 0; r < cfg->reps; r++) {
                 base3_5in8_matmul_neon(Yd, X, Wp_d, M, K, N);
             }
             t1 = monotonic_ms();
@@ -276,7 +289,7 @@ int main(void) {
             sum_ok_a_eq_b, sum_ok_a_eq_skip, sum_ok_a_eq_optimal,
             sum_ok_a_eq_substrate, sum_ok_a_eq_5in8,
             cfg_skip_rate,
-            REPS, N_SEEDS,
+            cfg->reps, N_SEEDS,
             sum_ms_a / N_SEEDS, sum_ms_b / N_SEEDS, sum_ms_skip / N_SEEDS,
             sum_ms_optimal / N_SEEDS, sum_ms_substrate / N_SEEDS, sum_ms_5in8 / N_SEEDS,
             sum_ms_b / sum_ms_a, sum_ms_skip / sum_ms_a,
