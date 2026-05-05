@@ -153,6 +153,15 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_ternary_matmul_neon PRIVATE m4t_test)
     gesh_test_undebug(test_m4t_ternary_matmul_neon)
     add_test(NAME m4t_ternary_matmul_neon COMMAND test_m4t_ternary_matmul_neon)
+
+    # Cross-exp accumulator NEON path test. Bit-exact verification of
+    # m4t_mtfp_vec_accum_aligning_neon vs m4t_mtfp_vec_accum_aligning_scalar_ref
+    # across n boundary, delta cases, saturation-edge, 1000 random configs,
+    # both flags=NULL and flags!=NULL paths. Per cross_exp_accum_routing A-G4.
+    add_executable(test_m4t_accum_aligning_neon tests/test_m4t_accum_aligning_neon.c)
+    target_link_libraries(test_m4t_accum_aligning_neon PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_accum_aligning_neon)
+    add_test(NAME m4t_accum_aligning_neon COMMAND test_m4t_accum_aligning_neon)
     # Exhaustive bit-exact verify for shift3 (1.16e9 × 19 = 22.08e9 test
     # points, ~25s) is invoked by passing 'x' as argv:
     #   ./build/m4t/test_m4t_shift3_neon x

@@ -166,7 +166,226 @@ static int64_t m4t_pow3_round_div(int64_t M, int64_t s, int* had_remainder) {
 /* m4t_flag_or is now shared via m4t_internal.h (used by both this kernel
  * and the ternary matmul). Per-block layout per m4t_mtfp.h. */
 
+/* Scalar reference implementation factored as a static helper so the
+ * public m4t_mtfp_vec_accum_aligning() can dispatch to NEON later
+ * (A-G7) while m4t_mtfp_vec_accum_aligning_scalar_ref() always calls
+ * this directly. Per A-G1 (cross_exp_accum_routing_synthesize.md). */
+static void accum_aligning_scalar(
+    m4t_mtfp_t* running, int8_t* running_exp,
+    const m4t_mtfp_t* addend, int8_t addend_exp,
+    uint8_t* flags,
+    int n);
+
+#if M4T_HAS_NEON
+/* A-G3 prototype: fused NEON inner loop for the cross-exp align+add+clamp.
+ * Routes the divide step through the same vmlal_s32 magic-multiply
+ * pipeline that productionized for shift3 (m4t_pow3_magic.h is shared).
+ *
+ * Per-iter (4 cells = one int32x4):
+ *   1. Divide X[lane] by 3^delta via vmlal+bias+shift+narrow
+ *   2. Reconstruct ROUNDED bit: (aligned * s != X[lane])
+ *   3. Sum = aligned + Y[lane] (int32, no widening — bounded by 2*MAX_VAL)
+ *   4. Clamp sum to ±MAX_VAL via min/max
+ *   5. Reconstruct SATURATED bit: (sum != clamped)
+ *   6. Store clamped → running[lane]
+ *   7. Per-lane: OR ROUNDED+SATURATED into flag byte if requested
+ *
+ * Bound argument (A-G5/saturation): aligned ≤ MAX_VAL/s per lane;
+ * other ≤ MAX_VAL; sum ≤ MAX_VAL/s + MAX_VAL ≤ MAX_VAL + MAX_VAL/3 < INT32_MAX.
+ * Reconstructed = aligned*s ≤ MAX_VAL fits int32.
+ *
+ * Per A-G3. Will be wired into the public dispatcher at A-G7. */
+static void accum_aligning_neon_block(
+    m4t_mtfp_t*       result,        /* int32x4 output (running buffer) */
+    const m4t_mtfp_t* div_src,       /* the side to be divided by 3^delta */
+    const m4t_mtfp_t* add_src,       /* the side to be added (un-aligned) */
+    int abs_delta,
+    int n,
+    uint8_t* flags)
+{
+    /* Constants derived once per call. */
+    int32_t M    = M4T_POW3_DIV_M[abs_delta];
+    int     N    = M4T_POW3_DIV_N[abs_delta];
+    int32_t s32  = (int32_t)M4T_POW3_TABLE[abs_delta];
+
+    int32x2_t Mv     = vdup_n_s32(M);
+    int64x2_t bias   = vdupq_n_s64((int64_t)1 << (N - 1));
+    int64x2_t neg_N  = vdupq_n_s64(-(int64_t)N);
+    int32x4_t s_v    = vdupq_n_s32(s32);
+    int32x4_t pos_max = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    int32x4_t neg_max = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
+    uint32x4_t zero_u = vdupq_n_u32(0);
+
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        /* Load 4 cells of each input. */
+        int32x4_t val   = vld1q_s32(div_src + i);
+        int32x4_t other = vld1q_s32(add_src + i);
+
+        /* Magic-multiply divide: aligned = val / 3^abs_delta (round-to-nearest). */
+        int64x2_t prod_lo = vmull_s32(vget_low_s32(val),  Mv);
+        int64x2_t prod_hi = vmull_s32(vget_high_s32(val), Mv);
+        prod_lo = vaddq_s64(prod_lo, bias);
+        prod_hi = vaddq_s64(prod_hi, bias);
+        prod_lo = vshlq_s64(prod_lo, neg_N);
+        prod_hi = vshlq_s64(prod_hi, neg_N);
+        int32x4_t aligned = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
+
+        /* ROUNDED reconstruction: aligned * s != val (per lane). */
+        int32x4_t reconstructed = vmulq_s32(aligned, s_v);
+        uint32x4_t rounded_mask = vmvnq_u32(vceqq_s32(reconstructed, val));
+
+        /* Sum + clamp + SATURATED reconstruction. Stays in int32 throughout
+         * — sum is bounded by MAX_VAL + MAX_VAL/3 < INT32_MAX. */
+        int32x4_t sum     = vaddq_s32(aligned, other);
+        int32x4_t clamped = vminq_s32(vmaxq_s32(sum, neg_max), pos_max);
+        uint32x4_t sat_mask = vmvnq_u32(vceqq_s32(sum, clamped));
+
+        vst1q_s32(result + i, clamped);
+
+        /* Per-lane flag bookkeeping. ~4 lane extracts + 4 OR-into-flag-byte.
+         * Skipped entirely if flags == NULL (the masks were computed but
+         * are discarded — cheap relative to the divide work). */
+        if (flags) {
+            uint32_t r0 = vgetq_lane_u32(rounded_mask, 0);
+            uint32_t r1 = vgetq_lane_u32(rounded_mask, 1);
+            uint32_t r2 = vgetq_lane_u32(rounded_mask, 2);
+            uint32_t r3 = vgetq_lane_u32(rounded_mask, 3);
+            uint32_t s0 = vgetq_lane_u32(sat_mask, 0);
+            uint32_t s1 = vgetq_lane_u32(sat_mask, 1);
+            uint32_t s2 = vgetq_lane_u32(sat_mask, 2);
+            uint32_t s3 = vgetq_lane_u32(sat_mask, 3);
+            uint8_t b0 = (r0 ? M4T_FLAG_ROUNDED : 0) | (s0 ? M4T_FLAG_SATURATED : 0);
+            uint8_t b1 = (r1 ? M4T_FLAG_ROUNDED : 0) | (s1 ? M4T_FLAG_SATURATED : 0);
+            uint8_t b2 = (r2 ? M4T_FLAG_ROUNDED : 0) | (s2 ? M4T_FLAG_SATURATED : 0);
+            uint8_t b3 = (r3 ? M4T_FLAG_ROUNDED : 0) | (s3 ? M4T_FLAG_SATURATED : 0);
+            if (b0) m4t_flag_or(flags, i + 0, b0);
+            if (b1) m4t_flag_or(flags, i + 1, b1);
+            if (b2) m4t_flag_or(flags, i + 2, b2);
+            if (b3) m4t_flag_or(flags, i + 3, b3);
+        }
+        (void)zero_u;  /* reserved for future signed-overflow check if needed */
+    }
+
+    /* Scalar tail for n not multiple of 4. Geometrically necessary;
+     * not a "scalar fallback" — there's no NEON path for sub-vector n. */
+    int64_t s = M4T_POW3_TABLE[abs_delta];
+    for (; i < n; i++) {
+        int had_rem = 0;
+        int64_t aa = m4t_pow3_round_div((int64_t)div_src[i], s, &had_rem);
+        int64_t sum = aa + (int64_t)add_src[i];
+        m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
+        if (flags) {
+            uint8_t bits = 0;
+            if (had_rem)             bits |= M4T_FLAG_ROUNDED;
+            if (sum != (int64_t)out) bits |= M4T_FLAG_SATURATED;
+            if (bits) m4t_flag_or(flags, i, bits);
+        }
+        result[i] = out;
+    }
+}
+#endif
+
 void m4t_mtfp_vec_accum_aligning(
+    m4t_mtfp_t* running, int8_t* running_exp,
+    const m4t_mtfp_t* addend, int8_t addend_exp,
+    uint8_t* flags,
+    int n)
+{
+    /* A-G7 productionized: dispatch to NEON path. Per
+     * journal/cross_exp_accum_routing_synthesize.md and project rule
+     * (feedback_function_over_speed_no_scalar): production NEON-only,
+     * no scalar fallback in production dispatch. m4t_mtfp_vec_accum_aligning_neon
+     * handles all branches (same-exp via the existing scalar->vec_add_inplace
+     * delegation, cross-exp via the NEON helper, degenerate-delta via memcpy).
+     *
+     * The accum_aligning_scalar helper remains in this file as the
+     * implementation behind m4t_mtfp_vec_accum_aligning_scalar_ref (test
+     * oracle only). */
+    m4t_mtfp_vec_accum_aligning_neon(running, running_exp, addend, addend_exp,
+                                      flags, n);
+}
+
+/* Public scalar-only reference for test verification. Never dispatches
+ * to NEON. Per A-G1. */
+void m4t_mtfp_vec_accum_aligning_scalar_ref(
+    m4t_mtfp_t* running, int8_t* running_exp,
+    const m4t_mtfp_t* addend, int8_t addend_exp,
+    uint8_t* flags,
+    int n)
+{
+    accum_aligning_scalar(running, running_exp, addend, addend_exp, flags, n);
+}
+
+/* A-G3 prototype wrapper. Dispatches the cross-exp branches to the
+ * NEON helper; same-exp branch and degenerate-delta branches stay
+ * scalar (they're already optimal: same-exp uses block_add NEON, and
+ * degenerate-delta is a memcpy/memset with flag annotation).
+ * Will be merged into m4t_mtfp_vec_accum_aligning at A-G7. */
+void m4t_mtfp_vec_accum_aligning_neon(
+    m4t_mtfp_t* running, int8_t* running_exp,
+    const m4t_mtfp_t* addend, int8_t addend_exp,
+    uint8_t* flags,
+    int n)
+{
+    /* No `#if !M4T_HAS_NEON ... fall back to scalar ...` branch here:
+     * production NEON-only per project rule (memory:
+     * feedback_function_over_speed_no_scalar). CMake configure requires
+     * aarch64+NEON; non-NEON builds error out at configure. The
+     * helper-isolation #if guard wraps accum_aligning_neon_block below
+     * so the source still parses if someone hypothetically attempts a
+     * non-NEON build, but the public dispatcher does not have a scalar
+     * fallback. */
+    assert(n >= 0);
+    assert(n == 0 || (running && addend));
+    assert(running_exp);
+    if (n == 0) return;
+    assert(running != addend);
+
+    int8_t e_run = *running_exp;
+
+    /* Same-exp branch: delegate to existing scalar impl (it already
+     * dispatches to vec_add_inplace NEON for flags==NULL). */
+    if (addend_exp == e_run) {
+        accum_aligning_scalar(running, running_exp, addend, addend_exp, flags, n);
+        return;
+    }
+
+    if (addend_exp > e_run) {
+        int delta = (int)addend_exp - (int)e_run;
+        if (delta >= 20) {
+            /* Degenerate: running rounds to zero. Result = addend.
+             * Stay scalar — flag work is per-cell conditional, copy is
+             * memcpy, NEON wouldn't help. */
+            for (int i = 0; i < n; i++) {
+                if (flags && running[i] != 0) {
+                    m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
+                }
+                running[i] = addend[i];
+            }
+            *running_exp = addend_exp;
+            return;
+        }
+        /* NEON path: divide running by 3^delta, add addend, store in running. */
+        accum_aligning_neon_block(running, running, addend, delta, n, flags);
+        *running_exp = addend_exp;
+        return;
+    }
+
+    /* addend_exp < e_run: divide addend by 3^delta, add to running, store in running. */
+    int delta = (int)e_run - (int)addend_exp;
+    if (delta >= 20) {
+        if (flags) {
+            for (int i = 0; i < n; i++) {
+                if (addend[i] != 0) m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
+            }
+        }
+        return;
+    }
+    accum_aligning_neon_block(running, addend, running, delta, n, flags);
+}
+
+static void accum_aligning_scalar(
     m4t_mtfp_t* running, int8_t* running_exp,
     const m4t_mtfp_t* addend, int8_t addend_exp,
     uint8_t* flags,

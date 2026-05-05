@@ -4,6 +4,28 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — cross-exp accumulator routing through vmlal_s32 (9 A-G gates PASS)
+Per `journal/cross_exp_accum_routing_{raw,nodes,reflect,synthesize,closeout}.md`. The user named per-block-exponent management as "software doing the work of hardware" — the ternary equivalent of an IEEE FPU's internal align+round step. Cycle scope: compose existing shift3-divide pipeline + block_add into a fused accumulator inner loop.
+
+- **STRUCTURAL CHANGE:** `m4t_mtfp_vec_accum_aligning` cross-exp branches (addend>running, running>addend) now route through a NEON helper (`accum_aligning_neon_block`) using the SAME `vmlal_s32` magic-multiply pipeline as `m4t_mtfp_shift3`. `m4t_pow3_magic.h` is now SECOND-consumer validated (was: shift3 only). Same-exp branch unchanged (already NEON-fast via `vec_add_inplace`). Degenerate-delta branches (delta ≥ 20) unchanged (memcpy + flag annotation).
+- **NEW: `m4t_mtfp_vec_accum_aligning_scalar_ref`** — public scalar-only test oracle. Exposed BEFORE prototype work (A-G1) per shift3 remediation lesson.
+- **NEW: `m4t/tools/bench_accum_baseline.c`** — pre-cycle baseline measurement; informational-only per "function over speed" rule.
+- **NEW: `m4t/tests/test_m4t_accum_aligning_neon.c`** — bit-exact regression test (15 n boundary + 13 delta cases + flag-NULL paths + 2 saturation-edge + 1000 random = 1030+ configs) + alias test + 6-shape perf bench.
+- **A-G3 design insight:** the inner loop stays in int32 throughout (no int64 widening for the add) because |aligned + other| ≤ MAX_VAL/3 + MAX_VAL ≈ 7.7×10⁸ < INT32_MAX. The current scalar's int64 intermediate was overcautious.
+- **A-G4 (bit-exact):** all 1030+ configurations match output AND BOTH flag bits (ROUNDED + SATURATED). Flag reconstruction via NEON `cmeq.4s` (saturated: sum != clamped) and `cmeq.4s` (rounded: aligned * s != val) — full fidelity, no scalar fallback.
+- **A-G6 (bench, min-of-5, scope-match-compliant):** speedup range **1.6× to 6.0×** depending on (n, delta, flags). Best: n=64 delta=5 NO-flags = 6.0×. Worst: tiny-n with-flags = 1.6×. With-flags average ~2.3× across the typical (n=64, delta=10-19) regime; without flags ~6× at the same shape.
+- **A-G7 productionized:** `m4t_mtfp_vec_accum_aligning` dispatcher now calls the NEON helper directly. **No scalar fallback in production dispatch** per the new project rule (memory: feedback_function_over_speed_no_scalar). `_scalar_ref` remains as test oracle; geometric scalar tail (sub-block n) remains.
+- **A-G9 (no-scalar audit, cycle scope):** cleaned the `#if !M4T_HAS_NEON ... fall back to scalar ...` branch this cycle's prototype had introduced. Cross-cutting audit (`block_add`, `block_sub`, `ternary_dot` dispatch, etc. — ~5-6 other locations with dead scalar fallback) flagged as follow-on cycle.
+- **20/20 ctest PASS** (was 19, +1 for `m4t_accum_aligning_neon`).
+- **3 production binaries identical** before/after.
+
+### Methodology lifted from cross-exp accum cycle
+- **Cycle scope shrinks as foundational work pays off.** shift3 invented the vmlal-magic-multiply technique; ternary MAC reapplied it to packed-trit matmul; this cycle reapplies it to per-block-aligned accumulation. Each cycle smaller than the last because the foundation is reusable.
+- **Speedup-estimate calibration: REFLECT was optimistic.** Estimated 12–20×; measured 1.6–6.0× depending on shape. Reasons: compiler auto-vectorizes scalar baselines effectively at higher delta; per-lane flag bookkeeping (vget_lane × 4 + scalar OR) is the dominant remaining NEON cost. The estimate's qualitative shape was right; the constant was off by ~3×.
+
+### NEW SAVED MEMORY: feedback_function_over_speed_no_scalar
+Two project rules saved 2026-05-05 after the user caught a SYNTHESIZE doc that violated both: (1) "Don't stop based on speed up. We can tune the speed later." Cycles gate on correctness, not speedup magnitude. Pre-committed gates with "stop if speedup < N×" are a self-imposed limit that prevents foundational work from landing. (2) "Function is most important and definitely no scalar." Production dispatchers are NEON-only; CMake configure already requires aarch64+NEON and FATAL_ERRORs on non-NEON, so `#if !M4T_HAS_NEON` fallback branches in production code are non-load-bearing. The `_scalar_ref` test oracle is a SEPARATE concept (test-only verification artifact) and is preserved. Geometric scalar tails (n<16) for NEON kernels are also preserved (implementation detail, not a fallback). Pattern-recognition triggers added so the drift doesn't recur.
+
 ### Added — ternary MAC routing red-team remediation (10 R-G gates PASS)
 Per `journal/ternary_mac_routing_redteam.md` and `ternary_mac_routing_remediation_closeout.md`. The original 10 T-G gates passed but the red-team surfaced 10 evidence-completeness and framing-accuracy gaps. All closed.
 

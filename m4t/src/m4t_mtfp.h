@@ -213,6 +213,37 @@ void m4t_mtfp_vec_accum_aligning(
     int               n
 );
 
+/* Scalar-only reference. Same semantics as m4t_mtfp_vec_accum_aligning;
+ * never dispatches to NEON. Test-only verification oracle exposed so the
+ * bit-exact gate has a stable reference even after the production path
+ * is replaced with NEON. Per shift3 remediation methodology lifted to
+ * project rule.
+ *
+ * Production code MUST NOT call this — intentionally slower than the
+ * production NEON path. Verification only. Per
+ * journal/cross_exp_accum_routing_synthesize.md A-G1. */
+void m4t_mtfp_vec_accum_aligning_scalar_ref(
+    m4t_mtfp_t*       running,
+    int8_t*           running_exp,
+    const m4t_mtfp_t* addend,
+    int8_t            addend_exp,
+    uint8_t*          flags,
+    int               n
+);
+
+/* A-G3 prototype: NEON-routed accumulator. Same semantics as
+ * m4t_mtfp_vec_accum_aligning. Public during the verification cycle so
+ * the bit-exact gate can compare prototype-NEON vs scalar_ref. Will be
+ * merged into m4t_mtfp_vec_accum_aligning's dispatcher at A-G7. */
+void m4t_mtfp_vec_accum_aligning_neon(
+    m4t_mtfp_t*       running,
+    int8_t*           running_exp,
+    const m4t_mtfp_t* addend,
+    int8_t            addend_exp,
+    uint8_t*          flags,
+    int               n
+);
+
 /* Convenience pairwise wrapper. dst gets a + b at exponent
  * max(e_a, e_b), with rounding/saturation flags.
  *
