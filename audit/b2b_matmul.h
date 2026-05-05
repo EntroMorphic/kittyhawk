@@ -108,6 +108,37 @@ void b2b_skip_matmul_neon(
     int M, int K, int N,
     int* skip_count_out);
 
+/* Path D — base-3 5-trits-in-8-bits packing.
+ *
+ * Per red-team forward pointer: tests whether base-3 has a STRUCTURAL
+ * density advantage at sub-2-bits/cell. Base-3 packs 5 trits in 8 bits
+ * (1.6 bits/cell, close to log2(3) ≈ 1.585). B2-B is FLOORED at 2 bits/cell
+ * because sign and mask are independent — there is no analogous sub-2-bit
+ * packing for sign+mask.
+ *
+ * Encoding (per trit position 0..4 within byte):
+ *   trit_to_unsigned: -1 → 2,  0 → 0,  +1 → 1
+ *   byte = sum(unsigned_i × 3^i for i in 0..4)
+ * Range: byte ∈ [0, 242]. Decode: byte → 5 trits via successive mod-3.
+ *
+ * Decode in NEON: per-digit magic-multiply div-by-3 vectorized over 16
+ * input bytes (= 80 trits per outer iteration). Strided X gather via
+ * vqtbl4q + vqtbl1q for the 5 SDOT calls (5 digits × 16 lanes each).
+ *
+ * Kernel cost target: ~12-14 NEON ops per 16-trit equivalent (vs 7 for
+ * Path A). Density advantage: 1.25× (1.6 vs 2.0 bits/cell).
+ *
+ * Preconditions: K % 80 == 0 (no scalar tail).
+ * X is 8 bits/cell (unpacked ternary, same as substrate's m4t_ternary_dot
+ * matmul shape). */
+void base3_5in8_pack(uint8_t* dst, const int8_t* src, int n);
+
+void base3_5in8_matmul_neon(
+    int32_t* Y,
+    const int8_t* X,
+    const uint8_t* W_packed_5in8,
+    int M, int K, int N);
+
 /* Path C — B2-B optimal: unified TBL decode (same op shape as Path A).
  *
  * Per red-team C1: an aggressively-optimized B2-B implementation uses
