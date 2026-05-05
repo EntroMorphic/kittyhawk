@@ -590,9 +590,12 @@ void m4t_ternary_5in8_matmul_bt(
 
     free(X_strided);
 #else
-    /* Defensive: per project requires-aarch64-NEON rule, this path is
-     * unreachable at runtime. Production callers always have NEON. */
-    m4t_ternary_5in8_matmul_bt_scalar_ref(Y, X, W_packed, M, K, N);
+    /* Per project no-scalar-in-production rule (CONTRIBUTING.md +
+     * feedback_function_over_speed_no_scalar memory): production
+     * dispatchers are NEON-only. Calling scalar_ref from production
+     * would violate the rule. Hard-fail at compile time instead. */
+#error "m4t_ternary_5in8_matmul_bt requires NEON + ARM_FEATURE_DOTPROD; \
+no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
 #endif
 }
 

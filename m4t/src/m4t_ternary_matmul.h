@@ -154,7 +154,14 @@ void m4t_ternary_dot_matmul_bt(
  *   K <= M4T_SDOT_K_MAX_EXACT (no overflow into int32 output);
  *   X and W contain only valid trit codes;
  *   Y, X, W non-NULL when M*N*K > 0;
- *   Y must not alias X or W. */
+ *   Y must not alias X or W.
+ *
+ * Strict alignment is intentional and matches the audit's verified shape.
+ * Real consumers with non-aligned (K, N) should pad to the next multiple
+ * of 80 / 4 (the trailing trits/cells contribute 0 since pack zero-pads).
+ * Future work: K%80 + N%4 tail handling for non-aligned shapes — would
+ * mirror Item 1's tile-with-tail pattern, deferred until a consumer
+ * demands it. */
 void m4t_ternary_5in8_matmul_bt(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,

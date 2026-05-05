@@ -106,19 +106,53 @@ static double measure_ternary_dot(int K, int reps_per_run) {
     return min_ms / reps_per_run;
 }
 
+/* §20 5-in-8 packed kernel. Same workload as ternary_dot but with W
+ * stored at 1.6 bits/cell (sub-2-bit base-3 packing). Requires K%80==0. */
+static double measure_5in8_matmul(int K, int reps_per_run) {
+    if (K % 80 != 0 || N % 4 != 0) return -1.0;  /* signal skip */
+    int Kp5 = K / 5;
+    m4t_trit_t* X = (m4t_trit_t*)calloc((size_t)M * K, sizeof(m4t_trit_t));
+    m4t_trit_t* W = (m4t_trit_t*)calloc((size_t)N * K, sizeof(m4t_trit_t));
+    uint8_t*    Wp = (uint8_t*)calloc((size_t)N * Kp5, 1);
+    m4t_mtfp_t* Y = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+
+    uint32_t state = 0xdeadbeefu;
+    gen_ternary(X, M * K, &state);
+    gen_ternary(W, N * K, &state);
+    for (int j = 0; j < N; j++) {
+        m4t_pack_trits_5in8_1d(Wp + (size_t)j * Kp5, W + (size_t)j * K, K);
+    }
+
+    double min_ms = 1e30;
+    for (int trial = 0; trial < N_REPS; trial++) {
+        double t0 = monotonic_ms();
+        for (int r = 0; r < reps_per_run; r++) {
+            m4t_ternary_5in8_matmul_bt(Y, X, Wp, M, K, N);
+        }
+        double t1 = monotonic_ms();
+        if (t1 - t0 < min_ms) min_ms = t1 - t0;
+    }
+
+    free(X); free(W); free(Wp); free(Y);
+    return min_ms / reps_per_run;
+}
+
 int main(void) {
     printf("# bench_m4t_matmul_tile — post-retile wall-clock at M=8, N=64\n");
     printf("# min-of-%d trials, time per call (ms)\n\n", N_REPS);
-    printf("K\tmtfp_ternary_ms\tternary_dot_ms\n");
+    printf("K\tmtfp_ternary_ms\tternary_dot_ms\t5in8_matmul_ms\n");
 
+    /* K values that are multiples of 80 (5-in-8 alignment) AND 16 (SDOT
+     * alignment); allows fair comparison across all three kernels. */
     int Ks[] = { 1280, 12800, 51200 };
-    int reps[] = { 1000, 100, 25 };  /* scale to keep runtime bounded */
+    int reps[] = { 1000, 100, 25 };
 
     for (int i = 0; i < (int)(sizeof(Ks)/sizeof(Ks[0])); i++) {
         int K = Ks[i];
         double t1 = measure_mtfp_ternary(K, reps[i]);
         double t2 = measure_ternary_dot(K, reps[i]);
-        printf("%d\t%.4f\t\t%.4f\n", K, t1, t2);
+        double t3 = measure_5in8_matmul(K, reps[i]);
+        printf("%d\t%.4f\t\t%.4f\t\t%.4f\n", K, t1, t2, t3);
     }
 
     return 0;
