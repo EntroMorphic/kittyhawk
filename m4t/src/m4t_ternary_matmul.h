@@ -72,6 +72,23 @@ void m4t_mtfp_ternary_matmul_bt(
     int M, int K, int N
 );
 
+/* Scalar-only reference. Same semantics as m4t_mtfp_ternary_matmul_bt
+ * above; never dispatches to NEON. Exposed for tests so the bit-exact
+ * verification gate has a stable oracle even after productionization
+ * replaces the production kernel's inner loop. Per
+ * journal/shift3_neon_remediation_closeout.md (cycle-level lesson lifted)
+ * + journal/ternary_mac_routing_synthesize.md T-G2.
+ *
+ * Production code MUST NOT call this — intentionally slower than the
+ * NEON path. Verification only. */
+void m4t_mtfp_ternary_matmul_bt_scalar_ref(
+    m4t_mtfp_t*     Y,
+    const m4t_mtfp_t* X,
+    const uint8_t*  W_packed,
+    uint8_t*        flags,
+    int M, int K, int N
+);
+
 /* Ternary × ternary → MTFP19 via SDOT.
  *
  * Both activations and weights are unpacked ternary trits. This is the

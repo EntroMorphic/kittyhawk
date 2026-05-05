@@ -144,12 +144,19 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_shift3_neon PRIVATE m4t_test)
     gesh_test_undebug(test_m4t_shift3_neon)
     add_test(NAME m4t_shift3_neon COMMAND test_m4t_shift3_neon)
-    # Exhaustive bit-exact verify (1.16e9 × 19 = 22.08e9 test points, ~25s)
-    # is invoked by passing 'x' as argv:
+
+    # Ternary MAC NEON path test. Bit-exact verification of production
+    # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
+    # M4T_HAS_NEON) against m4t_mtfp_ternary_matmul_bt_scalar_ref
+    # (always-scalar). Per ternary_mac_routing T-G4 + T-G9.
+    add_executable(test_m4t_ternary_matmul_neon tests/test_m4t_ternary_matmul_neon.c)
+    target_link_libraries(test_m4t_ternary_matmul_neon PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_ternary_matmul_neon)
+    add_test(NAME m4t_ternary_matmul_neon COMMAND test_m4t_ternary_matmul_neon)
+    # Exhaustive bit-exact verify for shift3 (1.16e9 × 19 = 22.08e9 test
+    # points, ~25s) is invoked by passing 'x' as argv:
     #   ./build/m4t/test_m4t_shift3_neon x
-    # NOT in ctest (would balloon CI runtime). Per remediation R-G9: this
-    # is the sole surviving artifact of the exhaustive verify; re-run by
-    # hand whenever the magic table or NEON kernel changes.
+    # NOT in ctest (would balloon CI runtime). Per remediation R-G9.
 
     # Tier 2 perf harness. LTO inherited from top-level (V2-G1).
     add_executable(bench_m4t_tier2_perf tests/bench_m4t_tier2_perf.c)

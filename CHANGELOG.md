@@ -4,6 +4,24 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — ternary MAC routing through vmlal_s32 (10 T-G gates PASS)
+Per `journal/ternary_mac_routing_{raw,nodes,reflect,synthesize,closeout}.md`. The user named ternary MAC as "software doing the work of hardware" earlier in the session and asked what existing M4/NEON features could route it. Answer: `vmlal_s32` (signed multiply-accumulate long, int32×int32→int64 widening) is the closest hardware analog at int32 width. Multiplying by trit ∈ {-1, 0, +1} subsumes both conditional-negate and zero-gate, collapsing the prior bsl + mask-widening pattern.
+
+- **STRUCTURAL CHANGE:** `m4t_mtfp_ternary_matmul_bt` divide path now uses `vmlal_s32` on Apple Silicon NEON. The prior bsl + conditional-negate pipeline (~57 NEON ops per 16-trit block, dominated by ~40 ops of mask widening) is replaced by decode → sign-extend → 8× vmlal_s32 (~18 ops per block).
+- **NEW: `m4t_mtfp_ternary_matmul_bt_scalar_ref`** — public scalar-only reference function. Exposed BEFORE prototype work (T-G2) so the bit-exact verification gate survives productionization. Direct application of the shift3 remediation methodology.
+- **NEW: `m4t/tools/bench_vmlal_throughput.c`** — vmlal_s32 throughput characterization microbench. Required two iterations to defeat compiler constant-folding (factored `acc += K*(a*b)` until inputs were forced distinct per call via heap pool with non-constant addressing).
+- **NEW: `m4t/tests/test_m4t_ternary_matmul_neon.c`** — bit-exact regression test (19/23 configurations: K boundary cases, trit distributions, bulk shapes, alias check via SIGABRT) + perf bench (workload-shape-declared per CONTRIBUTING scope-match rule).
+- **T-G1 (throughput characterization):** vmlal_s32 measures **0.84 calls/cycle** on the kernel's actual pattern (two-accumulator chains). Single-chain dependency floor: 0.42/cycle. Independent ceiling: 1.43/cycle.
+- **T-G4 (bit-exact, 23 configs):** all PASS — K boundary cases (0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65), trit distributions (all-zero, all-+1, all--1, balanced, sparse 10%), bulk shapes (M=64 K=4096 N=64 = 4096 cells).
+- **T-G7 (disasm):** inner loop emits 4× `smlal.2d` + 4× `smlal2.2d` per block (compiler split each `vmlal_s32` source call into low/high pair) plus `ldp q18, q19` paired loads. Clean.
+- **T-G8 (bench discipline, min-of-5):** BATCHED (M=64, K=4096, N=64): scalar_ref 10996 ns/cell → bsl-NEON 766 → **vmlal 657** (1.17× over bsl, 16.7× over scalar). TIGHT-LOOP (M=4, K=64, N=4): scalar_ref 24.75 → bsl-NEON 12.25 → **vmlal 5.00** (2.45× over bsl, 5.0× over scalar).
+- **T-G9 (productionized):** the `_vmlal` prototype wrapper removed; production `m4t_mtfp_ternary_matmul_bt` now dispatches to vmlal path. Test file renamed `_vmlal.c` → `_neon.c`. **19/19 ctest PASS** (was 18, +1 for `m4t_ternary_matmul_neon`). The bsl-NEON code is preserved in git history per "DELETE = never" project rule.
+- **T-G10 (no regression):** `bench_m4t_tier2_perf`, `gesh_confidence_probe`, `gesh_expr_routing_probe` produce identical outputs.
+
+### Methodology lifted from ternary MAC cycle
+- **Cycle-level pre-emption of the productionization-invalidates-bit-exact pattern** (lifted from shift3 remediation). When a cycle will replace the function under test, expose the reference oracle as the FIRST gate (here T-G2, before T-G3 prototype). Then post-productionization verification (T-G9 + re-run T-G4) compares production-NEON against an independent scalar oracle, not against itself.
+- **Constant-folding defense for throughput microbenchs.** `__attribute__((noinline))` + heap-pool inputs with non-constant addressing + distinct inputs per call. The compiler will factor `acc += K*(a*b)` if any of these are missing. Two iterations needed in this cycle's T-G1 before measurements were valid.
+
 ### Added — shift3 NEON cycle remediation (100/100, 12 R-G gates PASS)
 Per `journal/shift3_neon_redteam.md` (3 critical, 2 high, 4 medium, 4 low findings) and `journal/shift3_neon_remediation_{precommit,closeout}.md`. The original cycle's 8 gates passed but G6 (productionization) silently invalidated G1's bit-exact verification — replacing the function under test against itself produced a NEON-vs-NEON tautology. Remediation closes all 13 findings.
 

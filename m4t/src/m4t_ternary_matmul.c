@@ -47,30 +47,105 @@ static const uint8_t M4T_TM_SHIFT_LANE[16] = {
 };
 #endif
 
+/* ── Forward decl for the prototype vmlal path (T-G3 below) ───────────── */
+#if M4T_HAS_NEON
+static int64_t ternary_dot_vmlal(
+    const m4t_mtfp_t* xi,
+    const uint8_t* wj,
+    int K);
+#endif
+
 /* ── Inner product for a single output cell ───────────────────────────── */
 
+/* Scalar-only: pure C, no NEON regardless of M4T_HAS_NEON. The reference
+ * implementation. Used by m4t_mtfp_ternary_matmul_bt_scalar_ref (test
+ * oracle) AND as the tail / non-NEON fallback inside ternary_dot. */
+static int64_t ternary_dot_scalar(
+    const m4t_mtfp_t* xi,
+    const uint8_t* wj,
+    int K)
+{
+    int64_t acc = 0;
+    for (int k = 0; k < K; k++) {
+        uint8_t code = (uint8_t)((wj[k >> 2] >> ((k & 3) * 2)) & 0x3u);
+        if      (code == 0x01u) acc += (int64_t)xi[k];
+        else if (code == 0x02u) acc -= (int64_t)xi[k];
+    }
+    return acc;
+}
+
+/* T-G9 productionization: dispatch to vmlal_s32 path when M4T_HAS_NEON.
+ *
+ * History: the prior NEON path was a bit-select + conditional-negate
+ * pipeline (~57 NEON ops per 16-trit block — mask-widening dominated).
+ * The vmlal path uses the multiply-by-trit shortcut: trit ∈ {-1, 0, +1}
+ * means multiplying by sign IS the operation, with the int64 widening
+ * absorbing the accumulator semantics. Per the ternary_mac_routing LMM
+ * cycle and T-G8 measurements:
+ *   BATCHED  M=64 K=4096 N=64 : bsl-NEON 766 ns/cell → vmlal 657 (1.17×)
+ *   TIGHT-LOOP M=4 K=64  N=4  : bsl-NEON 12.25 → vmlal 5.00 (2.45×)
+ * vmlal beats bsl in both shapes; productionized as the default NEON
+ * path. The bsl-NEON code is preserved in git history (project rule:
+ * superseded code is preserved; git log is the archive). */
 static int64_t ternary_dot(
     const m4t_mtfp_t* xi,    /* [K] MTFP activations */
     const uint8_t* wj,         /* [Kp] packed-trit weights */
     int K)
 {
+#if M4T_HAS_NEON
+    return ternary_dot_vmlal(xi, wj, K);
+#else
+    return ternary_dot_scalar(xi, wj, K);
+#endif
+}
+
+#if M4T_HAS_NEON
+/* T-G3: vmlal_s32-based ternary dot product. Routes through vmlal_s32
+ * (signed multiply-accumulate long, int32×int32→int64 widening, 2 lanes
+ * per instruction) — the closest M4/NEON hardware analog to a "ternary
+ * MAC at int32 width." Per ternary_mac_routing_synthesize.md.
+ *
+ * T-G5 saturation argument:
+ *   |x[k]|   ≤ M4T_MTFP_MAX_VAL ≈ 2^29.1
+ *   |sign|   ≤ 1                = 2^0
+ *   |x*sign| ≤ MAX_VAL          ≈ 2^29.1   (single-element MAC product)
+ *   per-block sum across 16 elements: ≤ 16 × MAX_VAL ≈ 2^33.1
+ *   The acc0+acc1 pair is int64x2, so each lane is int64.
+ *   Worst-case |acc| over the entire dot product (K elements):
+ *     |acc| ≤ K × MAX_VAL = K × 5.81e8
+ *     For K up to ≈ 1.59 × 10^10, |acc| < INT64_MAX = 9.22 × 10^18
+ *   The substrate's documented K bound (per file header) is ~1.59e10,
+ *   matching the existing bsl-NEON path's bound. No int64 overflow
+ *   for any K within that bound.
+ *
+ *   Final clamp via m4t_mtfp_clamp64 in the outer loop handles the
+ *   MTFP19 store saturation (Case S, §8.5).
+ *
+ * Insight: trit ∈ {-1, 0, +1}. Multiplying by trit subsumes both the
+ * conditional-negate AND the zero-gate of the existing bsl pattern.
+ *   trit ==  0 → 0 × x = 0
+ *   trit == +1 → 1 × x = x
+ *   trit == -1 → -1 × x = -x
+ * No mask widening, no vbsl, no vneg. Just decode → sign-extend → vmlal.
+ *
+ * Pipeline per 16-trit block:
+ *   Decode 16 packed trits → 16 int8 signs (~6 ops, reuses TBL pipeline)
+ *   Sign-extend int8 → int32 (~4 ops, vmovl chains)
+ *   8× vmlal_s32 (2 lanes each = 16 elements; 4 calls into acc0,
+ *     4 into acc1 — matches T-G1 measured throughput pattern C)
+ *
+ * T-G1 measured pattern C at 0.84 vmlal/cycle ≈ 9.5 cycles per 16 trits
+ * for the vmlal phase alone. Full block ~17 cycles vs current bsl-NEON
+ * ~30 cycles → ~1.8× expected speedup. */
+static int64_t ternary_dot_vmlal(
+    const m4t_mtfp_t* xi,
+    const uint8_t* wj,
+    int K)
+{
     int64_t acc = 0;
     int k = 0;
 
-#if M4T_HAS_NEON
-    /* Process 16 trits (= 4 packed bytes) per iteration. For each block,
-     * decode the 16 trit codes into sign bytes, then apply them to 16
-     * loaded MTFP activations WITHOUT a multiply. Hardware-native shape:
-     *   trit ==  0 → contribute 0    (bit-select zero)
-     *   trit == +1 → contribute +a   (pass activation)
-     *   trit == -1 → contribute -a   (vnegq_s32 activation)
-     *
-     * Multiplying by a sign in {-1, 0, +1} is a base-2 shortcut through a
-     * general-purpose opcode. The base-3-native expression is a mask and a
-     * conditional negate — which is what TBL + bit-select compute directly.
-     *
-     * Sign extension: vmovl_s8 / vmovl_s16 so decoded -1 stays as -1 when
-     * widened. Unsigned widening would turn -1 into 255. */
+    /* Decode constants (same as ternary_dot's NEON path; constants reused). */
     const uint8x16_t dup_idx  = vld1q_u8(M4T_TM_DUP_IDX);
     const int8x16_t  shift_s  = vreinterpretq_s8_u8(vld1q_u8(M4T_TM_SHIFT_LANE));
     const uint8x16_t mask_03  = vdupq_n_u8(0x03u);
@@ -80,90 +155,47 @@ static int64_t ternary_dot(
     int64x2_t acc1 = vdupq_n_s64(0);
 
     while (k + 16 <= K) {
-        /* Load 4 packed bytes (16 trits) from W row j. */
+        /* Decode 16 trits → 16 int8 signs in {-1, 0, +1}. */
         uint32_t w32;
         memcpy(&w32, wj + (k >> 2), 4);
-        uint8x16_t packed = vreinterpretq_u8_u32(vdupq_n_u32(w32));
-
-        /* Duplicate each byte 4× → [b0 b0 b0 b0 | b1 b1 b1 b1 | ...]. */
-        uint8x16_t dup = vqtbl1q_u8(packed, dup_idx);
-
-        /* Per-lane right shift to extract each 2-bit trit code from its
-         * byte. vshlq_u8 with negated shift count = per-lane right shift. */
+        uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
+        uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
         uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
-        uint8x16_t codes = vandq_u8(shifted, mask_03);
+        uint8x16_t codes   = vandq_u8(shifted, mask_03);
+        int8x16_t  signs   = vqtbl1q_s8(lut_sign, codes);
 
-        /* Decode 16 codes → 16 signed trit bytes {-1, 0, +1}. */
-        int8x16_t signs = vqtbl1q_s8(lut_sign, codes);
+        /* Sign-extend int8 → int16 → int32, two halves of 8 lanes each. */
+        int16x8_t s16_lo = vmovl_s8(vget_low_s8(signs));
+        int16x8_t s16_hi = vmovl_s8(vget_high_s8(signs));
+        int32x4_t s32_0 = vmovl_s16(vget_low_s16(s16_lo));   /* signs[ 0.. 3] */
+        int32x4_t s32_1 = vmovl_s16(vget_high_s16(s16_lo));  /* signs[ 4.. 7] */
+        int32x4_t s32_2 = vmovl_s16(vget_low_s16(s16_hi));   /* signs[ 8..11] */
+        int32x4_t s32_3 = vmovl_s16(vget_high_s16(s16_hi));  /* signs[12..15] */
 
-        /* Build masks widened to int32 lanes. */
-        int8x16_t zero8 = vdupq_n_s8(0);
-        uint8x16_t nz8  = vmvnq_u8(vceqq_s8(signs, zero8));
-        uint8x16_t neg8 = vcltq_s8(signs, zero8);
-
-        uint16x8_t nz16_lo = vmovl_u8(vget_low_u8(nz8));
-        uint16x8_t nz16_hi = vmovl_u8(vget_high_u8(nz8));
-        uint32x4_t nz0 = vmovl_u16(vget_low_u16(nz16_lo));
-        uint32x4_t nz1 = vmovl_u16(vget_high_u16(nz16_lo));
-        uint32x4_t nz2 = vmovl_u16(vget_low_u16(nz16_hi));
-        uint32x4_t nz3 = vmovl_u16(vget_high_u16(nz16_hi));
-        uint32x4_t zero32 = vdupq_n_u32(0);
-        nz0 = vmvnq_u32(vceqq_u32(nz0, zero32));
-        nz1 = vmvnq_u32(vceqq_u32(nz1, zero32));
-        nz2 = vmvnq_u32(vceqq_u32(nz2, zero32));
-        nz3 = vmvnq_u32(vceqq_u32(nz3, zero32));
-
-        uint16x8_t ng16_lo = vmovl_u8(vget_low_u8(neg8));
-        uint16x8_t ng16_hi = vmovl_u8(vget_high_u8(neg8));
-        uint32x4_t ng0 = vmovl_u16(vget_low_u16(ng16_lo));
-        uint32x4_t ng1 = vmovl_u16(vget_high_u16(ng16_lo));
-        uint32x4_t ng2 = vmovl_u16(vget_low_u16(ng16_hi));
-        uint32x4_t ng3 = vmovl_u16(vget_high_u16(ng16_hi));
-        ng0 = vmvnq_u32(vceqq_u32(ng0, zero32));
-        ng1 = vmvnq_u32(vceqq_u32(ng1, zero32));
-        ng2 = vmvnq_u32(vceqq_u32(ng2, zero32));
-        ng3 = vmvnq_u32(vceqq_u32(ng3, zero32));
-
-        /* Load 16 MTFP activations. */
+        /* Load 16 int32 activations. */
         int32x4_t a0 = vld1q_s32(xi + k);
         int32x4_t a1 = vld1q_s32(xi + k + 4);
         int32x4_t a2 = vld1q_s32(xi + k + 8);
         int32x4_t a3 = vld1q_s32(xi + k + 12);
 
-        /* Conditional negate where neg_mask is set. */
-        int32x4_t aneg0 = vnegq_s32(a0);
-        int32x4_t aneg1 = vnegq_s32(a1);
-        int32x4_t aneg2 = vnegq_s32(a2);
-        int32x4_t aneg3 = vnegq_s32(a3);
-        int32x4_t s0 = vbslq_s32(ng0, aneg0, a0);
-        int32x4_t s1 = vbslq_s32(ng1, aneg1, a1);
-        int32x4_t s2 = vbslq_s32(ng2, aneg2, a2);
-        int32x4_t s3 = vbslq_s32(ng3, aneg3, a3);
-
-        /* Zero out lanes where the trit is 0. */
-        int32x4_t zero_v = vdupq_n_s32(0);
-        int32x4_t p0 = vbslq_s32(nz0, s0, zero_v);
-        int32x4_t p1 = vbslq_s32(nz1, s1, zero_v);
-        int32x4_t p2 = vbslq_s32(nz2, s2, zero_v);
-        int32x4_t p3 = vbslq_s32(nz3, s3, zero_v);
-
-        /* Widen and accumulate into int64 lanes. */
-        acc0 = vaddw_s32(acc0, vget_low_s32(p0));
-        acc1 = vaddw_s32(acc1, vget_high_s32(p0));
-        acc0 = vaddw_s32(acc0, vget_low_s32(p1));
-        acc1 = vaddw_s32(acc1, vget_high_s32(p1));
-        acc0 = vaddw_s32(acc0, vget_low_s32(p2));
-        acc1 = vaddw_s32(acc1, vget_high_s32(p2));
-        acc0 = vaddw_s32(acc0, vget_low_s32(p3));
-        acc1 = vaddw_s32(acc1, vget_high_s32(p3));
+        /* MAC: acc += sign × activation, widening to int64.
+         * 8 vmlal_s32 calls, split 4 into acc0 (low halves) and 4 into acc1
+         * (high halves) — matches T-G1 measured pattern C. */
+        acc0 = vmlal_s32(acc0, vget_low_s32(s32_0),  vget_low_s32(a0));
+        acc1 = vmlal_s32(acc1, vget_high_s32(s32_0), vget_high_s32(a0));
+        acc0 = vmlal_s32(acc0, vget_low_s32(s32_1),  vget_low_s32(a1));
+        acc1 = vmlal_s32(acc1, vget_high_s32(s32_1), vget_high_s32(a1));
+        acc0 = vmlal_s32(acc0, vget_low_s32(s32_2),  vget_low_s32(a2));
+        acc1 = vmlal_s32(acc1, vget_high_s32(s32_2), vget_high_s32(a2));
+        acc0 = vmlal_s32(acc0, vget_low_s32(s32_3),  vget_low_s32(a3));
+        acc1 = vmlal_s32(acc1, vget_high_s32(s32_3), vget_high_s32(a3));
 
         k += 16;
     }
     acc = vgetq_lane_s64(acc0, 0) + vgetq_lane_s64(acc0, 1)
         + vgetq_lane_s64(acc1, 0) + vgetq_lane_s64(acc1, 1);
-#endif
 
-    /* Scalar tail (and entire loop on non-NEON). */
+    /* Scalar tail. */
     for (; k < K; k++) {
         uint8_t code = (uint8_t)((wj[k >> 2] >> ((k & 3) * 2)) & 0x3u);
         if      (code == 0x01u) acc += (int64_t)xi[k];
@@ -171,6 +203,7 @@ static int64_t ternary_dot(
     }
     return acc;
 }
+#endif
 
 /* ── Public entry ──────────────────────────────────────────────────────── */
 
@@ -221,6 +254,37 @@ void m4t_mtfp_ternary_matmul_bt(
 
         for (int j = 0; j < N; j++) {
             int64_t acc = ternary_dot(X_row, W_packed + (size_t)j * Kp, K);
+            m4t_mtfp_t out = m4t_mtfp_clamp64(acc);
+            if (flags && acc != (int64_t)out) {
+                int cell_index = i * N + j;
+                m4t_flag_or(flags, cell_index, M4T_FLAG_SATURATED);
+            }
+            Y_row[j] = out;
+        }
+    }
+}
+
+/* Scalar-only reference. Same M·N outer loop; uses ternary_dot_scalar
+ * for every cell regardless of M4T_HAS_NEON. Test-only oracle for
+ * bit-exact verification gates. Per ternary_mac_routing T-G2. */
+void m4t_mtfp_ternary_matmul_bt_scalar_ref(
+    m4t_mtfp_t* Y, const m4t_mtfp_t* X, const uint8_t* W_packed,
+    uint8_t* flags,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    int Kp = M4T_TRIT_PACKED_BYTES(K);
+
+    for (int i = 0; i < M; i++) {
+        const m4t_mtfp_t* X_row = X + (size_t)i * K;
+        m4t_mtfp_t*       Y_row = Y + (size_t)i * N;
+        for (int j = 0; j < N; j++) {
+            int64_t acc = ternary_dot_scalar(X_row, W_packed + (size_t)j * Kp, K);
             m4t_mtfp_t out = m4t_mtfp_clamp64(acc);
             if (flags && acc != (int64_t)out) {
                 int cell_index = i * N + j;
