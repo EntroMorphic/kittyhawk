@@ -12,7 +12,26 @@ This is a science cycle. Output is a journal verdict + measurement evidence, not
 
 **For the existing substrate (m4t_mtfp, ternary matmul, cross-exp accum, mtfp4) running a representative ternary-ML workload, where does the third state act as a load-bearing information carrier vs as a sparsity-only / sink artifact?**
 
-If the third state is load-bearing somewhere, that layer's existing usage validates claim 3 in operation. If it's load-bearing nowhere, claim 3 needs operationalization OUTSIDE the existing substrate, and the next cycle pursues that.
+If the third state is load-bearing somewhere, that layer's existing usage shows the third state does WORK in our substrate. If it's load-bearing nowhere, the third state's potential is unrealized in the existing kernels, and the next cycle pursues operationalization OUTSIDE them.
+
+## Claim scope (important distinction)
+
+Vision claim 3 has two interpretations, only one of which this audit tests:
+
+**WEAK CLAIM (this audit):** the third state in our substrate carries information at some layer. Tested by Gate I (info-theoretic) + Gate II (algorithmic dependence within the layer's existing kernel structure).
+
+**STRONG CLAIM (NOT tested here):** base-3 carries information that base-2 collapses, in a way that's structurally cheaper or more accurate than base-2's workaround (e.g., binary value + separate mask bit, or sign+magnitude with explicit zero flag). The strong claim is a COMPARATIVE assertion against an alternative substrate.
+
+A layer that passes both audit gates demonstrates the WEAK claim — the third state does work in the current substrate. It does NOT demonstrate the strong claim — the layer might be doing something a hypothetical base-2 implementation with explicit masking machinery could match in functionality, possibly at higher cost (2 bits / cell instead of log2(3) ≈ 1.58) but with equivalent algorithmic behavior.
+
+Demonstrating the strong claim requires:
+- A base-2 reference implementation of the same layer with explicit masking / sign-flag / zero-flag machinery.
+- Side-by-side measurement: information density (bits / unit work), algorithmic precision, throughput on the same workload.
+- Verdict: does base-3 outperform base-2-with-workaround on at least one axis (density, precision, or kernel cost) while matching on the others?
+
+This is a separate, harder cycle, **out of scope here.** The audit identifies WHERE the third state is load-bearing within our substrate; the strong-claim cycle would test WHETHER that load-bearing role is ACHIEVED MORE EFFICIENTLY than the base-2 alternative.
+
+Without this scope note, a finding like "L3 is load-bearing per both gates" could be misread as "claim 3 validated at L3." The honest interpretation is "the third state does work at L3 in our substrate; whether that work would be done differently or worse in a base-2 substrate is the next question."
 
 ## Workload specification (pre-committed)
 
@@ -105,7 +124,8 @@ The HIGHEST-gap layer that is also algorithmically meaningful is the next cycle'
 
 ## What this cycle is NOT
 
-- Not validating claim 3 broadly. Only auditing the existing substrate's third-state utilization.
+- **Not testing the STRONG version of claim 3** (base-3 outperforms base-2 with explicit masking machinery). That requires a base-2 reference implementation; out of scope here. See "Claim scope" above.
+- Not validating claim 3 broadly. Only auditing the existing substrate's third-state utilization (the WEAK claim).
 - Not modifying production code. Audit produces journal evidence + measurement scripts only.
 - Not a perf cycle. No throughput measurements.
 - Not a re-run of R1. R1 was about signature derivation at the consumer layer; this is about utilization at the substrate layer.
@@ -114,9 +134,11 @@ The HIGHEST-gap layer that is also algorithmically meaningful is the next cycle'
 
 L1-L6 measured under all 12 configs × 5 seeds, both gates per layer. Classification table produced. Highest-gap algorithmically-meaningful layer identified. CLOSEOUT records:
 - Per-layer gate measurements + classification
-- Ranked finding (which layer has the largest gap between potential and actual utilization)
+- Ranked finding (which layer has the largest gap between potential and actual utilization, **noting this is the WEAK-claim ranking**)
 - Methodology lifted (if any)
-- Forward pointer (which operationalization the next cycle should pursue, with rationale)
+- Forward pointer to TWO follow-up cycles:
+  - **WEAK-claim follow-up:** the highest-gap layer's operationalization is deepened or remediated within the existing substrate.
+  - **STRONG-claim follow-up:** for any layer flagged as load-bearing, design a base-2 reference implementation with explicit masking / sign-flag / zero-flag machinery and measure comparative information density + precision + kernel cost. This is a separate cycle, scope and gates to be defined when prioritized.
 
 ## Status
 
