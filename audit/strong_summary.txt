@@ -1,0 +1,14 @@
+[summary] cfg 0 K=64 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=3.190  B=3.876  Bskip=4.774 | B/A=1.21x Bskip/A=1.50x
+[summary] cfg 1 K=64 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.786  B=2.282  Bskip=2.980 | B/A=1.28x Bskip/A=1.67x
+[summary] cfg 2 K=64 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.695  B=2.197  Bskip=2.927 | B/A=1.30x Bskip/A=1.73x
+[summary] cfg 3 K=64 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.712  B=2.230  Bskip=2.949 | B/A=1.30x Bskip/A=1.72x
+[summary] cfg 4 K=256 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.914  B=8.806  Bskip=11.628 | B/A=1.49x Bskip/A=1.97x
+[summary] cfg 5 K=256 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.852  B=8.714  Bskip=11.615 | B/A=1.49x Bskip/A=1.98x
+[summary] cfg 6 K=256 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.957  B=8.847  Bskip=11.939 | B/A=1.49x Bskip/A=2.00x
+[summary] cfg 7 K=256 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.862  B=8.729  Bskip=11.719 | B/A=1.49x Bskip/A=2.00x
+[summary] cfg 8 K=1024 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=23.755  B=35.189  Bskip=47.331 | B/A=1.48x Bskip/A=1.99x
+[summary] cfg 9 K=1024 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.046  B=35.644  Bskip=47.565 | B/A=1.48x Bskip/A=1.98x
+[summary] cfg 10 K=1024 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.164  B=35.472  Bskip=47.897 | B/A=1.47x Bskip/A=1.98x
+[summary] cfg 11 K=1024 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.136  B=42.603  Bskip=48.708 | B/A=1.77x Bskip/A=2.02x
+[overall] 60 runs total; verify a==b: 60/60  a==skip: 60/60
+[PASS] precision gate: all kernels bit-exact equivalent
