@@ -56,6 +56,7 @@ Before merging, audit:
 - [ ] **`docs/THESIS.md`** — are any "open questions" now closed? Have closed ones been moved to a "closed questions" section rather than left misleading?
 - [ ] **`docs/REMEDIATION_PLAN.md` and similar plans** — does the document's status header match the executed reality? If not, add a status note at the top that points readers to the CHANGELOG for the actual narrative.
 - [ ] **`docs/FINDINGS.md`** — are new measurements axis-recorded? Are stale "(none yet)" claims still accurate?
+- [ ] **`docs/TECHNICAL_DEBT.md`** — does the cycle's closeout defer any work? If yes, add an entry with `Source:` pointing to the cycle's closeout. If a prior debt entry was resolved by this cycle, remove it.
 - [ ] **`CHANGELOG.md`** — is the most recent entry complete? Does it cite the journal cycle that produced it?
 - [ ] **Source comments** — do any `/* see m4t/tools/foo.c */` or similar references still resolve? Path-broken comments mislead future readers.
 - [ ] **Spec amendments → journal cycles.** Per principle 7, every substantive `M4T_SUBSTRATE.md` edit needs a `journal/*_spec_amend.md` cycle (lightweight is fine; full RAW→NODES→REFLECT→SYNTHESIZE only when amending substrate semantics).

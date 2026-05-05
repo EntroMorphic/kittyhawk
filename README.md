@@ -78,6 +78,7 @@ ctest --test-dir build
 | [`CHANGELOG.md`](CHANGELOG.md) | Complete narrative of the rebuild, commit-by-commit. |
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Open questions. |
 | [`docs/FINDINGS.md`](docs/FINDINGS.md) | Running ledger of measurements. |
+| [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md) | Centralized index of deferred work — functional gaps, follow-on research cycles, doc drift, spec deferrals, open questions. |
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Original kernel rebuild plan; preserved as historical artifact. |
 | [`docs/REMEDIATION_PLAN_REDTEAM.md`](docs/REMEDIATION_PLAN_REDTEAM.md) | Adversarial review of the plan; 12 findings folded in. |
 | [`docs/DESIGN_X-EXPO.md`](docs/DESIGN_X-EXPO.md) | Cross-exponent accumulator design (§14.2 named opt-in). |
