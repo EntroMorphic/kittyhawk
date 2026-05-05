@@ -96,8 +96,38 @@ void b2b_honest_matmul_neon(
  * ~5 (load + extract mask + reduction + branch). Whether this wins
  * depends on the fraction of all-masked blocks in the workload.
  *
+ * skip_count_out (nullable): if non-NULL, written with the number of
+ * 16-cell blocks where the skip path fired. Used by red-team R-G3 to
+ * empirically count skip firing rate vs theoretical prediction.
+ *
  * Preconditions: same as Path A. */
 void b2b_skip_matmul_neon(
+    int32_t* Y,
+    const int8_t* X,
+    const uint8_t* W_b2b,
+    int M, int K, int N,
+    int* skip_count_out);
+
+/* Path C — B2-B optimal: unified TBL decode (same op shape as Path A).
+ *
+ * Per red-team C1: an aggressively-optimized B2-B implementation uses
+ * a 4-entry LUT mapping the 2-bit code directly to the signed value,
+ * exactly like Path A. The kernel structure is byte-for-byte identical
+ * to Path A; only the LUT contents differ:
+ *   Path A LUT:  [0, +1, -1, 0]   (base-3 encoding)
+ *   Path C LUT:  [+1, -1, 0, 0]   (B2-B encoding: bit0=sign, bit1=mask)
+ *
+ * Op count: identical to Path A (7 ops per 16-cell block).
+ *
+ * This kernel exists to surface that "base-3" vs "B2-B" is a labeling
+ * choice at the 2-bits/cell density. A skilled implementer wouldn't
+ * decode sign and mask separately (Path B); they would use a unified
+ * LUT (Path C). Path C ≡ Path A in op shape; the structural-advantage
+ * claim from the original synthesis is therefore contingent on
+ * enforcing Path B's bit-by-bit decode, not Path C's optimal decode.
+ *
+ * Preconditions: same as Path A. Operates on B2-B-encoded packed W. */
+void b2b_optimal_matmul_neon(
     int32_t* Y,
     const int8_t* X,
     const uint8_t* W_b2b,

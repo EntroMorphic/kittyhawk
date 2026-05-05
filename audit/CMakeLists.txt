@@ -12,9 +12,11 @@ add_executable(tristate_audit tristate_audit.c)
 target_link_libraries(tristate_audit PRIVATE m4t m)
 
 # Strong-claim bench — compares base-3 vs B2-B (sign+mask) NEON kernels.
-# All kernels NEON-only; verification is NEON-vs-NEON cross-check.
+# All kernels NEON-only; verification is NEON-vs-NEON cross-check, plus
+# external grounding via libm4t's externally-validated ternary matmul
+# (R-G2 from the strong-claim red-team).
 add_executable(tristate_strong_bench
     tristate_strong_bench.c
     b2b_matmul.c
 )
-target_link_libraries(tristate_strong_bench PRIVATE m)
+target_link_libraries(tristate_strong_bench PRIVATE m4t m)

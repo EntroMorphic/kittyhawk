@@ -1,14 +1,14 @@
-[summary] cfg 0 K=64 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=3.190  B=3.876  Bskip=4.774 | B/A=1.21x Bskip/A=1.50x
-[summary] cfg 1 K=64 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.786  B=2.282  Bskip=2.980 | B/A=1.28x Bskip/A=1.67x
-[summary] cfg 2 K=64 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.695  B=2.197  Bskip=2.927 | B/A=1.30x Bskip/A=1.73x
-[summary] cfg 3 K=64 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=1.712  B=2.230  Bskip=2.949 | B/A=1.30x Bskip/A=1.72x
-[summary] cfg 4 K=256 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.914  B=8.806  Bskip=11.628 | B/A=1.49x Bskip/A=1.97x
-[summary] cfg 5 K=256 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.852  B=8.714  Bskip=11.615 | B/A=1.49x Bskip/A=1.98x
-[summary] cfg 6 K=256 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.957  B=8.847  Bskip=11.939 | B/A=1.49x Bskip/A=2.00x
-[summary] cfg 7 K=256 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=5.862  B=8.729  Bskip=11.719 | B/A=1.49x Bskip/A=2.00x
-[summary] cfg 8 K=1024 w_z=0.20 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=23.755  B=35.189  Bskip=47.331 | B/A=1.48x Bskip/A=1.99x
-[summary] cfg 9 K=1024 w_z=0.20 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.046  B=35.644  Bskip=47.565 | B/A=1.48x Bskip/A=1.98x
-[summary] cfg 10 K=1024 w_z=0.60 a_z=0.20 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.164  B=35.472  Bskip=47.897 | B/A=1.47x Bskip/A=1.98x
-[summary] cfg 11 K=1024 w_z=0.60 a_z=0.60 | verify a==b: 5/5  a==skip: 5/5 | mean ms (over 2000 reps × 5 seeds): A=24.136  B=42.603  Bskip=48.708 | B/A=1.77x Bskip/A=2.02x
-[overall] 60 runs total; verify a==b: 60/60  a==skip: 60/60
-[PASS] precision gate: all kernels bit-exact equivalent
+[summary] cfg 0 K=64 w_z=0.20 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=4.07 B=4.22 Bskip=4.96 Bopt=2.54 Sub=1.66 | B/A=1.04x Bskip/A=1.22x Bopt/A=0.63x Sub/A=0.41x
+[summary] cfg 1 K=64 w_z=0.20 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=1.75 B=2.17 Bskip=2.85 Bopt=1.46 Sub=1.00 | B/A=1.24x Bskip/A=1.63x Bopt/A=0.83x Sub/A=0.57x
+[summary] cfg 2 K=64 w_z=0.60 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=1.70 B=2.18 Bskip=2.88 Bopt=1.50 Sub=0.99 | B/A=1.28x Bskip/A=1.70x Bopt/A=0.88x Sub/A=0.59x
+[summary] cfg 3 K=64 w_z=0.60 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=1.71 B=2.18 Bskip=2.90 Bopt=1.51 Sub=1.01 | B/A=1.27x Bskip/A=1.69x Bopt/A=0.88x Sub/A=0.59x
+[summary] cfg 4 K=256 w_z=0.20 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=5.77 B=8.61 Bskip=11.45 Bopt=5.80 Sub=4.52 | B/A=1.49x Bskip/A=1.98x Bopt/A=1.00x Sub/A=0.78x
+[summary] cfg 5 K=256 w_z=0.20 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=5.83 B=8.72 Bskip=11.57 Bopt=5.88 Sub=4.68 | B/A=1.50x Bskip/A=1.98x Bopt/A=1.01x Sub/A=0.80x
+[summary] cfg 6 K=256 w_z=0.60 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000977 | mean ms (over 2000 reps × 5 seeds): A=5.93 B=8.89 Bskip=11.84 Bopt=5.91 Sub=4.60 | B/A=1.50x Bskip/A=2.00x Bopt/A=1.00x Sub/A=0.78x
+[summary] cfg 7 K=256 w_z=0.60 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=5.89 B=8.81 Bskip=11.70 Bopt=5.89 Sub=4.51 | B/A=1.50x Bskip/A=1.99x Bopt/A=1.00x Sub/A=0.77x
+[summary] cfg 8 K=1024 w_z=0.20 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=24.17 B=34.91 Bskip=46.93 Bopt=24.26 Sub=20.26 | B/A=1.44x Bskip/A=1.94x Bopt/A=1.00x Sub/A=0.84x
+[summary] cfg 9 K=1024 w_z=0.20 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000000 | mean ms (over 2000 reps × 5 seeds): A=24.07 B=35.10 Bskip=46.98 Bopt=24.32 Sub=20.13 | B/A=1.46x Bskip/A=1.95x Bopt/A=1.01x Sub/A=0.84x
+[summary] cfg 10 K=1024 w_z=0.60 a_z=0.20 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000342 | mean ms (over 2000 reps × 5 seeds): A=24.38 B=35.02 Bskip=47.29 Bopt=24.44 Sub=20.42 | B/A=1.44x Bskip/A=1.94x Bopt/A=1.00x Sub/A=0.84x
+[summary] cfg 11 K=1024 w_z=0.60 a_z=0.60 | verify(/5): a==b:5 a==skip:5 a==opt:5 a==sub:5 | skip_rate=0.000146 | mean ms (over 2000 reps × 5 seeds): A=24.39 B=35.46 Bskip=47.18 Bopt=24.41 Sub=20.44 | B/A=1.45x Bskip/A=1.93x Bopt/A=1.00x Sub/A=0.84x
+[overall] 60 runs total | verify a==b:60/60 a==skip:60/60 a==opt:60/60 a==sub:60/60 | total skip rate: 120/860160 = 0.000140
+[PASS] all four audit kernels + substrate cross-check bit-exact equivalent

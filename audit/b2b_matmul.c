@@ -41,6 +41,21 @@ static const int8_t B2B_SIGN_LUT[16] __attribute__((aligned(16))) = {
      1, -1,  1, -1,
 };
 
+/* B2-B unified value LUT (Path C). Indexed by 2-bit B2-B code:
+ *   0b00 (mask=0, sign=0) → +1
+ *   0b01 (mask=0, sign=1) → -1
+ *   0b10 (mask=1, sign=0) → 0
+ *   0b11 (mask=1, sign=1) → 0
+ * Pattern repeats 4× for vqtbl1q_s8. Per red-team C1: this LUT collapses
+ * the "honest" sign+mask decode into a single TBL lookup, equivalent to
+ * Path A in op shape. */
+static const int8_t B2B_OPTIMAL_LUT[16] __attribute__((aligned(16))) = {
+     1, -1,  0,  0,
+     1, -1,  0,  0,
+     1, -1,  0,  0,
+     1, -1,  0,  0,
+};
+
 /* ── Pack utilities ────────────────────────────────────────────────────── */
 
 void base3_pack(uint8_t* dst, const int8_t* src, int n) {
@@ -186,16 +201,21 @@ void b2b_skip_matmul_neon(
     int32_t* Y,
     const int8_t* X,
     const uint8_t* W_b2b,
-    int M, int K, int N)
+    int M, int K, int N,
+    int* skip_count_out)
 {
     assert(M >= 0 && K >= 0 && N >= 0);
     assert(K % 16 == 0);
-    if (M == 0 || N == 0) return;
+    if (M == 0 || N == 0) {
+        if (skip_count_out) *skip_count_out = 0;
+        return;
+    }
     assert(Y && (K == 0 || (X && W_b2b)));
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_b2b);
 
     int Kp = (K + 3) / 4;
+    int skip_count = 0;
 
     const uint8x16_t dup_idx  = vld1q_u8(DUP_IDX);
     const int8x16_t  shift_s  = vreinterpretq_s8_u8(vld1q_u8(SHIFT_LANE));
@@ -223,6 +243,7 @@ void b2b_skip_matmul_neon(
                  * masked (contributes 0). Sum mask_b lanes — if equals
                  * 16, skip the rest of the block. */
                 if (vaddvq_u8(mask_b) == 16) {
+                    skip_count++;
                     continue;
                 }
 
@@ -234,6 +255,57 @@ void b2b_skip_matmul_neon(
                 int8x16_t  w_vec  = vmulq_s8(sign_v, mult);
 
                 int8x16_t  x_vec  = vld1q_s8(xi + k);
+                acc = vdotq_s32(acc, x_vec, w_vec);
+            }
+
+            Y[(size_t)i * N + j] = vaddvq_s32(acc);
+        }
+    }
+
+    if (skip_count_out) *skip_count_out = skip_count;
+}
+
+/* ── Path C: B2-B optimal (unified TBL decode) ─────────────────────────── */
+
+__attribute__((noinline))
+void b2b_optimal_matmul_neon(
+    int32_t* Y,
+    const int8_t* X,
+    const uint8_t* W_b2b,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K % 16 == 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_b2b)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_b2b);
+
+    int Kp = (K + 3) / 4;
+
+    const uint8x16_t dup_idx = vld1q_u8(DUP_IDX);
+    const int8x16_t  shift_s = vreinterpretq_s8_u8(vld1q_u8(SHIFT_LANE));
+    const uint8x16_t mask_03 = vdupq_n_u8(0x03u);
+    const int8x16_t  lut     = vld1q_s8(B2B_OPTIMAL_LUT);
+
+    for (int i = 0; i < M; i++) {
+        const int8_t* xi = X + (size_t)i * K;
+        for (int j = 0; j < N; j++) {
+            const uint8_t* wj = W_b2b + (size_t)j * Kp;
+            int32x4_t acc = vdupq_n_s32(0);
+
+            for (int k = 0; k < K; k += 16) {
+                /* Inner-block decode + SDOT. Identical structure to Path A;
+                 * only the LUT contents differ. ~7 NEON ops. */
+                uint32_t w32;
+                memcpy(&w32, wj + (k >> 2), 4);
+                uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
+                uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
+                uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
+                uint8x16_t codes   = vandq_u8(shifted, mask_03);
+                int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);
+
+                int8x16_t  x_vec   = vld1q_s8(xi + k);
                 acc = vdotq_s32(acc, x_vec, w_vec);
             }
 
