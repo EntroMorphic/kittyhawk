@@ -171,6 +171,11 @@ if(M4T_BUILD_TESTS)
     add_executable(bench_m4t_tier2_perf tests/bench_m4t_tier2_perf.c)
     target_link_libraries(bench_m4t_tier2_perf PRIVATE m4t)
 
+    # Matmul retile wall-clock probe (post-tile vs pre-tile measurement).
+    # Per journal/m4t_matmul_tile_synthesize.md G3.
+    add_executable(bench_m4t_matmul_tile tests/bench_m4t_matmul_tile.c)
+    target_link_libraries(bench_m4t_matmul_tile PRIVATE m4t)
+
     # V4-G2 + V4-residual-1: Parameterized assert-live meta-test. Forks
     # one child per substrate source file with asserts; each violates a
     # different precondition, parent verifies SIGABRT. Proves substrate

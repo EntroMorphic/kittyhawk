@@ -54,9 +54,67 @@ void m4t_mtfp4_sdot_matmul_bt(
                W[(N - 1) * K + (K - 1)] == 1);
     }
 
+    /* Per journal/m4t_matmul_tile_synthesize.md: register-tile by 4 j cells.
+     * 4 parallel SDOT accumulator chains pipeline better on M-series than
+     * the prior single-acc chain (audit measured 1.8× wall-clock gain at
+     * apples-to-apples comparison). N%4 tail handled by the original
+     * single-j-cell NEON path (NEON, not scalar — geometric tail rule). */
+    int j_tile_end = N - (N % 4);
+
     for (int i = 0; i < M; i++) {
         const int8_t* xi = (const int8_t*)(X + (size_t)i * K);
-        for (int j = 0; j < N; j++) {
+
+        /* Tiled body: 4 j cells per outer iter. */
+        for (int j = 0; j < j_tile_end; j += 4) {
+            const int8_t* wj0 = (const int8_t*)(W + (size_t)(j + 0) * K);
+            const int8_t* wj1 = (const int8_t*)(W + (size_t)(j + 1) * K);
+            const int8_t* wj2 = (const int8_t*)(W + (size_t)(j + 2) * K);
+            const int8_t* wj3 = (const int8_t*)(W + (size_t)(j + 3) * K);
+
+            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+            int k = 0;
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+            int32x4_t vacc0 = vdupq_n_s32(0);
+            int32x4_t vacc1 = vdupq_n_s32(0);
+            int32x4_t vacc2 = vdupq_n_s32(0);
+            int32x4_t vacc3 = vdupq_n_s32(0);
+            for (; k + 16 <= K; k += 16) {
+                int8x16_t va  = vld1q_s8(xi + k);             /* shared X */
+                int8x16_t vw0 = vld1q_s8(wj0 + k);
+                int8x16_t vw1 = vld1q_s8(wj1 + k);
+                int8x16_t vw2 = vld1q_s8(wj2 + k);
+                int8x16_t vw3 = vld1q_s8(wj3 + k);
+                vacc0 = vdotq_s32(vacc0, va, vw0);
+                vacc1 = vdotq_s32(vacc1, va, vw1);
+                vacc2 = vdotq_s32(vacc2, va, vw2);
+                vacc3 = vdotq_s32(vacc3, va, vw3);
+            }
+            acc0 = vaddvq_s32(vacc0);
+            acc1 = vaddvq_s32(vacc1);
+            acc2 = vaddvq_s32(vacc2);
+            acc3 = vaddvq_s32(vacc3);
+#endif
+            /* Geometric scalar tail (k not multiple of 16). NEON loop
+             * above handles whole 16-K blocks; this handles the 0-15
+             * remainder per j cell. */
+            for (; k < K; k++) {
+                int32_t x_k = (int32_t)xi[k];
+                acc0 += x_k * (int32_t)wj0[k];
+                acc1 += x_k * (int32_t)wj1[k];
+                acc2 += x_k * (int32_t)wj2[k];
+                acc3 += x_k * (int32_t)wj3[k];
+            }
+
+            Y[i * N + j + 0] = (m4t_mtfp_t)acc0;
+            Y[i * N + j + 1] = (m4t_mtfp_t)acc1;
+            Y[i * N + j + 2] = (m4t_mtfp_t)acc2;
+            Y[i * N + j + 3] = (m4t_mtfp_t)acc3;
+        }
+
+        /* N%4 tail: 1-3 remaining j cells, original single-j-cell NEON
+         * path. Same kernel shape as pre-tile; geometric tail rule. */
+        for (int j = j_tile_end; j < N; j++) {
             const int8_t* wj = (const int8_t*)(W + (size_t)j * K);
             int32_t acc = 0;
             int k = 0;
@@ -70,15 +128,10 @@ void m4t_mtfp4_sdot_matmul_bt(
             }
             acc = vaddvq_s32(vacc);
 #endif
-            /* Scalar tail for k not multiple of 16 (geometric, not a
-             * fallback — NEON loop above handles whole 16-K blocks). */
             for (; k < K; k++) {
                 acc += (int32_t)xi[k] * (int32_t)wj[k];
             }
 
-            /* Case W per §8.4: output is MTFP19, holds |acc| ≤ K · 40
-             * exactly. No clamp; the caller's K-bound is documented in
-             * the header. */
             Y[i * N + j] = (m4t_mtfp_t)acc;
         }
     }

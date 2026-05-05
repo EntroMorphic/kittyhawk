@@ -211,6 +211,111 @@ static int64_t ternary_dot_vmlal(
     }
     return acc;
 }
+
+/* Per journal/m4t_matmul_tile_synthesize.md: tile-by-4 j cells.
+ * 4 parallel acc-pair chains (8 acc registers total), shared X load across
+ * 4 j cells per K iteration. Reduces vmlal-acc dependency latency-bound
+ * throughput. Audit demonstrated ~1.8× wall-clock gain at apples-to-apples
+ * comparison.
+ *
+ * out[0..3] receives the 4 dot products. wj0..wj3 are 4 packed-trit weight
+ * rows. */
+static void ternary_dot_vmlal_x4(
+    int64_t out[4],
+    const m4t_mtfp_t* xi,
+    const uint8_t* wj0,
+    const uint8_t* wj1,
+    const uint8_t* wj2,
+    const uint8_t* wj3,
+    int K)
+{
+    int k = 0;
+
+    /* Decode constants (shared across all 4 j cells). */
+    const uint8x16_t dup_idx  = vld1q_u8(M4T_TM_DUP_IDX);
+    const int8x16_t  shift_s  = vreinterpretq_s8_u8(vld1q_u8(M4T_TM_SHIFT_LANE));
+    const uint8x16_t mask_03  = vdupq_n_u8(0x03u);
+    const int8x16_t  lut_sign = vld1q_s8(M4T_TRIT_DECODE_LUT);
+
+    /* 4 acc pairs, one per j cell. 8 acc registers total — within NEON's
+     * 32 V regs comfortably alongside decode constants + X loads + scratch. */
+    int64x2_t acc0_lo = vdupq_n_s64(0), acc0_hi = vdupq_n_s64(0);
+    int64x2_t acc1_lo = vdupq_n_s64(0), acc1_hi = vdupq_n_s64(0);
+    int64x2_t acc2_lo = vdupq_n_s64(0), acc2_hi = vdupq_n_s64(0);
+    int64x2_t acc3_lo = vdupq_n_s64(0), acc3_hi = vdupq_n_s64(0);
+
+    while (k + 16 <= K) {
+        /* Load 16 int32 X activations (shared across 4 j cells). */
+        int32x4_t a0 = vld1q_s32(xi + k);
+        int32x4_t a1 = vld1q_s32(xi + k + 4);
+        int32x4_t a2 = vld1q_s32(xi + k + 8);
+        int32x4_t a3 = vld1q_s32(xi + k + 12);
+
+        /* Per-j-cell macro: decode 16 trits + 8 vmlal_s32 into ACC pair.
+         * Same shape as ternary_dot_vmlal's body, using shared a0..a3. */
+        #define DECODE_AND_VMLAL_J(WJ, ACC_LO, ACC_HI) do {                    \
+            uint32_t w32;                                                      \
+            memcpy(&w32, (WJ) + (k >> 2), 4);                                  \
+            uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));       \
+            uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);                  \
+            uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));             \
+            uint8x16_t codes   = vandq_u8(shifted, mask_03);                   \
+            int8x16_t  signs   = vqtbl1q_s8(lut_sign, codes);                  \
+            int16x8_t  s16_lo  = vmovl_s8(vget_low_s8(signs));                 \
+            int16x8_t  s16_hi  = vmovl_s8(vget_high_s8(signs));                \
+            int32x4_t  s32_0   = vmovl_s16(vget_low_s16(s16_lo));              \
+            int32x4_t  s32_1   = vmovl_s16(vget_high_s16(s16_lo));             \
+            int32x4_t  s32_2   = vmovl_s16(vget_low_s16(s16_hi));              \
+            int32x4_t  s32_3   = vmovl_s16(vget_high_s16(s16_hi));             \
+            (ACC_LO) = vmlal_s32((ACC_LO), vget_low_s32(s32_0),  vget_low_s32(a0)); \
+            (ACC_HI) = vmlal_s32((ACC_HI), vget_high_s32(s32_0), vget_high_s32(a0)); \
+            (ACC_LO) = vmlal_s32((ACC_LO), vget_low_s32(s32_1),  vget_low_s32(a1)); \
+            (ACC_HI) = vmlal_s32((ACC_HI), vget_high_s32(s32_1), vget_high_s32(a1)); \
+            (ACC_LO) = vmlal_s32((ACC_LO), vget_low_s32(s32_2),  vget_low_s32(a2)); \
+            (ACC_HI) = vmlal_s32((ACC_HI), vget_high_s32(s32_2), vget_high_s32(a2)); \
+            (ACC_LO) = vmlal_s32((ACC_LO), vget_low_s32(s32_3),  vget_low_s32(a3)); \
+            (ACC_HI) = vmlal_s32((ACC_HI), vget_high_s32(s32_3), vget_high_s32(a3)); \
+        } while (0)
+
+        DECODE_AND_VMLAL_J(wj0, acc0_lo, acc0_hi);
+        DECODE_AND_VMLAL_J(wj1, acc1_lo, acc1_hi);
+        DECODE_AND_VMLAL_J(wj2, acc2_lo, acc2_hi);
+        DECODE_AND_VMLAL_J(wj3, acc3_lo, acc3_hi);
+
+        #undef DECODE_AND_VMLAL_J
+
+        k += 16;
+    }
+
+    /* Reduce each acc pair to scalar. */
+    int64_t r0 = vgetq_lane_s64(acc0_lo, 0) + vgetq_lane_s64(acc0_lo, 1)
+               + vgetq_lane_s64(acc0_hi, 0) + vgetq_lane_s64(acc0_hi, 1);
+    int64_t r1 = vgetq_lane_s64(acc1_lo, 0) + vgetq_lane_s64(acc1_lo, 1)
+               + vgetq_lane_s64(acc1_hi, 0) + vgetq_lane_s64(acc1_hi, 1);
+    int64_t r2 = vgetq_lane_s64(acc2_lo, 0) + vgetq_lane_s64(acc2_lo, 1)
+               + vgetq_lane_s64(acc2_hi, 0) + vgetq_lane_s64(acc2_hi, 1);
+    int64_t r3 = vgetq_lane_s64(acc3_lo, 0) + vgetq_lane_s64(acc3_lo, 1)
+               + vgetq_lane_s64(acc3_hi, 0) + vgetq_lane_s64(acc3_hi, 1);
+
+    /* Scalar geometric tail (k not multiple of 16). 4 j cells in lockstep. */
+    for (; k < K; k++) {
+        int64_t x_k = (int64_t)xi[k];
+        uint8_t c0 = (uint8_t)((wj0[k >> 2] >> ((k & 3) * 2)) & 0x3u);
+        uint8_t c1 = (uint8_t)((wj1[k >> 2] >> ((k & 3) * 2)) & 0x3u);
+        uint8_t c2 = (uint8_t)((wj2[k >> 2] >> ((k & 3) * 2)) & 0x3u);
+        uint8_t c3 = (uint8_t)((wj3[k >> 2] >> ((k & 3) * 2)) & 0x3u);
+        if      (c0 == 0x01u) r0 += x_k;
+        else if (c0 == 0x02u) r0 -= x_k;
+        if      (c1 == 0x01u) r1 += x_k;
+        else if (c1 == 0x02u) r1 -= x_k;
+        if      (c2 == 0x01u) r2 += x_k;
+        else if (c2 == 0x02u) r2 -= x_k;
+        if      (c3 == 0x01u) r3 += x_k;
+        else if (c3 == 0x02u) r3 -= x_k;
+    }
+
+    out[0] = r0; out[1] = r1; out[2] = r2; out[3] = r3;
+}
 #endif
 
 /* ── Public entry ──────────────────────────────────────────────────────── */
@@ -256,11 +361,45 @@ void m4t_mtfp_ternary_matmul_bt(
 
     int Kp = M4T_TRIT_PACKED_BYTES(K);
 
+    /* Per journal/m4t_matmul_tile_synthesize.md: register-tile by 4 j cells.
+     * 4 parallel acc-pair chains (8 acc registers) pipeline better on
+     * M-series. N%4 tail handled by single-j-cell ternary_dot path
+     * (NEON, geometric tail rule). Without NEON, ternary_dot_vmlal_x4
+     * doesn't exist; the entire j range falls through to the tail
+     * (which dispatches to ternary_dot, also gated by NEON). */
+#if M4T_HAS_NEON
+    int j_tile_end = N - (N % 4);
+#else
+    int j_tile_end = 0;
+#endif
+
     for (int i = 0; i < M; i++) {
         const m4t_mtfp_t* X_row = X + (size_t)i * K;
         m4t_mtfp_t*       Y_row = Y + (size_t)i * N;
 
-        for (int j = 0; j < N; j++) {
+#if M4T_HAS_NEON
+        /* Tiled body: 4 j cells per outer iter. */
+        for (int j = 0; j < j_tile_end; j += 4) {
+            int64_t accs[4];
+            ternary_dot_vmlal_x4(accs, X_row,
+                W_packed + (size_t)(j + 0) * Kp,
+                W_packed + (size_t)(j + 1) * Kp,
+                W_packed + (size_t)(j + 2) * Kp,
+                W_packed + (size_t)(j + 3) * Kp,
+                K);
+            for (int dj = 0; dj < 4; dj++) {
+                m4t_mtfp_t out = m4t_mtfp_clamp64(accs[dj]);
+                if (flags && accs[dj] != (int64_t)out) {
+                    int cell_index = i * N + j + dj;
+                    m4t_flag_or(flags, cell_index, M4T_FLAG_SATURATED);
+                }
+                Y_row[j + dj] = out;
+            }
+        }
+#endif
+
+        /* N%4 tail: 1-3 remaining j cells, single-j-cell NEON path. */
+        for (int j = j_tile_end; j < N; j++) {
             int64_t acc = ternary_dot(X_row, W_packed + (size_t)j * Kp, K);
             m4t_mtfp_t out = m4t_mtfp_clamp64(acc);
             if (flags && acc != (int64_t)out) {
