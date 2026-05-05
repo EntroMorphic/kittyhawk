@@ -95,13 +95,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Housekeeping (doc drift)
 
-### TD-11 — Strong-claim retrospective consolidation doc
-
-**Source:** "Concerns" answer in current session.
-**State:** the strong-claim verdict's "structural" framing has moved across 6+ addenda. A unifying retrospective (~1 page) would let a fresh reader land at the current precise verdict without traversing cycle history.
-**Unblocks:** new-reader orientation; reduces risk of misreading the verdict.
-**Priority hint:** medium. Would save downstream readers significant time.
-
 ---
 
 ## Spec-level deferrals

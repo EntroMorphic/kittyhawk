@@ -103,6 +103,7 @@ ctest --test-dir build
 | [`journal/tristate_strong_5in8_addendum.md`](journal/tristate_strong_5in8_addendum.md) | Sub-2-bit base-3 packing (5-in-8) addendum: density-ceiling structural advantage. |
 | [`journal/tristate_strong_membw_*.md`](journal/tristate_strong_membw_addendum.md) | Memory-bandwidth regime test + red-team (trajectory plateau finding refutes first-draft crossover prediction). |
 | [`journal/p0_kernel_opt_redteam.md`](journal/p0_kernel_opt_redteam.md) | P0-1/P0-2/P0-3 kernel optimizations (pre-permute X, split-LUT decode, register-tile) with per-item red-team. Path D ratio: 1.95× → 0.55× across all regimes. |
+| [`journal/strong_claim_retrospective.md`](journal/strong_claim_retrospective.md) | Single-doc consolidation of the strong-claim verdict across 8 refinement rounds. Where to land if you don't want to traverse the cycle history. |
 
 ## License
 
