@@ -95,13 +95,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Housekeeping (doc drift)
 
-### TD-10 — `CHANGELOG.md` drift
-
-**Source:** `journal/p0_concern1_mechanism.md` (deliberately deferred during doc-shoring).
-**State:** CHANGELOG hasn't been updated since the early ground-zero rebuild. Recent cycles' commit messages preserve the narrative for now.
-**Unblocks:** discoverable project history without trawling git log.
-**Priority hint:** medium. CONTRIBUTING.md's post-commit doc-currency checklist explicitly calls for CHANGELOG updates per landing.
-
 ### TD-11 — Strong-claim retrospective consolidation doc
 
 **Source:** "Concerns" answer in current session.
