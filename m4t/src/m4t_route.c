@@ -520,7 +520,8 @@ void m4t_route_select(
     }
 #endif
 
-    /* Scalar tail (and the entire loop on non-NEON). */
+    /* Scalar tail for n_cells not multiple of 4 (geometric, not a
+     * fallback — NEON loop above handles whole 4-cell blocks). */
     for (; i < n_cells; i++) {
         uint8_t code = (uint8_t)((c_packed[i >> 2] >> ((i & 3) * 2)) & 0x3u);
         if (code == 0x01u)      out[i] = a[i];   /* trit = +1 */

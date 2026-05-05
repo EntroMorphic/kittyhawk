@@ -70,7 +70,8 @@ void m4t_mtfp4_sdot_matmul_bt(
             }
             acc = vaddvq_s32(vacc);
 #endif
-            /* Scalar tail (and entire loop on non-NEON / non-DOTPROD). */
+            /* Scalar tail for k not multiple of 16 (geometric, not a
+             * fallback — NEON loop above handles whole 16-K blocks). */
             for (; k < K; k++) {
                 acc += (int32_t)xi[k] * (int32_t)wj[k];
             }

@@ -101,11 +101,10 @@ static int64_t ternary_dot(
     const uint8_t* wj,         /* [Kp] packed-trit weights */
     int K)
 {
-#if M4T_HAS_NEON
+    /* NEON-only production dispatch. ternary_dot_scalar remains as
+     * the implementation behind m4t_mtfp_ternary_matmul_bt_scalar_ref
+     * (test oracle). Per project rule (feedback_function_over_speed_no_scalar). */
     return ternary_dot_vmlal(xi, wj, K);
-#else
-    return ternary_dot_scalar(xi, wj, K);
-#endif
 }
 
 #if M4T_HAS_NEON

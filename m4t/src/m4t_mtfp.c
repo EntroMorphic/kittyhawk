@@ -27,7 +27,9 @@ void m4t_mtfp_block_add(
     m4t_mtfp_t dst[M4T_MTFP_CELLS_PER_BLOCK],
     const m4t_mtfp_t a[M4T_MTFP_CELLS_PER_BLOCK])
 {
-#if M4T_HAS_NEON
+    /* NEON-only. CMake configure requires aarch64+NEON; the dead scalar
+     * fallback was removed in the project-wide no-scalar audit per
+     * CONTRIBUTING (feedback_function_over_speed_no_scalar memory). */
     const int32x4_t vmax = vdupq_n_s32( M4T_MTFP_MAX_VAL);
     const int32x4_t vmin = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
     int32x4_t d = vld1q_s32(dst);
@@ -36,18 +38,13 @@ void m4t_mtfp_block_add(
     r = vminq_s32(r, vmax);
     r = vmaxq_s32(r, vmin);
     vst1q_s32(dst, r);
-#else
-    for (int i = 0; i < M4T_MTFP_CELLS_PER_BLOCK; i++) {
-        dst[i] = m4t_mtfp_clamp64((int64_t)dst[i] + (int64_t)a[i]);
-    }
-#endif
 }
 
 void m4t_mtfp_block_sub(
     m4t_mtfp_t dst[M4T_MTFP_CELLS_PER_BLOCK],
     const m4t_mtfp_t a[M4T_MTFP_CELLS_PER_BLOCK])
 {
-#if M4T_HAS_NEON
+    /* NEON-only; see m4t_mtfp_block_add comment. */
     const int32x4_t vmax = vdupq_n_s32( M4T_MTFP_MAX_VAL);
     const int32x4_t vmin = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
     int32x4_t d = vld1q_s32(dst);
@@ -56,11 +53,6 @@ void m4t_mtfp_block_sub(
     r = vminq_s32(r, vmax);
     r = vmaxq_s32(r, vmin);
     vst1q_s32(dst, r);
-#else
-    for (int i = 0; i < M4T_MTFP_CELLS_PER_BLOCK; i++) {
-        dst[i] = m4t_mtfp_clamp64((int64_t)dst[i] - (int64_t)a[i]);
-    }
-#endif
 }
 
 /* ── Vec-native (compositions) ────────────────────────────────────────── */
@@ -735,11 +727,10 @@ void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
         memset(dst, 0, (size_t)n * sizeof(m4t_mtfp_t));
         return;
     }
-#if M4T_HAS_NEON
+    /* NEON-only production dispatch. Scalar reference available via
+     * m4t_mtfp_shift3_scalar_ref (test oracle). Per project rule
+     * (feedback_function_over_speed_no_scalar). */
     shift3_div_neon(dst, src, abs_k, n);
-#else
-    shift3_div_scalar(dst, src, abs_k, n);
-#endif
 }
 
 /* Scalar-only reference. Same semantics as m4t_mtfp_shift3 (per the
