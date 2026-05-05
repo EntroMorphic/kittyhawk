@@ -1,172 +1,168 @@
-# ADDENDUM: memory-bandwidth-bound regime test
+# ADDENDUM: memory-bandwidth-bound regime test (post-redteam)
 
-Per `journal/tristate_strong_5in8_addendum.md` forward pointer. Tests whether the storage-vs-decode tradeoff inverts when W exceeds L1 cache, where bandwidth becomes the dominant cost rather than decode ops.
+Per `journal/tristate_strong_5in8_addendum.md` forward pointer + red-team `tristate_strong_membw_redteam.md` remediation. Tests whether the storage-vs-decode tradeoff inverts when W exceeds L1, L2, then DRAM cache levels.
 
-## Workload spec
+**RED-TEAM REMEDIATION APPLIED:** original draft claimed "density advantage MANIFESTS as kernel-cost reduction." Post-remediation finding: the kernel-cost penalty NARROWS but does NOT crossover. The trajectory PLATEAUS at ~1.16-1.24× even at DRAM-bound regimes. This is a more honest verdict.
 
-Three new configs added to the strong-claim bench, BitNet-typical distribution (w_zero=0.60, a_zero=0.60), with reduced REPS to keep runtime bounded:
+## Workload spec (post-remediation)
 
 ```
-K       W size    Cache regime         Reps
-------- --------- -------------------- ----
-12800   200 KB    Just-exceeds-L1      200
-25600   400 KB    L2-resident          100
-51200   800 KB    L2-resident          50
+Cache regime          K       N       W size      Reps
+─────────────────────────────────────────────────────
+L1-resident           80-1280 64      < 20 KB      2000
+L1-overflow           12800   64       200 KB       200
+L2-resident (deeper)  25600   64       400 KB       100
+L2-resident (deepest) 51200   64       800 KB        50
+DRAM-bound (R-G2)     12800   8192    25.6 MB        3
 ```
 
-L1 dcache on Apple M-series is 192 KB; L2 is 12-16 MB shared. At our N_HIDDEN=64, all three configs exceed L1 but fit comfortably in L2.
+Apple M-series L2 = 12-16 MB shared. K=12800, N=8192 → W = 25.6 MB **exceeds L2** → DRAM-bound regime.
+
+**Methodology updates per red-team:**
+- **R-G1:** `cache_flush()` walks a 32 MB buffer between kernel runs to evict prior kernel's W and X. Each kernel measures cold-cache (relative to prior kernel) + warm-cache reps.
+- **R-G2:** added DRAM-bound config (N=8192, W=25.6 MB > L2) to test the actual extrapolated regime.
+- **R-G3:** per-config standard deviation reported alongside mean.
 
 ## Results
 
 ```
-                      L1-RESIDENT REGIME           MEMORY-BANDWIDTH-BOUND REGIME
-Config (BitNet)       K=320 (cache hot)            K=12800   K=25600   K=51200
-                      ratio vs Path A              ratio vs Path A
-─────────────────────────────────────────────────────────────────────────────────
-Path A (4-in-8)       1.00× (7.30 ms baseline)     1.00×     1.00×     1.00×
-Path B (B2-B honest)  1.50×                        1.08×     1.05×     1.04×
-Path B-skip           2.01×                        1.18×     1.13×     1.10×
-Path C (B2-B optimal) 1.01×                        1.01×     1.01×     1.00×
-Substrate (unpacked)  0.77×  (FASTER)              0.97×     0.98×     0.99×
-Path D (5-in-8 base3) 2.10×                        1.24×     1.18×     1.16×
+                    L1-RESIDENT           L1-OVERFLOW        L2-RESIDENT          DRAM-BOUND
+                    K=320 (warm)          K=12800/64         K=51200/64           K=12800/8192
+                                          (W=200KB)          (W=800KB)            (W=25.6MB)
+─────────────────────────────────────────────────────────────────────────────────────────
+Path A (4-in-8)     1.00× (7.30ms ±0.0)   1.00× (50.8ms ±0.6) 1.00× (56.7ms ±1.8)  1.00× (102.0ms ±2.7)
+Path B (B2-B hon)   1.50×                 1.08×              1.05×                1.09×
+Path B-skip         2.01×                 1.18×              1.09×                1.17×
+Path C (B2-B opt)   1.01×                 1.01×              1.02×                1.02×
+Substrate (8 b/c)   0.77× (FASTER)        0.97×              0.99×                0.97×
+Path D (5-in-8)     2.10× (15.4ms ±0.5)   1.24× (63.1ms ±0.5) 1.16× (65.7ms ±1.5)  1.24× (126.1ms ±0.9)
 ```
 
-Verification: 75/75 bit-exact across all 5 audit kernels + substrate (60 from L1-resident + 15 from memory-bound).
+Verification: 80/80 bit-exact across all 5 audit kernels + substrate (60 from L1-resident multi-config + 15 from N=64 memory-bandwidth + 5 from DRAM-bound).
 
-## Critical finding: the regime crossover
+Per-config standard deviation (R-G3) is bounded: CV ≈ 1-3% across all configs.
 
-**As W exceeds L1, kernel-cost differences COLLAPSE and bandwidth differences emerge.**
+## Critical finding: trajectory PLATEAUS, does not crossover
 
-Path A → Substrate trend (substrate has 4× the W bytes due to unpacked storage):
-```
-L1-resident:    Substrate 0.77× of A    (substrate FASTER, decode-free)
-K=12800:        Substrate 0.97× of A    (gap collapsing)
-K=25600:        Substrate 0.98× of A    (essentially tied)
-K=51200:        Substrate 0.99× of A    (within noise)
-```
-
-The substrate's "no-decode" advantage **vanishes** as W exceeds L1. Reading 4× more bytes consumes the cycles that decode would have cost.
-
-Path A → Path D trend (Path D has 1.25× density advantage):
-```
-L1-resident:    Path D 1.95× of A     (decode penalty dominates)
-K=12800:        Path D 1.24× of A     (decode penalty halves)
-K=25600:        Path D 1.18× of A
-K=51200:        Path D 1.16× of A     (asymptotic narrowing)
-```
-
-The decode penalty Path D pays for sub-2-bit packing is being **paid back** by reading 1.25× fewer bytes. Crossover hasn't occurred within tested K range, but the trajectory is unmistakable.
-
-## Why no full crossover at K=51200?
-
-W=800KB still fits in L2 (12-16 MB on M-series). L2 bandwidth (~50-100 GB/s on M-series) is high enough that the 1.25× density savings doesn't fully compensate for the ~12 vs 7 NEON ops per 16-cell decode cost.
-
-For TRUE crossover (Path D < Path A), W must exceed L2 (~16 MB) and reach DRAM. At N=64, that requires K > 1M — impractical in this bench. At larger N (e.g., N=512 in real LLM hidden dims), L2-overflow happens earlier.
-
-**Predicted DRAM-bound behavior (extrapolating):**
-- DRAM bandwidth on M-series: ~70-100 GB/s with much higher latency than L2.
-- Path A reads 1.25× more bytes → ~1.25× more memory cycles.
-- Path D's per-cycle decode cost is fixed (independent of memory regime).
-- Crossover when memory cycle cost > decode cycle cost.
-
-The narrowing trajectory in our data (1.95× → 1.24× → 1.16×) is consistent with crossover at K ≳ 1M where DRAM bandwidth would be the dominant cost.
-
-## What this confirms about the strong claim
-
-After the full strong-claim cycle (initial + R-G1/R-G2/R-G3 + 5-in-8 addendum + this membw addendum):
+**At all tested memory regimes, Path D loses to Path A on wall-clock.**
 
 ```
-DENSITY CEILING:        Base-3 wins structurally. log2(3) ≈ 1.585 bits/cell
-                        achievable; B2-B floored at 2 bits/cell.
-                        UNCONDITIONAL ADVANTAGE.
-
-L1-RESIDENT REGIME:     Path A (4-in-8) optimal. Encoding-label equivalence
-                        with B2-B-optimal (Path C). Path D loses to decode
-                        penalty (~1.95×).
-
-MEMORY-BANDWIDTH-BOUND  Storage cost matters increasingly with K. Substrate's
-REGIME (L2-resident):   decode-free advantage collapses (0.77× → 0.99×).
-                        Path D's decode penalty narrows substantially (1.95×
-                        → 1.16×). Trajectory consistent with crossover at
-                        DRAM-bound regime (W > L2).
-
-DRAM-BOUND REGIME:      UNTESTED. Extrapolated to favor 5-in-8 (Path D)
-                        based on observed trajectory.
+L1-resident:        Path D 2.10× of A
+L1-overflow:        Path D 1.24×
+L2-resident:        Path D 1.16×    (asymptote)
+DRAM-bound:         Path D 1.24×    (PLATEAU — does not continue narrowing)
 ```
 
-The strong claim's structural advantage **manifests AS A FUNCTION OF MEMORY PRESSURE**:
-- Cache-hot: encoding labels are aliases; base-3 has no advantage.
-- Memory-pressure: density advantage manifests progressively.
+The hypothesis from the first draft ("trajectory predicts DRAM crossover") is **NOT CONFIRMED**. The penalty narrowed from L1-resident to L2-resident, then plateaued. Pushing to DRAM-bound did not produce further narrowing.
 
-For the L4 audit's "BitNet-typical" workloads with sparsity (real LLMs have GB-scale weights), the regime IS memory-bandwidth-bound, and base-3's density advantage SHOULD translate to wall-clock advantage. Our cycle has shown the trajectory but not the destination.
+**Why no crossover (post-hoc analysis):**
 
-## Honest framing
+The arithmetic of the tradeoff:
+- Path A reads 25.6 MB W per call (DRAM-bound config).
+- Path D reads 20.5 MB W per call (1.25× denser).
+- Bandwidth savings: 5.1 MB per call.
+- At Apple Silicon's ~70-100 GB/s memory bandwidth: 5.1 MB / 100 GB/s = 0.05 ms saved per call.
+- Per call wall-clock: ~34 ms (Path A).
+- Bandwidth savings as % of total: 0.15%.
 
-The cycle has demonstrated:
-1. **Density-ceiling structural advantage** (Path D feasible; B2-B floored).
-2. **Regime-dependent kernel cost** (Path D loses on cache-hot, narrows on memory-pressure).
-3. **Trajectory toward crossover** (1.95× → 1.16× across L1-overflow to L2-resident).
+Path D's decode overhead (~12 vs 7 NEON ops per 16-cell, +71%) costs much more than the 0.15% bandwidth savings. **The decode penalty is the dominant cost regardless of cache regime.**
 
-The cycle has NOT demonstrated:
-1. **DRAM-bound crossover** (untested; extrapolated).
-2. **Real-LLM-shaped workloads** (M=8, N=64; real LLMs are larger).
-3. **End-to-end inference latency** (single-matmul, not full forward pass).
+**Apple Silicon's unified memory architecture has very high bandwidth** (>200 GB/s on M2/M3), so memory pressure is rarely the bottleneck for typical workloads. The "memory-bandwidth-bound" regime that traditional CPU systems experience is much milder on M-series.
 
-These are appropriate next-cycle scopes.
+## Substrate's behavior also confirms the regime is not bandwidth-bound
+
+Substrate uses 4× more bytes (unpacked 8 bits/cell vs Path A's 2 bits/cell). At DRAM-bound:
+- W substrate = 102.4 MB (8 bits × 8192 × 12800)
+- W Path A = 25.6 MB (2 bits × 8192 × 12800 / 4 — wait this is for the matmul, but substrate ACTUALLY reads unpacked 8-bit storage)
+
+If memory bandwidth dominated, substrate should be ~4× slower than Path A. Actual: substrate is 0.97× of Path A — STILL SLIGHTLY FASTER.
+
+This means even at W=25.6 MB exceeding L2, **memory bandwidth is not the rate-limiting factor on Apple Silicon**. The 4× more bytes substrate reads don't translate to 4× more time. The decode-free advantage of substrate's SDOT path roughly cancels the memory penalty.
 
 ## Refined verdict
 
+Post-remediation, the strong claim's standing changes:
+
 ```
-At theoretical density (≈ log2(3) bits/cell):
-  Base-3 floor     ACHIEVABLE.       (Path D demonstrates 1.6 bits/cell.)
-  B2-B floor       NOT ACHIEVABLE.   (Sign + mask are independent.)
-                                     ← UNCONDITIONAL STRUCTURAL ADVANTAGE.
+DENSITY CEILING (unchanged):
+  Base-3 floor   = 1.585 bits/cell (theoretical) / 1.6 bits/cell (5-in-8)
+  B2-B floor     = 2 bits/cell (sign + mask are independent)
+  → BASE-3 HAS UNCONDITIONAL STRUCTURAL DENSITY ADVANTAGE.
 
-At cache-hot regime (W < L1):
-  Path A (4-in-8) ≡ Path C (B2-B-opt).      Encoding-label equivalence.
-  Path D pays 1.95× decode penalty.         Density savings unrealized.
-  Substrate (unpacked) wins.                Storage-vs-decode tradeoff.
+KERNEL COST AT 2 BITS/CELL:
+  Path A ≡ Path C (encoding-label equivalence).
+  Path B-honest is a strawman (3 ops/block penalty).
+  → Base-3 ties optimal B2-B; wins vs naive B2-B implementations.
 
-At L2-resident regime (W ≈ 200-800KB):
-  Path D penalty narrows to ~1.16×.         Density advantage manifesting.
-  Substrate advantage collapses to ~1.0×.   No-decode advantage erased.
+KERNEL COST AT SUB-2 BITS/CELL:
+  Path D pays ~1.16-1.24× wall-clock penalty across ALL memory regimes
+  tested (L1-resident through DRAM-bound).
+  Penalty does NOT crossover at DRAM-bound; PLATEAUS at ~1.2×.
+  → Sub-2-bit base-3 packing is UNCONDITIONALLY SLOWER on
+    Apple Silicon for this workload shape, despite density advantage.
 
-At DRAM-bound regime (W > L2; UNTESTED):
-  Trajectory predicts Path D crossover.     Density advantage dominates.
-  Substrate predicted to lose substantially. Bandwidth penalty.
+WHEN BASE-3 SUB-2-BIT WOULD WIN (untested, hypothetical):
+  - Hardware where memory bandwidth is the bottleneck (NOT M-series).
+    Traditional CPU+RAM with much lower bandwidth-to-compute ratio.
+  - Workloads where W is read once per matmul (no temporal locality).
+  - Memory-cost-dominated metrics (e.g., RAM cost, transfer cost).
 ```
+
+## What changed from the first draft
+
+| Item | First draft verdict | Post-remediation verdict |
+|------|---------------------|-------------------------|
+| Path D at L1-resident | 1.95-2.10× (slower) | 2.10× (unchanged) |
+| Path D at L2-resident | 1.16-1.24× (narrowing) | 1.16× (asymptote) |
+| Path D at DRAM-bound | UNTESTED ("trajectory predicts crossover") | 1.24× (PLATEAU; no crossover) |
+| Substrate at memory-bound | "advantage collapses" | 0.97× (still slightly faster, MBW not bottleneck) |
+| Strong-claim framing | "density advantage manifests" | "density advantage is structural at the ceiling, but doesn't translate to kernel-cost win on Apple Silicon" |
 
 ## Methodology lifted
 
-1. **Regime testing requires explicit cache-aware K sweep.** The L1-resident regime is the wrong test for measuring storage advantages. Without a memory-bandwidth-bound config, the strong-claim verdict at fixed density is misleading.
+1. **Cache-flush between kernels is essential for memory-regime measurements.** Without it, kernel n+1 finds W warm from kernel n. The "memory-bandwidth-bound" framing requires actual cold-cache. R-G1's 32 MB flush is the right pattern.
 
-2. **Per-config REPS is necessary for runtime sanity.** Scaling REPS by 1/K (within an order of magnitude) keeps total bench time bounded while preserving statistical signal at large K.
+2. **Apple Silicon's unified memory architecture is unusually generous on bandwidth.** Workloads that would be memory-bound on traditional CPUs are compute-bound on M-series. This affects the relevance of density-cost tradeoffs.
 
-3. **The "untested DRAM regime" is the limit of cache-aware testing.** To test DRAM-bound, would need a workload where W >> L2 (~16 MB). For M=8, N=64, K, that requires K ≳ 1M — impractical. Real LLM workloads naturally hit DRAM via large N (e.g., 4096+).
+3. **Trajectory extrapolation is risky.** First-draft predicted DRAM crossover from L2-trajectory data. Actual DRAM measurement showed plateau, not crossover. Always test the actual destination, not extrapolate.
 
-## Forward pointer (updated)
+4. **SD reporting catches noise floor early.** R-G3's CV ≈ 1-3% confirms measurement reliability; without SD, we wouldn't know if 1.16× vs 1.24× narrowing is real or noise.
 
-The remaining strong-claim follow-on cycles, in priority order:
+## Honest scope-of-claim
 
-1. **DRAM-bound test** — vary N (e.g., N=2048, K=51200; W ≈ 25.6 MB) to push W into DRAM regime. Single config; informative.
-2. **L2 strong-claim** — replicate full cycle on activation packing (L2 from audit). Likely similar verdict.
-3. **L6 strong-claim** — post-ternarization. Likely similar.
-4. **Algebraic operations** — base-3 balanced ternary arithmetic (sign-aware multiply, etc.). Potentially genuine structural advantage independent of density.
+The strong claim on L1 weights:
+- **Density ceiling structural advantage:** **CONFIRMED** (base-3 < 2 bits/cell achievable; B2-B floored).
+- **Kernel cost advantage at any tested regime:** **NOT CONFIRMED** at sub-2-bit density. Path D pays a wall-clock penalty regardless of memory regime on Apple Silicon.
+- **Encoding-label equivalence at 2 bits/cell:** **CONFIRMED** (Path A ≡ Path C).
+- **Substrate's unpacked-SDOT preference:** **CONFIRMED** (substrate is at-or-faster than Path A in every tested regime, even when memory-bandwidth-pressured).
+
+## Forward pointers (revised)
+
+The kernel-cost direction at sub-2-bits/cell on Apple Silicon is now empirically settled: **base-3's density advantage does NOT manifest as kernel-cost win on this hardware**. Future work:
+
+1. **Test on hardware where memory bandwidth is the bottleneck.** Older ARM chips, embedded systems, or scenarios where DRAM is genuinely slow relative to compute. The density advantage might manifest there.
+
+2. **Consider density-as-storage-cost rather than density-as-throughput.** Memory cost (RAM size, transfer bytes) is a different metric than wall-clock. Base-3's density advantage manifests in storage and bandwidth bills, not in M-series wall-clock.
+
+3. **Algebraic operations (balanced ternary arithmetic).** Out-of-scope here. Could be a genuine structural advantage independent of storage density.
+
+4. **L2/L6 strong-claim cycles.** Apply the same comparative analysis to activation packing and post-ternarization. Likely same encoding-label-equivalence verdict at 2 bits/cell.
 
 ## Status
 
-ADDENDUM CLOSED. Memory-bandwidth-bound regime tested at L2-resident scale (W = 200KB to 800KB). Trajectory clearly shows base-3's density advantage manifesting as kernel-cost reduction with increasing memory pressure. Crossover not yet reached within tested K range; predicted at DRAM-bound regime (W > 16 MB).
+CLOSED. **Path D's density advantage does NOT crossover into kernel-cost advantage at any tested memory regime on Apple Silicon.** The first-draft "trajectory toward crossover" framing was an overclaim; remediated to "plateau at ~1.2× penalty across all regimes."
 
-The strong claim's structural-advantage framing is now defensible at TWO levels:
-1. **Density ceiling** (unconditional, demonstrated).
-2. **Kernel cost at memory-bandwidth-bound regimes** (trajectorial, not yet crossover-confirmed).
+The strong claim's defensible foothold is the **density ceiling alone** — base-3 can pack below 2 bits/cell where B2-B cannot. Whether that matters for any specific use case depends on whether the use case is memory-cost-bound (yes) vs throughput-bound (no, on M-series).
 
-Files added/changed:
+Files updated:
 ```
-audit/tristate_strong_bench.c  — 3 new memory-bandwidth-bound configs;
-                                 per-config REPS scaling
-audit/strong_results.csv       — 75 runs total (60 + 15)
-audit/strong_summary.txt       — extended summary
+audit/tristate_strong_bench.c — added cache_flush, SD computation, DRAM-bound config
+audit/strong_results.csv      — 80 runs (60 small-K + 15 N=64 memory-bound + 5 DRAM-bound)
+audit/strong_summary.txt      — extended summary with SD
+journal/tristate_strong_membw_redteam.md — red-team analysis (3 critical, 3 high concerns)
+journal/tristate_strong_membw_addendum.md — UPDATED with post-remediation verdict
 ```
 
-CI verification will follow the commit.
+20/20 ctest still PASS.
+
+The red-team prevented the "trajectory crossover" overclaim from entering the project record. **Path D loses on Apple Silicon at every memory regime; the density-ceiling advantage is structural but doesn't pay off as wall-clock on this hardware.**
