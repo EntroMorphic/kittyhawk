@@ -226,31 +226,6 @@ static void matmul_ternary_with_optional_l3_collapse(
     }
 }
 
-/* L4 collapse: replace each Y[i] == 0 with a random ±median-magnitude value.
- * The magnitude substituted is the median of |Y[Y!=0]|. */
-static void l4_collapse(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int n, rng_t* r) {
-    /* Compute median of non-zero |Y| */
-    int* nonzero_abs = (int*)malloc((size_t)n * sizeof(int));
-    int nz = 0;
-    for (int i = 0; i < n; i++) {
-        if (src[i] != 0) {
-            int v = src[i];
-            nonzero_abs[nz++] = (v < 0) ? -v : v;
-        }
-    }
-    int sub = 1;
-    if (nz > 0) {
-        qsort(nonzero_abs, (size_t)nz, sizeof(int), int_cmp_asc);
-        sub = nonzero_abs[nz / 2];
-        if (sub == 0) sub = 1;
-    }
-    free(nonzero_abs);
-    for (int i = 0; i < n; i++) {
-        if (src[i] == 0) dst[i] = (m4t_mtfp_t)(rng_sign(r) * sub);
-        else             dst[i] = src[i];
-    }
-}
-
 /* ── 2-layer forward pass ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -435,15 +410,17 @@ static RunResult run_one(const Config* cfg, uint32_t seed) {
     }
     r.cos_l3 = cosine_sim_int(w_native.Y2, w_test.Y2, M * P);
 
-    /* L4 collapse: native layer 1, replace Y1 zeros with random ±median |Y1|,
-     * then continue with the patched Y1 through ternarize and layer 2. */
-    matmul_ternary_with_optional_l3_collapse(
-        w_test.Y1, w_native.X1, w_native.W1, M, K, N, NULL);
-    {
-        m4t_mtfp_t* y1_collapsed = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
-        l4_collapse(y1_collapsed, w_test.Y1, M * N, &rng);
-        ternarize_quantile(w_test.X2, y1_collapsed, M * N, cfg->act_zero_frac);
-        free(y1_collapsed);
+    /* L4 collapse (per redteam C1 remediation): override-after-ternarize.
+     * Native ternarize on native Y1 to get the would-be X2, then for cells
+     * where Y1 was exactly zero, force X2 to ±1 (random). This bypasses the
+     * threshold-reabsorption artifact of the prior median-substitute design
+     * and directly tests "if exact-zero L4 mantissas were forced non-zero
+     * downstream, would Y2 change?" */
+    ternarize_quantile(w_test.X2, w_native.Y1, M * N, cfg->act_zero_frac);
+    for (int i = 0; i < M * N; i++) {
+        if (w_native.Y1[i] == 0) {
+            w_test.X2[i] = (m4t_trit_t)rng_sign(&rng);
+        }
     }
     matmul_ternary_with_optional_l3_collapse(
         w_test.Y2, w_test.X2, w_native.W2, M, N, P, NULL);
