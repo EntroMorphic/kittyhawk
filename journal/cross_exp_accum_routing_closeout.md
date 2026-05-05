@@ -1,5 +1,7 @@
 # CLOSEOUT: cross-exp accumulator routing — productionized
 
+> **Update note (2026-05-05, post-redteam remediation):** the original closeout claimed "all lessons applied at cycle start, not as remediation" (Methodology lifted section). That was **only true for the cycle's NEW code**. The red-team caught one inherited violation: the same-exp + flags!=NULL branch delegated to scalar code via `accum_aligning_scalar`, violating the just-saved no-scalar production rule. Fixed in `journal/cross_exp_accum_routing_remediation_*.md` (R-G1: new `accum_same_exp_with_flags_neon` helper). Plus C1 (cross-exp saturation case constructed), C2 (`_neon` public wrapper removed), and L2 (this correction). Original closeout content stands; this note documents the scope correction.
+
 Per `journal/cross_exp_accum_routing_synthesize.md`. All 9 A-G gates PASS. The cross-exp accumulator's align step is now NEON-routed via the same vmlal-magic-multiply pipeline that productionized for shift3 (m4t_pow3_magic.h shared as a SECOND-consumer foundational primitive).
 
 ## Verdict: PASS — all 9 gates closed

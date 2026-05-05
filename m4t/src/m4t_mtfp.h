@@ -231,18 +231,9 @@ void m4t_mtfp_vec_accum_aligning_scalar_ref(
     int               n
 );
 
-/* A-G3 prototype: NEON-routed accumulator. Same semantics as
- * m4t_mtfp_vec_accum_aligning. Public during the verification cycle so
- * the bit-exact gate can compare prototype-NEON vs scalar_ref. Will be
- * merged into m4t_mtfp_vec_accum_aligning's dispatcher at A-G7. */
-void m4t_mtfp_vec_accum_aligning_neon(
-    m4t_mtfp_t*       running,
-    int8_t*           running_exp,
-    const m4t_mtfp_t* addend,
-    int8_t            addend_exp,
-    uint8_t*          flags,
-    int               n
-);
+/* (R-G3 remediation: removed m4t_mtfp_vec_accum_aligning_neon prototype
+ * wrapper. Its body is now inlined directly into the production
+ * m4t_mtfp_vec_accum_aligning dispatcher.) */
 
 /* Convenience pairwise wrapper. dst gets a + b at exponent
  * max(e_a, e_b), with rounding/saturation flags.

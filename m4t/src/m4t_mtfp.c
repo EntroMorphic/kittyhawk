@@ -177,6 +177,54 @@ static void accum_aligning_scalar(
     int n);
 
 #if M4T_HAS_NEON
+/* R-G1 (cross_exp_accum_routing remediation): NEON same-exp accumulate
+ * with flag tracking. Replaces the prior scalar fallback when same-exp
+ * + flags!=NULL — that path violated the no-scalar production rule.
+ *
+ * Pipeline per 4 cells: vaddq_s32 + min/max clamp + cmeq for SATURATED
+ * reconstruction + per-lane flag OR. Stays in int32 throughout (sum
+ * bounded by 2*MAX_VAL ≈ 1.16e9 < INT32_MAX). No ROUNDED bit (no
+ * divide).
+ *
+ * For same-exp + flags==NULL, the dispatcher continues to call
+ * vec_add_inplace (already NEON-fast); this helper exists for the
+ * flags!=NULL path. */
+static void accum_same_exp_with_flags_neon(
+    m4t_mtfp_t* running,
+    const m4t_mtfp_t* addend,
+    uint8_t* flags,
+    int n)
+{
+    int32x4_t pos_max = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    int32x4_t neg_max = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
+
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t a = vld1q_s32(running + i);
+        int32x4_t b = vld1q_s32(addend + i);
+        int32x4_t sum = vaddq_s32(a, b);
+        int32x4_t clamped = vminq_s32(vmaxq_s32(sum, neg_max), pos_max);
+        uint32x4_t sat_mask = vmvnq_u32(vceqq_s32(sum, clamped));
+        vst1q_s32(running + i, clamped);
+
+        uint32_t s0 = vgetq_lane_u32(sat_mask, 0);
+        uint32_t s1 = vgetq_lane_u32(sat_mask, 1);
+        uint32_t s2 = vgetq_lane_u32(sat_mask, 2);
+        uint32_t s3 = vgetq_lane_u32(sat_mask, 3);
+        if (s0) m4t_flag_or(flags, i + 0, M4T_FLAG_SATURATED);
+        if (s1) m4t_flag_or(flags, i + 1, M4T_FLAG_SATURATED);
+        if (s2) m4t_flag_or(flags, i + 2, M4T_FLAG_SATURATED);
+        if (s3) m4t_flag_or(flags, i + 3, M4T_FLAG_SATURATED);
+    }
+    /* Scalar tail for n not multiple of 4 (geometric, not a "fallback"). */
+    for (; i < n; i++) {
+        int64_t sum = (int64_t)running[i] + (int64_t)addend[i];
+        m4t_mtfp_t out = m4t_mtfp_clamp64(sum);
+        if (sum != (int64_t)out) m4t_flag_or(flags, i, M4T_FLAG_SATURATED);
+        running[i] = out;
+    }
+}
+
 /* A-G3 prototype: fused NEON inner loop for the cross-exp align+add+clamp.
  * Routes the divide step through the same vmlal_s32 magic-multiply
  * pipeline that productionized for shift3 (m4t_pow3_magic.h is shared).
@@ -292,18 +340,64 @@ void m4t_mtfp_vec_accum_aligning(
     uint8_t* flags,
     int n)
 {
-    /* A-G7 productionized: dispatch to NEON path. Per
-     * journal/cross_exp_accum_routing_synthesize.md and project rule
-     * (feedback_function_over_speed_no_scalar): production NEON-only,
-     * no scalar fallback in production dispatch. m4t_mtfp_vec_accum_aligning_neon
-     * handles all branches (same-exp via the existing scalar->vec_add_inplace
-     * delegation, cross-exp via the NEON helper, degenerate-delta via memcpy).
+    /* Production NEON-only dispatcher per project rule
+     * (feedback_function_over_speed_no_scalar). Three branches:
+     *   - same-exp: vec_add_inplace (flags=NULL) or
+     *                accum_same_exp_with_flags_neon (flags!=NULL).
+     *   - cross-exp non-degenerate: accum_aligning_neon_block.
+     *   - cross-exp degenerate (|delta|>=20): scalar memcpy/no-op
+     *     with per-cell flag annotation (kept scalar — per-cell
+     *     conditional flag work doesn't NEON-ize cleanly and the
+     *     branch is a degenerate edge case).
      *
-     * The accum_aligning_scalar helper remains in this file as the
-     * implementation behind m4t_mtfp_vec_accum_aligning_scalar_ref (test
-     * oracle only). */
-    m4t_mtfp_vec_accum_aligning_neon(running, running_exp, addend, addend_exp,
-                                      flags, n);
+     * The accum_aligning_scalar helper remains as the implementation
+     * behind m4t_mtfp_vec_accum_aligning_scalar_ref (test oracle only). */
+    assert(n >= 0);
+    assert(n == 0 || (running && addend));
+    assert(running_exp);
+    if (n == 0) return;
+    assert(running != addend);
+
+    int8_t e_run = *running_exp;
+
+    if (addend_exp == e_run) {
+        if (flags == NULL) {
+            m4t_mtfp_vec_add_inplace(running, addend, n);
+        } else {
+            accum_same_exp_with_flags_neon(running, addend, flags, n);
+        }
+        return;
+    }
+
+    if (addend_exp > e_run) {
+        int delta = (int)addend_exp - (int)e_run;
+        if (delta >= 20) {
+            /* Degenerate: running rounds to zero. Result = addend. */
+            for (int i = 0; i < n; i++) {
+                if (flags && running[i] != 0) {
+                    m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
+                }
+                running[i] = addend[i];
+            }
+            *running_exp = addend_exp;
+            return;
+        }
+        accum_aligning_neon_block(running, running, addend, delta, n, flags);
+        *running_exp = addend_exp;
+        return;
+    }
+
+    /* addend_exp < e_run: divide addend by 3^delta, add to running. */
+    int delta = (int)e_run - (int)addend_exp;
+    if (delta >= 20) {
+        if (flags) {
+            for (int i = 0; i < n; i++) {
+                if (addend[i] != 0) m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
+            }
+        }
+        return;
+    }
+    accum_aligning_neon_block(running, addend, running, delta, n, flags);
 }
 
 /* Public scalar-only reference for test verification. Never dispatches
@@ -315,74 +409,6 @@ void m4t_mtfp_vec_accum_aligning_scalar_ref(
     int n)
 {
     accum_aligning_scalar(running, running_exp, addend, addend_exp, flags, n);
-}
-
-/* A-G3 prototype wrapper. Dispatches the cross-exp branches to the
- * NEON helper; same-exp branch and degenerate-delta branches stay
- * scalar (they're already optimal: same-exp uses block_add NEON, and
- * degenerate-delta is a memcpy/memset with flag annotation).
- * Will be merged into m4t_mtfp_vec_accum_aligning at A-G7. */
-void m4t_mtfp_vec_accum_aligning_neon(
-    m4t_mtfp_t* running, int8_t* running_exp,
-    const m4t_mtfp_t* addend, int8_t addend_exp,
-    uint8_t* flags,
-    int n)
-{
-    /* No `#if !M4T_HAS_NEON ... fall back to scalar ...` branch here:
-     * production NEON-only per project rule (memory:
-     * feedback_function_over_speed_no_scalar). CMake configure requires
-     * aarch64+NEON; non-NEON builds error out at configure. The
-     * helper-isolation #if guard wraps accum_aligning_neon_block below
-     * so the source still parses if someone hypothetically attempts a
-     * non-NEON build, but the public dispatcher does not have a scalar
-     * fallback. */
-    assert(n >= 0);
-    assert(n == 0 || (running && addend));
-    assert(running_exp);
-    if (n == 0) return;
-    assert(running != addend);
-
-    int8_t e_run = *running_exp;
-
-    /* Same-exp branch: delegate to existing scalar impl (it already
-     * dispatches to vec_add_inplace NEON for flags==NULL). */
-    if (addend_exp == e_run) {
-        accum_aligning_scalar(running, running_exp, addend, addend_exp, flags, n);
-        return;
-    }
-
-    if (addend_exp > e_run) {
-        int delta = (int)addend_exp - (int)e_run;
-        if (delta >= 20) {
-            /* Degenerate: running rounds to zero. Result = addend.
-             * Stay scalar — flag work is per-cell conditional, copy is
-             * memcpy, NEON wouldn't help. */
-            for (int i = 0; i < n; i++) {
-                if (flags && running[i] != 0) {
-                    m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
-                }
-                running[i] = addend[i];
-            }
-            *running_exp = addend_exp;
-            return;
-        }
-        /* NEON path: divide running by 3^delta, add addend, store in running. */
-        accum_aligning_neon_block(running, running, addend, delta, n, flags);
-        *running_exp = addend_exp;
-        return;
-    }
-
-    /* addend_exp < e_run: divide addend by 3^delta, add to running, store in running. */
-    int delta = (int)e_run - (int)addend_exp;
-    if (delta >= 20) {
-        if (flags) {
-            for (int i = 0; i < n; i++) {
-                if (addend[i] != 0) m4t_flag_or(flags, i, M4T_FLAG_ROUNDED);
-            }
-        }
-        return;
-    }
-    accum_aligning_neon_block(running, addend, running, delta, n, flags);
 }
 
 static void accum_aligning_scalar(

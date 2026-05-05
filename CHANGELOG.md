@@ -4,6 +4,25 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — cross-exp accum routing red-team remediation (8 R-G gates PASS)
+Per `journal/cross_exp_accum_routing_redteam.md` and `..._remediation_*.md`. The red-team caught 10 findings — load-bearing one was a violation of the just-saved no-scalar production rule (same-exp + flags!=NULL fell back to scalar via inherited code path). All closed.
+
+- **R-G1 (H1 fix — no-scalar rule violation):** new `accum_same_exp_with_flags_neon` static helper. Pipeline per 4 cells: vaddq_s32 + min/max clamp + cmeq for SATURATED + per-lane flag OR. Stays in int32 throughout. The dispatcher now: same-exp + flags=NULL → vec_add_inplace (existing); same-exp + flags!=NULL → new helper (NEW). Cross-exp branches unchanged. **No scalar fallback in production for any (delta, flags) combination.**
+- **R-G2 (C1 cross-exp saturation):** added 2 cross-exp saturation cases (delta=1, running=±MAX_VAL aligned to ±MAX_VAL/3, addend=±MAX_VAL → sum overflows MAX_VAL → clamp). Both PASS, saturation actually triggered, NEON matches scalar (output + SATURATED flag).
+- **R-G3 (C2 _neon API cleanup):** removed `m4t_mtfp_vec_accum_aligning_neon` from public API. Body inlined directly into `m4t_mtfp_vec_accum_aligning`. Test calls updated to production function. Cleaner public surface.
+- **R-G4 (M1 dispatcher inlining):** `otool -tv` shows `bl _accum_aligning_neon_block` in the dispatcher (1 call site; compiler merged the two cross-exp branches). Helper not inlined. ~5-10 cycle per-call overhead. Documented; not a fix-needed.
+- **R-G5 (L2 closeout correction):** original closeout claimed "all lessons applied at cycle start." Amended with header note documenting that the H1 inherited violation was scope-missed. Original analysis preserved; correction appended.
+- **R-G6 (H2 + audit-time rule, methodology lifts):** CONTRIBUTING.md throughput-microbench-discipline checklist extended:
+  - "REFLECT NEON-vs-scalar speedup estimates should bound by compiler auto-vectorization of the scalar baseline" — concrete example: this cycle's REFLECT estimated 12-20×; measured 1.6-6× because compiler vectorized scalar.
+  - NEW post-commit checklist item "No-scalar audit": apply the no-scalar rule at AUDIT time to inherited code, not just to new code. List every function the new dispatcher delegates to; verify each is NEON-only in production. The cross-exp cycle's H1 was the lesson: rule was applied to NEW code only.
+- **20/20 ctest PASS.** All 1030+ bit-exact configurations still match (curated + 1000 random + saturation-edge same-exp + saturation-edge cross-exp NEW). 3 production binaries identical.
+
+### Methodology lifted from cross-exp accum remediation
+- **Audit-time application of the no-scalar rule.** Project rule (no scalar in production) must be checked against every function the dispatcher delegates to, not just the new code. Inherited fallback patterns are the dangerous ones; they're easy to miss.
+- **REFLECT estimates of NEON-vs-scalar speedup must account for compiler auto-vectorization.** Treat the scalar baseline as "what -O3 actually emits," not "what hand-written naive scalar would do." Estimates that don't account for this overshoot by 2-4×.
+- **Saturation-edge tests should cover EVERY branch.** Don't skip the "harder-to-construct" branch — constructed cross-exp saturation (delta=1, MAX_VAL inputs) is straightforward and worth the lines of code.
+- **Productionization removes the prototype wrapper.** Any `_neon` / `_vmlal` / `_path` prototype function ships gets folded into the dispatcher at productionization, not left in the public API as a courtesy. The cross-exp cycle initially missed this; remediation cleaned up.
+
 ### Added — cross-exp accumulator routing through vmlal_s32 (9 A-G gates PASS)
 Per `journal/cross_exp_accum_routing_{raw,nodes,reflect,synthesize,closeout}.md`. The user named per-block-exponent management as "software doing the work of hardware" — the ternary equivalent of an IEEE FPU's internal align+round step. Cycle scope: compose existing shift3-divide pipeline + block_add into a fused accumulator inner loop.
 

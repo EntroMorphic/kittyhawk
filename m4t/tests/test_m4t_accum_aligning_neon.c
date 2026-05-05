@@ -1,6 +1,6 @@
 /*
  * test_m4t_accum_aligning_neon.c — bit-exact verification of the
- * NEON-routed cross-exp accumulator (m4t_mtfp_vec_accum_aligning_neon)
+ * NEON-routed cross-exp accumulator (m4t_mtfp_vec_accum_aligning)
  * against the scalar oracle (m4t_mtfp_vec_accum_aligning_scalar_ref).
  *
  * Both OUTPUT and BOTH FLAG BITS (ROUNDED + SATURATED) must match.
@@ -57,7 +57,7 @@ static void test_config_v(int n, int e_run, int e_addend, uint32_t seed,
     int8_t e_neon = (int8_t)e_run;
     int8_t e_ref  = (int8_t)e_run;
 
-    m4t_mtfp_vec_accum_aligning_neon       (running_neon, &e_neon, addend, (int8_t)e_addend, flags_neon, n);
+    m4t_mtfp_vec_accum_aligning       (running_neon, &e_neon, addend, (int8_t)e_addend, flags_neon, n);
     m4t_mtfp_vec_accum_aligning_scalar_ref (running_ref,  &e_ref,  addend, (int8_t)e_addend, flags_ref,  n);
 
     int local_fails = 0;
@@ -126,7 +126,7 @@ static void test_saturation(void) {
         addend[i] = M4T_MTFP_MAX_VAL;
     }
     int8_t e_n = 0, e_r = 0;
-    m4t_mtfp_vec_accum_aligning_neon(running_neon, &e_n, addend, 0, flags_neon, n);
+    m4t_mtfp_vec_accum_aligning(running_neon, &e_n, addend, 0, flags_neon, n);
     m4t_mtfp_vec_accum_aligning_scalar_ref(running_ref, &e_r, addend, 0, flags_ref, n);
     int sat1 = (memcmp(running_neon, running_ref, sizeof(m4t_mtfp_t)*n) == 0)
             && (memcmp(flags_neon, flags_ref, n_flag_bytes) == 0);
@@ -155,13 +155,68 @@ static void test_saturation(void) {
         addend[i] = -M4T_MTFP_MAX_VAL;
     }
     e_n = 0; e_r = 0;
-    m4t_mtfp_vec_accum_aligning_neon(running_neon, &e_n, addend, 0, flags_neon, n);
+    m4t_mtfp_vec_accum_aligning(running_neon, &e_n, addend, 0, flags_neon, n);
     m4t_mtfp_vec_accum_aligning_scalar_ref(running_ref, &e_r, addend, 0, flags_ref, n);
     int sat2 = (memcmp(running_neon, running_ref, sizeof(m4t_mtfp_t)*n) == 0)
             && (memcmp(flags_neon, flags_ref, n_flag_bytes) == 0);
     printf("  same-exp negative sat (all=-MAX_VAL+-MAX_VAL→clamp): %s\n",
            sat2 ? "PASS" : "FAIL");
     if (!sat2) g_fails++;
+
+    /* R-G2: cross-exp saturation. Construct a config where post-add
+     * sum exceeds MAX_VAL on the cross-exp branch.
+     *   running[i] = MAX_VAL (will be aligned down to MAX_VAL/3 ≈ 1.94e8)
+     *   addend[i]  = MAX_VAL (un-aligned, kept at MAX_VAL ≈ 5.81e8)
+     *   delta = 1 (running aligned by /3)
+     *   sum = MAX_VAL/3 + MAX_VAL ≈ 7.75e8 > MAX_VAL → clamps to MAX_VAL.
+     * Verify both NEON and scalar produce same clamp + same SATURATED bit. */
+    memset(flags_neon, 0, n_flag_bytes);
+    memset(flags_ref, 0, n_flag_bytes);
+    for (int i = 0; i < n; i++) {
+        running_neon[i] = M4T_MTFP_MAX_VAL;
+        running_ref[i]  = M4T_MTFP_MAX_VAL;
+        addend[i]       = M4T_MTFP_MAX_VAL;
+    }
+    /* delta=1: addend_exp > running_exp by 1 → divide running by 3. */
+    e_n = 0; e_r = 0;
+    int8_t addend_exp_3 = 1;
+    m4t_mtfp_vec_accum_aligning           (running_neon, &e_n, addend, addend_exp_3, flags_neon, n);
+    m4t_mtfp_vec_accum_aligning_scalar_ref(running_ref,  &e_r, addend, addend_exp_3, flags_ref,  n);
+    int sat3 = (memcmp(running_neon, running_ref, sizeof(m4t_mtfp_t)*n) == 0)
+            && (memcmp(flags_neon, flags_ref, n_flag_bytes) == 0);
+    /* Verify saturation actually triggered on at least one cell. */
+    int sat3_triggered = 0;
+    for (int i = 0; i < n; i++) {
+        if (m4t_flag_test(flags_ref, i, M4T_FLAG_SATURATED)) {
+            sat3_triggered = 1; break;
+        }
+    }
+    printf("  cross-exp positive sat (MAX/3+MAX→clamp, delta=1)  : %s%s\n",
+           sat3 ? "PASS" : "FAIL",
+           sat3_triggered ? "  (sat triggered)" : "  (sat NOT triggered ?!)");
+    if (!sat3) g_fails++;
+
+    /* R-G2 negative variant: cross-exp negative saturation. */
+    memset(flags_neon, 0, n_flag_bytes);
+    memset(flags_ref, 0, n_flag_bytes);
+    for (int i = 0; i < n; i++) {
+        running_neon[i] = -M4T_MTFP_MAX_VAL;
+        running_ref[i]  = -M4T_MTFP_MAX_VAL;
+        addend[i]       = -M4T_MTFP_MAX_VAL;
+    }
+    e_n = 0; e_r = 0;
+    m4t_mtfp_vec_accum_aligning           (running_neon, &e_n, addend, addend_exp_3, flags_neon, n);
+    m4t_mtfp_vec_accum_aligning_scalar_ref(running_ref,  &e_r, addend, addend_exp_3, flags_ref,  n);
+    int sat4 = (memcmp(running_neon, running_ref, sizeof(m4t_mtfp_t)*n) == 0)
+            && (memcmp(flags_neon, flags_ref, n_flag_bytes) == 0);
+    int sat4_triggered = 0;
+    for (int i = 0; i < n; i++) {
+        if (m4t_flag_test(flags_ref, i, M4T_FLAG_SATURATED)) { sat4_triggered = 1; break; }
+    }
+    printf("  cross-exp negative sat (-MAX/3+-MAX→clamp, delta=1) : %s%s\n",
+           sat4 ? "PASS" : "FAIL",
+           sat4_triggered ? "  (sat triggered)" : "  (sat NOT triggered ?!)");
+    if (!sat4) g_fails++;
 }
 
 /* Random stress: 1000 random configurations. */
@@ -195,7 +250,7 @@ static int run_alias_violation(void) {
     enum { N = 16 };
     m4t_mtfp_t buf[N] = {0};
     int8_t e = 0;
-    m4t_mtfp_vec_accum_aligning_neon(buf, &e, buf, 5, NULL, N);
+    m4t_mtfp_vec_accum_aligning(buf, &e, buf, 5, NULL, N);
     fprintf(stderr, "FAIL: kernel did not abort on running==addend\n");
     return 1;
 }
@@ -250,7 +305,7 @@ static void perf_compare(int n, int delta, int with_flags, int iters,
                          const char* shape) {
     double scalar_ns = bench_one(m4t_mtfp_vec_accum_aligning_scalar_ref,
                                   n, delta, with_flags, iters);
-    double neon_ns   = bench_one(m4t_mtfp_vec_accum_aligning_neon,
+    double neon_ns   = bench_one(m4t_mtfp_vec_accum_aligning,
                                   n, delta, with_flags, iters);
     printf("  shape=%-18s n=%4d delta=%2d flags=%d : scalar=%.2f ns/cell  neon=%.2f ns/cell  speedup=%.1fx\n",
            shape, n, delta, with_flags, scalar_ns, neon_ns, scalar_ns / neon_ns);
