@@ -71,3 +71,7 @@ add_subdirectory(m4t)
 # Phase A.1 ships forward-pass + synthetic benchmark; Phase A.2 will add
 # lattice-update training. See gesh/README.md.
 add_subdirectory(gesh)
+
+# audit/ — science deliverables (measurement tools, not tests).
+# Per journal/tristate_op_synthesize.md.
+add_subdirectory(audit)
