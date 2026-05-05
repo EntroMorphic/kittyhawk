@@ -12,6 +12,7 @@
 
 #include <arm_neon.h>
 #include <string.h>
+#include <stdlib.h>
 #include <assert.h>
 
 /* ── Common decode constants (mirror substrate m4t_ternary_matmul.c) ───── */
@@ -54,40 +55,6 @@ static const int8_t TRIT5_DECODE_LUT[16] __attribute__((aligned(16))) = {
      0,  1, -1,  0,
      0,  1, -1,  0,
 };
-
-/* X-gather index vectors for the 5-in-8 kernel. Each digit's 16 lanes
- * are at strided trit positions (stride 5, offset by digit index).
- * For lanes with index >= 64 we use the secondary gather from xc4. */
-static const uint8_t IDX_D0[16] __attribute__((aligned(16))) =
-    {0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75};
-static const uint8_t IDX_D1[16] __attribute__((aligned(16))) =
-    {1,6,11,16,21,26,31,36,41,46,51,56,61,66,71,76};
-static const uint8_t IDX_D2[16] __attribute__((aligned(16))) =
-    {2,7,12,17,22,27,32,37,42,47,52,57,62,67,72,77};
-static const uint8_t IDX_D3[16] __attribute__((aligned(16))) =
-    {3,8,13,18,23,28,33,38,43,48,53,58,63,68,73,78};
-static const uint8_t IDX_D4[16] __attribute__((aligned(16))) =
-    {4,9,14,19,24,29,34,39,44,49,54,59,64,69,74,79};
-
-/* Secondary indices for lanes >= 64 (looking into xc4 = X[64..79]).
- * Each digit d's last 3 lanes (or 4 for d4) hold X positions in xc4. */
-static const uint8_t IDX_D0_HI[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0,0, 1, 6, 11};
-static const uint8_t IDX_D1_HI[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0,0, 2, 7, 12};
-static const uint8_t IDX_D2_HI[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0,0, 3, 8, 13};
-static const uint8_t IDX_D3_HI[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0,0, 4, 9, 14};
-static const uint8_t IDX_D4_HI[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0, 0, 5, 10, 15};
-
-/* Predicates: which lanes use xc4 (set bits) vs the tbl0123 lookup.
- * d0-d3: lanes 13-15 are >= 64. d4: lanes 12-15 are >= 64. */
-static const uint8_t PRED_HI3[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0,0, 0xFF, 0xFF, 0xFF};
-static const uint8_t PRED_HI4[16] __attribute__((aligned(16))) =
-    {0,0,0,0,0,0,0,0,0,0,0,0, 0xFF, 0xFF, 0xFF, 0xFF};
 
 /* B2-B unified value LUT (Path C). Indexed by 2-bit B2-B code:
  *   0b00 (mask=0, sign=0) → +1
@@ -348,25 +315,35 @@ void base3_5in8_matmul_neon(
     assert((const void*)Y != (const void*)W_packed_5in8);
 
     int Kp = K / 5;  /* bytes per row */
+    int K5 = K / 5;  /* length of each strided X array */
 
     const int8x16_t  lut       = vld1q_s8(TRIT5_DECODE_LUT);
     const uint8x16_t three_v   = vdupq_n_u8(3);
 
-    const uint8x16_t idx_d0    = vld1q_u8(IDX_D0);
-    const uint8x16_t idx_d1    = vld1q_u8(IDX_D1);
-    const uint8x16_t idx_d2    = vld1q_u8(IDX_D2);
-    const uint8x16_t idx_d3    = vld1q_u8(IDX_D3);
-    const uint8x16_t idx_d4    = vld1q_u8(IDX_D4);
-    const uint8x16_t idx_d0_hi = vld1q_u8(IDX_D0_HI);
-    const uint8x16_t idx_d1_hi = vld1q_u8(IDX_D1_HI);
-    const uint8x16_t idx_d2_hi = vld1q_u8(IDX_D2_HI);
-    const uint8x16_t idx_d3_hi = vld1q_u8(IDX_D3_HI);
-    const uint8x16_t idx_d4_hi = vld1q_u8(IDX_D4_HI);
-    const uint8x16_t pred_hi3  = vld1q_u8(PRED_HI3);
-    const uint8x16_t pred_hi4  = vld1q_u8(PRED_HI4);
+    /* P0-1 optimization: pre-permute X[i, :] into 5 strided arrays once per
+     * row i. The inner-loop SDOT then uses contiguous vld1q_s8 against
+     * X_strided[d] instead of the prior vqtbl4q + vqtbl1q + vbslq gather.
+     * Permutation cost: K bytes/row (amortized across N j-iterations) =
+     * O(1/N) ≈ 1.6% overhead at N=64. */
+    int8_t* X_strided = (int8_t*)malloc((size_t)K);
+    if (!X_strided) return;  /* defensive; K is small so this rarely fails */
+    int8_t* X_d[5];
+    for (int d = 0; d < 5; d++) {
+        X_d[d] = X_strided + (size_t)d * K5;
+    }
 
     for (int i = 0; i < M; i++) {
         const int8_t* xi = X + (size_t)i * K;
+
+        /* Permute this row of X into 5 stride-aligned arrays. */
+        for (int n = 0; n < K5; n++) {
+            X_d[0][n] = xi[5 * n + 0];
+            X_d[1][n] = xi[5 * n + 1];
+            X_d[2][n] = xi[5 * n + 2];
+            X_d[3][n] = xi[5 * n + 3];
+            X_d[4][n] = xi[5 * n + 4];
+        }
+
         for (int j = 0; j < N; j++) {
             const uint8_t* wj = W_packed_5in8 + (size_t)j * Kp;
             int32x4_t acc = vdupq_n_s32(0);
@@ -420,38 +397,15 @@ void base3_5in8_matmul_neon(
                 /* Digit 4: b is now in [0, 2]; direct lookup. */
                 d4 = vqtbl1q_s8(lut, b);
 
-                /* Load 80 X bytes into 5 vectors. */
-                int8x16_t xc0 = vld1q_s8(xi + k);
-                int8x16_t xc1 = vld1q_s8(xi + k + 16);
-                int8x16_t xc2 = vld1q_s8(xi + k + 32);
-                int8x16_t xc3 = vld1q_s8(xi + k + 48);
-                int8x16_t xc4 = vld1q_s8(xi + k + 64);
-
-                /* X gather: each digit's lanes are at strided positions
-                 * {d, 5+d, 10+d, ..., 75+d}. Use vqtbl4q over xc0..xc3
-                 * (covers indices 0..63); supplement with vqtbl1q over xc4
-                 * for indices >= 64. */
-                int8x16x4_t tbl0123 = { { xc0, xc1, xc2, xc3 } };
-
-                int8x16_t xv0_lo = vqtbl4q_s8(tbl0123, idx_d0);
-                int8x16_t xv0_hi = vqtbl1q_s8(xc4, idx_d0_hi);
-                int8x16_t xv0 = vbslq_s8(pred_hi3, xv0_hi, xv0_lo);
-
-                int8x16_t xv1_lo = vqtbl4q_s8(tbl0123, idx_d1);
-                int8x16_t xv1_hi = vqtbl1q_s8(xc4, idx_d1_hi);
-                int8x16_t xv1 = vbslq_s8(pred_hi3, xv1_hi, xv1_lo);
-
-                int8x16_t xv2_lo = vqtbl4q_s8(tbl0123, idx_d2);
-                int8x16_t xv2_hi = vqtbl1q_s8(xc4, idx_d2_hi);
-                int8x16_t xv2 = vbslq_s8(pred_hi3, xv2_hi, xv2_lo);
-
-                int8x16_t xv3_lo = vqtbl4q_s8(tbl0123, idx_d3);
-                int8x16_t xv3_hi = vqtbl1q_s8(xc4, idx_d3_hi);
-                int8x16_t xv3 = vbslq_s8(pred_hi3, xv3_hi, xv3_lo);
-
-                int8x16_t xv4_lo = vqtbl4q_s8(tbl0123, idx_d4);
-                int8x16_t xv4_hi = vqtbl1q_s8(xc4, idx_d4_hi);
-                int8x16_t xv4 = vbslq_s8(pred_hi4, xv4_hi, xv4_lo);
+                /* P0-1 optimization: direct loads from pre-permuted X.
+                 * Each X_d[digit] is contiguous; lane i holds X[5*i + digit]
+                 * for the current outer-block's k. */
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
                 /* SDOT each digit. */
                 acc = vdotq_s32(acc, xv0, d0);
@@ -464,6 +418,8 @@ void base3_5in8_matmul_neon(
             Y[(size_t)i * N + j] = vaddvq_s32(acc);
         }
     }
+
+    free(X_strided);
 }
 
 /* ── Path C: B2-B optimal (unified TBL decode) ─────────────────────────── */
