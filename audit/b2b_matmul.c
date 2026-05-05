@@ -363,6 +363,156 @@ void b2b_skip_matmul_neon(
     if (skip_count_out) *skip_count_out = skip_count;
 }
 
+/* ── Path E: Concern-2 L2 strong-claim — base-3 packed X + packed W ─────── */
+
+__attribute__((noinline))
+void path_e_packed_x_matmul_neon(
+    int32_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K % 16 == 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X_packed && W_packed)));
+    assert((const void*)Y != (const void*)X_packed);
+    assert((const void*)Y != (const void*)W_packed);
+    assert(N % 4 == 0);
+
+    int Kp = (K + 3) / 4;
+
+    const uint8x16_t dup_idx = vld1q_u8(DUP_IDX);
+    const int8x16_t  shift_s = vreinterpretq_s8_u8(vld1q_u8(SHIFT_LANE));
+    const uint8x16_t mask_03 = vdupq_n_u8(0x03u);
+    const int8x16_t  lut     = vld1q_s8(TERNARY_LUT);
+
+    for (int i = 0; i < M; i++) {
+        const uint8_t* xi = X_packed + (size_t)i * Kp;
+
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
+
+            for (int k = 0; k < K; k += 16) {
+                /* Decode X (16 trits in 4 bytes), shared across 4 j cells. */
+                uint32_t x32;
+                memcpy(&x32, xi + (k >> 2), 4);
+                uint8x16_t x_packed_v = vreinterpretq_u8_u32(vdupq_n_u32(x32));
+                uint8x16_t x_dup     = vqtbl1q_u8(x_packed_v, dup_idx);
+                uint8x16_t x_shifted = vshlq_u8(x_dup, vnegq_s8(shift_s));
+                uint8x16_t x_codes   = vandq_u8(x_shifted, mask_03);
+                int8x16_t  x_vec     = vqtbl1q_s8(lut, x_codes);
+
+                #define E_DECODE_AND_SDOT(WJ, ACC) do {                        \
+                    uint32_t w32;                                              \
+                    memcpy(&w32, (WJ) + (k >> 2), 4);                          \
+                    uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));\
+                    uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);          \
+                    uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));     \
+                    uint8x16_t codes   = vandq_u8(shifted, mask_03);           \
+                    int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);               \
+                    (ACC) = vdotq_s32((ACC), x_vec, w_vec);                    \
+                } while (0)
+
+                E_DECODE_AND_SDOT(wj0, acc0);
+                E_DECODE_AND_SDOT(wj1, acc1);
+                E_DECODE_AND_SDOT(wj2, acc2);
+                E_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef E_DECODE_AND_SDOT
+            }
+
+            Y[(size_t)i * N + j + 0] = vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = vaddvq_s32(acc3);
+        }
+    }
+}
+
+/* ── Path F: Concern-2 L2 encoding-label equivalence companion ──────────── */
+
+__attribute__((noinline))
+void path_f_packed_x_b2b_matmul_neon(
+    int32_t* Y,
+    const uint8_t* X_b2b,
+    const uint8_t* W_b2b,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K % 16 == 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X_b2b && W_b2b)));
+    assert((const void*)Y != (const void*)X_b2b);
+    assert((const void*)Y != (const void*)W_b2b);
+    assert(N % 4 == 0);
+
+    int Kp = (K + 3) / 4;
+
+    const uint8x16_t dup_idx = vld1q_u8(DUP_IDX);
+    const int8x16_t  shift_s = vreinterpretq_s8_u8(vld1q_u8(SHIFT_LANE));
+    const uint8x16_t mask_03 = vdupq_n_u8(0x03u);
+    const int8x16_t  lut     = vld1q_s8(B2B_OPTIMAL_LUT);
+
+    for (int i = 0; i < M; i++) {
+        const uint8_t* xi = X_b2b + (size_t)i * Kp;
+
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_b2b + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_b2b + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_b2b + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_b2b + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
+
+            for (int k = 0; k < K; k += 16) {
+                /* Decode X (B2-B optimal LUT). */
+                uint32_t x32;
+                memcpy(&x32, xi + (k >> 2), 4);
+                uint8x16_t x_packed_v = vreinterpretq_u8_u32(vdupq_n_u32(x32));
+                uint8x16_t x_dup     = vqtbl1q_u8(x_packed_v, dup_idx);
+                uint8x16_t x_shifted = vshlq_u8(x_dup, vnegq_s8(shift_s));
+                uint8x16_t x_codes   = vandq_u8(x_shifted, mask_03);
+                int8x16_t  x_vec     = vqtbl1q_s8(lut, x_codes);
+
+                #define F_DECODE_AND_SDOT(WJ, ACC) do {                        \
+                    uint32_t w32;                                              \
+                    memcpy(&w32, (WJ) + (k >> 2), 4);                          \
+                    uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));\
+                    uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);          \
+                    uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));     \
+                    uint8x16_t codes   = vandq_u8(shifted, mask_03);           \
+                    int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);               \
+                    (ACC) = vdotq_s32((ACC), x_vec, w_vec);                    \
+                } while (0)
+
+                F_DECODE_AND_SDOT(wj0, acc0);
+                F_DECODE_AND_SDOT(wj1, acc1);
+                F_DECODE_AND_SDOT(wj2, acc2);
+                F_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef F_DECODE_AND_SDOT
+            }
+
+            Y[(size_t)i * N + j + 0] = vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = vaddvq_s32(acc3);
+        }
+    }
+}
+
 /* ── Path D: base-3 5-trits-in-8-bits packing (sub-2-bits/cell) ────────── */
 
 __attribute__((noinline))

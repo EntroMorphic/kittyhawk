@@ -139,6 +139,43 @@ void base3_5in8_matmul_neon(
     const uint8_t* W_packed_5in8,
     int M, int K, int N);
 
+/* Path E — Concern-2 L2 strong-claim test: base-3 packed X + W (both 4-in-8).
+ *
+ * Tests whether the L1 strong-claim verdict (encoding-label equivalence at
+ * fixed density; density-ceiling structural advantage) extends to L2
+ * (activations). Packs both X and W in 4-in-8 base-3; decodes both per
+ * inner iter via the same TBL pattern as Path A's W decode.
+ *
+ * At fixed 2 bits/cell density on both sides, base-3 X-packing and B2-B
+ * X-packing produce byte-for-byte identical kernels (encoding labels are
+ * aliases — extension of R-G1 from L1 to L2 by structural symmetry).
+ *
+ * Op count vs Path A: adds X decode (~5 ops per outer block) on top of
+ * Path A's W decode + SDOT chain. Per 16 cell-trits: ~8.5 ops vs Path A's
+ * ~6.25 ops (tiled). Wall-clock penalty ~25-30% expected at L1-resident
+ * workloads (X bandwidth not the bottleneck; X decode is pure overhead).
+ *
+ * Sub-2-bit X-packing (5-in-8 X) is NOT tested in this kernel — would
+ * require split-LUT decode for X and is deferred. */
+void path_e_packed_x_matmul_neon(
+    int32_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N);
+
+/* Path F — Concern-2 L2 strong-claim companion: B2-B packed X + W (both 4-in-8).
+ *
+ * Direct measurement of encoding-label equivalence at L2: same kernel shape
+ * as Path E but with B2-B-optimal LUT instead of base-3 LUT. By the R-G1
+ * symmetry argument, Path E ≡ Path F at the disasm level (only LUT contents
+ * differ). This kernel confirms the symmetry empirically rather than only
+ * arguing from structure. */
+void path_f_packed_x_b2b_matmul_neon(
+    int32_t* Y,
+    const uint8_t* X_b2b,
+    const uint8_t* W_b2b,
+    int M, int K, int N);
+
 /* Path C — B2-B optimal: unified TBL decode (same op shape as Path A).
  *
  * Per red-team C1: an aggressively-optimized B2-B implementation uses
