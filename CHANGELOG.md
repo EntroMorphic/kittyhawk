@@ -4,6 +4,23 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — ternary MAC routing red-team remediation (10 R-G gates PASS)
+Per `journal/ternary_mac_routing_redteam.md` and `ternary_mac_routing_remediation_closeout.md`. The original 10 T-G gates passed but the red-team surfaced 10 evidence-completeness and framing-accuracy gaps. All closed.
+
+- **R-G1: 1000 random bit-exact configurations** added via `test_random_stress`. Bit-exact coverage now: 23 curated + 1000 random + 3 saturation-edge = **1026+ configurations**, up from 23.
+- **R-G2: saturation-edge cases.** Constructed configs where dot products exceed MAX_VAL × K → output clamps to ±MAX_VAL with SATURATED flag. Both production NEON and scalar_ref produce same clamped output AND same flag bits. 3/3 PASS (`+MAX_VAL × +1 → +sat`, `+MAX_VAL × -1 → -sat`, `-MAX_VAL × +1 → -sat`).
+- **R-G3: 5-shape BATCHED bench.** **Headline correction: speedup over scalar_ref ranges 4.2× to 17.6×** depending on (M, K, N) — the original claimed "16.7×" was at the high end. Wide aspect (M=N=128, K=1024): 17.6×. Slim aspect (M=N=8, K=4096): 4.2×. Per CONTRIBUTING scope-match rule, the speedup is now reported as a range with shapes named.
+- **R-G4: alias test for both forbidden cases.** Y==X AND Y==W_packed both abort via SIGABRT (the second case was untested in the original cycle).
+- **R-G5/R-G6/R-G7: closeout update note** added to `journal/ternary_mac_routing_closeout.md`. Documents (a) no current consumer touches the kernel — kernel-microbench numbers don't propagate to consumer perf; (b) custom-silicon ceiling is ~4-17× faster than vmlal — we're operating ~17× off the silicon ceiling, "routed through hardware" accurate but "close to silicon" would overstate; (c) Case W via MTFP4 activations + SDOT-direct is the strategically larger lever (~17× more throughput when activations fit int8).
+- **R-G8: closeout per-gate disposition table corrected** for T-G3 (distinguishes the permanent `ternary_dot_vmlal` helper from the transient public wrapper).
+- **R-G9: bsl-NEON pointer comment** added to `m4t/src/m4t_ternary_matmul.c` with git SHA recovery instruction (`git show 35e5b58~1:m4t/src/m4t_ternary_matmul.c`) and a note about why the bsl approach is structurally important even though vmlal beat it for ternary.
+- **R-G10: test file header rewritten** to reference "production NEON path" instead of stale "vmlal-routed" naming.
+- **19/19 ctest PASS** — no regressions; new tests integrated into existing `m4t_ternary_matmul_neon` ctest entry.
+
+### Methodology lifted from ternary MAC remediation
+- **Sample-based bit-exact gates need stochastic stress + edge-case construction.** Curated samples explain coverage classes; random fills the breadth; constructed edge cases probe boundaries. The three together are stronger than any alone. Pattern: curated for explainability + random for breadth + edge-construction for boundaries.
+- **"Shape-dependent speedup" should be reported as a range.** Single-shape numbers are misleading even within a workload class (BATCHED here showed 4.2× to 17.6× across 5 shapes). For any kernel optimization claim, sweep at least 3-5 shapes within the claimed regime.
+
 ### Added — ternary MAC routing through vmlal_s32 (10 T-G gates PASS)
 Per `journal/ternary_mac_routing_{raw,nodes,reflect,synthesize,closeout}.md`. The user named ternary MAC as "software doing the work of hardware" earlier in the session and asked what existing M4/NEON features could route it. Answer: `vmlal_s32` (signed multiply-accumulate long, int32×int32→int64 widening) is the closest hardware analog at int32 width. Multiplying by trit ∈ {-1, 0, +1} subsumes both conditional-negate and zero-gate, collapsing the prior bsl + mask-widening pattern.
 

@@ -85,8 +85,17 @@ static int64_t ternary_dot_scalar(
  *   BATCHED  M=64 K=4096 N=64 : bsl-NEON 766 ns/cell → vmlal 657 (1.17×)
  *   TIGHT-LOOP M=4 K=64  N=4  : bsl-NEON 12.25 → vmlal 5.00 (2.45×)
  * vmlal beats bsl in both shapes; productionized as the default NEON
- * path. The bsl-NEON code is preserved in git history (project rule:
- * superseded code is preserved; git log is the archive). */
+ * path.
+ *
+ * The prior bsl-NEON ternary_dot implementation is preserved in git
+ * history per project rule "DELETE = never". To recover the bsl path
+ * for reference (e.g., evaluating a different cell width that doesn't
+ * fit vmlal's int32×int32→int64 shape):
+ *   git show 35e5b58~1:m4t/src/m4t_ternary_matmul.c
+ * The bsl approach is structurally important even though vmlal beat
+ * it for ternary; its multi-stage decode + bsl pattern would generalize
+ * to other "small-set value × wide-cell" workloads where multiplication
+ * isn't naturally available. */
 static int64_t ternary_dot(
     const m4t_mtfp_t* xi,    /* [K] MTFP activations */
     const uint8_t* wj,         /* [Kp] packed-trit weights */

@@ -1,15 +1,17 @@
 /*
- * test_m4t_ternary_matmul_vmlal.c — bit-exact verification of the
- * vmlal_s32-routed ternary matmul (m4t_mtfp_ternary_matmul_bt)
- * against the scalar oracle (m4t_mtfp_ternary_matmul_bt_scalar_ref).
+ * test_m4t_ternary_matmul_neon.c — bit-exact verification of the
+ * production NEON path of m4t_mtfp_ternary_matmul_bt against
+ * m4t_mtfp_ternary_matmul_bt_scalar_ref (always-scalar oracle).
  *
- * Per ternary_mac_routing T-G4. Sample-based (matmul state space is too
- * large to exhaust). Coverage classes:
- *   - K boundary cases (0, 1, 15, 16, 17, 32, 33, 4095, 4096, 4097)
- *   - Sparse vs dense trit distributions
- *   - All-positive, all-negative, all-zero, mixed
- *   - Activation extremes (±MAX_VAL)
- *   - Multiple (M, N) shapes
+ * Original cycle (T-G4): 23 hand-curated configurations.
+ * Red-team remediation (R-G1, R-G2, R-G3, R-G4):
+ *   R-G1: 1000 random (M, K, N, density, seed) configurations across
+ *         a representative shape space.
+ *   R-G2: saturation-edge configs — dot products that exceed MAX_VAL,
+ *         verifying both paths produce the same clamped output AND
+ *         the same SATURATED flag bits.
+ *   R-G3: multi-shape BATCHED bench (5 (M, K, N) tuples instead of 1).
+ *   R-G4: aliasing assertions for both forbidden cases (Y==X, Y==W_packed).
  */
 
 #include "m4t_mtfp.h"
@@ -17,11 +19,14 @@
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
 
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MAX_VAL 581130733
 
@@ -66,8 +71,8 @@ static void gen_activations(m4t_mtfp_t* dst, int n, uint32_t seed) {
 
 /* Run one (M, K, N, density, pos_frac, seed) configuration and check
  * vmlal output bit-exact equals scalar_ref output. */
-static void test_config(int M, int K, int N, double density, double pos_frac,
-                        uint32_t seed, const char* label) {
+static void test_config_v(int M, int K, int N, double density, double pos_frac,
+                          uint32_t seed, const char* label, int verbose) {
     int Kp = M4T_TRIT_PACKED_BYTES(K);
     m4t_mtfp_t* X       = M > 0 && K > 0 ? malloc(sizeof(m4t_mtfp_t) * (size_t)M * K) : NULL;
     m4t_trit_t* W_unp   = N > 0 && K > 0 ? malloc(sizeof(m4t_trit_t) * (size_t)N * K) : NULL;
@@ -98,8 +103,8 @@ static void test_config(int M, int K, int N, double density, double pos_frac,
         }
     }
     if (local_fails == 0) {
-        printf("  %-50s : PASS  (M=%d K=%d N=%d, %d cells)\n",
-               label, M, K, N, M * N);
+        if (verbose) printf("  %-50s : PASS  (M=%d K=%d N=%d, %d cells)\n",
+                            label, M, K, N, M * N);
     } else {
         printf("  %-50s : FAIL  (%d / %d mismatches)\n",
                label, local_fails, M * N);
@@ -107,6 +112,12 @@ static void test_config(int M, int K, int N, double density, double pos_frac,
     }
 
     free(X); free(W_unp); free(W_pack); free(Y_vmlal); free(Y_ref);
+}
+
+/* Convenience wrapper preserving the original verbose-on-pass behavior. */
+static void test_config(int M, int K, int N, double density, double pos_frac,
+                        uint32_t seed, const char* label) {
+    test_config_v(M, K, N, density, pos_frac, seed, label, 1);
 }
 
 /* T-G8: perf comparison — three implementations on two workload shapes. */
@@ -163,8 +174,148 @@ static void perf_compare(int M, int K, int N, int iters, const char* shape) {
     free(X); free(W_unp); free(W_pack); free(Y);
 }
 
+/* R-G1: stochastic bit-exact stress. Generates N_RANDOM random
+ * configurations spanning a representative shape space and verifies
+ * each is bit-exact. Per red-team C1 (sample was thin at 23 configs). */
+static void test_random_stress(int n_random) {
+    printf("\n-- R-G1: Random stress (%d configs) --\n", n_random);
+    int M_choices[] = {1, 2, 4, 8, 16, 32};
+    int N_choices[] = {1, 2, 4, 8, 16, 32};
+    int K_choices[] = {1, 5, 16, 17, 31, 64, 100, 256, 1024};
+    double dens_choices[] = {0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0};
+    double pos_choices[]  = {0.0, 0.3, 0.5, 0.7, 1.0};
+
+    srand(7777);
+    int initial_fails = g_fails;
+    for (int t = 0; t < n_random; t++) {
+        int M = M_choices[rand() % (int)(sizeof(M_choices)/sizeof(int))];
+        int N = N_choices[rand() % (int)(sizeof(N_choices)/sizeof(int))];
+        int K = K_choices[rand() % (int)(sizeof(K_choices)/sizeof(int))];
+        double dens = dens_choices[rand() % (int)(sizeof(dens_choices)/sizeof(double))];
+        double pos  = pos_choices[rand() % (int)(sizeof(pos_choices)/sizeof(double))];
+        uint32_t seed = (uint32_t)(rand() * 100 + t);
+        char label[80];
+        snprintf(label, sizeof(label), "rand[%4d] M=%d K=%d N=%d d=%.1f p=%.1f",
+                 t, M, K, N, dens, pos);
+        test_config_v(M, K, N, dens, pos, seed, label, /*verbose=*/0);
+    }
+    int new_fails = g_fails - initial_fails;
+    if (new_fails == 0) {
+        printf("  R-G1 PASS (%d/%d configs bit-exact)\n", n_random, n_random);
+    } else {
+        printf("  R-G1 FAIL (%d / %d configs failed)\n", new_fails, n_random);
+    }
+}
+
+/* R-G2: saturation-edge cases. Construct W and X such that the dot
+ * product magnitude exceeds MAX_VAL — output gets clamped + flag set.
+ * Verify both vmlal and scalar paths produce the same clamped output
+ * AND the same SATURATED flag bit pattern. Per red-team C1 (no
+ * saturation-edge inputs in original sample). */
+static void test_saturation_edge(void) {
+    printf("\n-- R-G2: Saturation-edge cases --\n");
+    /* For K=64, all trits=+1, all activations=+MAX_VAL:
+     *   acc = 64 * 5.81e8 = 3.7e10, clamps to MAX_VAL with SATURATED flag. */
+    int K = 64;
+    int M = 4;
+    int N = 4;
+    int Kp = M4T_TRIT_PACKED_BYTES(K);
+    int n_flag_bytes = M4T_FLAG_BYTES(M * N);
+
+    m4t_mtfp_t* X       = malloc(sizeof(m4t_mtfp_t) * (size_t)M * K);
+    m4t_trit_t* W_unp   = malloc(sizeof(m4t_trit_t) * (size_t)N * K);
+    uint8_t*    W_pack  = malloc((size_t)N * Kp);
+    m4t_mtfp_t* Y_v     = malloc(sizeof(m4t_mtfp_t) * (size_t)M * N);
+    m4t_mtfp_t* Y_s     = malloc(sizeof(m4t_mtfp_t) * (size_t)M * N);
+    uint8_t* flags_v    = calloc(n_flag_bytes, 1);
+    uint8_t* flags_s    = calloc(n_flag_bytes, 1);
+
+    /* Three saturation-edge configs. */
+    struct { const char* label; m4t_mtfp_t x_val; m4t_trit_t w_val; } cases[] = {
+        { "+MAX_VAL × +1 → +sat",  M4T_MTFP_MAX_VAL,  1 },
+        { "+MAX_VAL × -1 → -sat", M4T_MTFP_MAX_VAL, -1 },
+        { "-MAX_VAL × +1 → -sat", -M4T_MTFP_MAX_VAL, 1 },
+    };
+    int local_fails = 0;
+    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+        for (int i = 0; i < M * K; i++) X[i] = cases[c].x_val;
+        for (int j = 0; j < N * K; j++) W_unp[j] = cases[c].w_val;
+        for (int j = 0; j < N; j++) {
+            pack_trits(W_pack + (size_t)j * Kp, W_unp + (size_t)j * K, K);
+        }
+        memset(flags_v, 0, n_flag_bytes);
+        memset(flags_s, 0, n_flag_bytes);
+        m4t_mtfp_ternary_matmul_bt           (Y_v, X, W_pack, flags_v, M, K, N);
+        m4t_mtfp_ternary_matmul_bt_scalar_ref(Y_s, X, W_pack, flags_s, M, K, N);
+        int out_fails = 0;
+        for (int i = 0; i < M * N; i++) if (Y_v[i] != Y_s[i]) out_fails++;
+        int flag_fails = memcmp(flags_v, flags_s, n_flag_bytes) == 0 ? 0 : 1;
+        if (out_fails == 0 && flag_fails == 0) {
+            /* Verify saturation actually happened. */
+            int sat_set = 0;
+            for (int i = 0; i < M * N; i++) {
+                if (Y_v[i] == M4T_MTFP_MAX_VAL || Y_v[i] == -M4T_MTFP_MAX_VAL) {
+                    sat_set = 1; break;
+                }
+            }
+            printf("  %-30s : PASS (clamp matches, flags match%s)\n",
+                   cases[c].label, sat_set ? ", saturation triggered" : "");
+        } else {
+            printf("  %-30s : FAIL (out_fails=%d flag_mismatch=%d)\n",
+                   cases[c].label, out_fails, flag_fails);
+            local_fails++;
+        }
+    }
+    if (local_fails > 0) g_fails += local_fails;
+
+    free(X); free(W_unp); free(W_pack); free(Y_v); free(Y_s);
+    free(flags_v); free(flags_s);
+}
+
+/* R-G4: aliasing assertions. Both Y==X and Y==W_packed are forbidden
+ * by the kernel's asserts. Test BOTH cases via fork-and-verify-SIGABRT.
+ * Per red-team M1 (only Y==X was tested in original cycle). */
+static int run_alias(int alias_w) {
+    enum { K = 16 };
+    int Kp = M4T_TRIT_PACKED_BYTES(K);
+    /* Allocate one buffer big enough to use as Y, X, OR W_packed. */
+    size_t bytes = sizeof(m4t_mtfp_t) * K > (size_t)Kp ? sizeof(m4t_mtfp_t) * K : (size_t)Kp;
+    m4t_mtfp_t* shared = malloc(bytes);
+    memset(shared, 0, bytes);
+    m4t_mtfp_t X[K] = {0};
+    uint8_t W_pack[Kp]; memset(W_pack, 0, Kp);
+    if (alias_w) {
+        /* Y == W_packed */
+        m4t_mtfp_ternary_matmul_bt(shared, X, (uint8_t*)shared, NULL, 1, K, 1);
+    } else {
+        /* Y == X */
+        m4t_mtfp_ternary_matmul_bt(shared, shared, W_pack, NULL, 1, K, 1);
+    }
+    fprintf(stderr, "FAIL: kernel did not abort on alias\n");
+    free(shared);
+    return 1;
+}
+
+static void test_aliasing(void) {
+    printf("\n-- R-G4: Aliasing assertions --\n");
+    const char* labels[] = { "Y == X       ", "Y == W_packed" };
+    int alias_fails = 0;
+    for (int kind = 0; kind < 2; kind++) {
+        pid_t pid = fork();
+        if (pid == 0) { exit(run_alias(kind)); }
+        int status; waitpid(pid, &status, 0);
+        if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) {
+            printf("  alias %s : PASS (SIGABRT)\n", labels[kind]);
+        } else {
+            printf("  alias %s : FAIL\n", labels[kind]);
+            alias_fails++;
+        }
+    }
+    if (alias_fails > 0) g_fails += alias_fails;
+}
+
 int main(void) {
-    printf("=== Bit-exact: vmlal vs scalar_ref ===\n");
+    printf("=== Bit-exact: production NEON vs scalar_ref ===\n");
 
     /* K boundary cases — small (M, N) so we can run many K values. */
     printf("\n-- K boundary cases --\n");
@@ -197,16 +348,30 @@ int main(void) {
     test_config(8, 1024, 8, 0.3, 0.5, 4002, "M=8  K=1024 N=8");
     test_config(64, 4096, 64, 0.5, 0.5, 4003, "M=64 K=4096 N=64");
 
-    if (g_fails > 0) {
-        printf("\nFAIL: %d total mismatches\n", g_fails);
-        return 1;
-    }
-    printf("\nPASS: all configurations bit-exact\n");
+    /* R-G1: 1000 random configurations. */
+    test_random_stress(1000);
+    if (g_fails > 0) { printf("\nFAIL: random stress\n"); return 1; }
 
-    /* T-G8: perf comparison. */
-    printf("\n=== Perf comparison (min-of-5) ===\n");
-    perf_compare(64, 4096, 64, 5,    "BATCHED");   /* bulk matmul */
-    perf_compare(4,  64,   4,  500, "TIGHT-LOOP"); /* small dims, per-call overhead */
+    /* R-G2: saturation-edge cases. */
+    test_saturation_edge();
+    if (g_fails > 0) { printf("\nFAIL: saturation-edge\n"); return 1; }
+
+    /* R-G4: aliasing assertions. */
+    test_aliasing();
+    if (g_fails > 0) { printf("\nFAIL: aliasing\n"); return 1; }
+
+    printf("\nPASS: all configurations bit-exact (curated + 1000 random + sat + alias)\n");
+
+    /* T-G8 + R-G3: multi-shape perf comparison. */
+    printf("\n=== Perf comparison: production NEON vs scalar_ref (min-of-5) ===\n");
+    printf("BATCHED shape sweep — verify speedup is shape-stable (R-G3):\n");
+    perf_compare(64,  4096, 64,  5,   "BATCHED-A");  /* original */
+    perf_compare(8,   4096, 8,   25,  "BATCHED-B");  /* slim aspect */
+    perf_compare(128, 1024, 128, 5,   "BATCHED-C");  /* wide aspect */
+    perf_compare(32,  512,  32,  20,  "BATCHED-D");  /* mid */
+    perf_compare(16,  256,  16,  100, "BATCHED-E");  /* small bulk */
+    printf("\nTIGHT-LOOP:\n");
+    perf_compare(4,   64,   4,   500, "TIGHT-LOOP"); /* small dims, per-call overhead */
 
     return 0;
 }

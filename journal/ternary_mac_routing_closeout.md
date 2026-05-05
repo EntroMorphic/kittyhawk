@@ -17,6 +17,15 @@ T-G9  (productionized)                                : PASS — 19/19 ctest wit
 T-G10 (no regression in production binaries)          : PASS — bench_m4t_tier2_perf, 2 gesh probes identical
 ```
 
+## Update note (post-redteam remediation)
+
+Per `journal/ternary_mac_routing_redteam.md` — 10 findings, all addressed in `journal/ternary_mac_routing_remediation_*.md`. Key corrections to the headline below:
+
+- **The "1.17× over bsl, 16.7× over scalar" headline is shape-specific.** Multi-shape sweep (R-G3) shows BATCHED speedup over scalar_ref ranges from **4.2× to 17.6×** across 5 (M, K, N) configurations. The original 16.7× was at the high end. Per CONTRIBUTING scope-match rule, the speedup is a property of (workload shape, M-series core), not a constant.
+- **No current consumer touches `m4t_mtfp_ternary_matmul_bt`** (verified by grep; same outcome as the shift3 NEON cycle). The kernel-microbench numbers don't propagate to consumer-level perf. This isn't a violation of the consumer-demand rule (foundational substrate work is not consumer-gated per project memory) but it's a fact worth flagging.
+- **Custom-silicon ceiling: ~4–17× faster than vmlal.** A hypothetical "ternary MAC at int32 width" silicon op would do ~0.06–0.25 cycles/trit (silicon ceiling); we deliver ~0.94 cycles/trit via vmlal. The "routed through hardware" framing is accurate; "close to silicon" would overstate. We're operating ~17× off the silicon ceiling.
+- **Case W (MTFP4 activations via SDOT-direct) remains the strategically larger lever.** ~16 trits/cycle via SDOT vs our ~0.94 trits/cycle via vmlal — roughly 17× more throughput when consumer activations fit in int8. This cycle's contribution is meaningful but small compared to that available substrate-design move.
+
 ## Headline result
 
 The user named ternary MAC as "software doing the work of hardware" earlier in the session. The substrate's prior `m4t_mtfp_ternary_matmul_bt` used a bsl + conditional-negate pipeline (~57 NEON ops per 16-trit block, dominated by mask-widening). The new `vmlal_s32`-routed path uses the multiply-by-trit shortcut: trit ∈ {-1, 0, +1} means multiplying by the trit IS the MAC, with the int64 widening absorbing the accumulator semantics. The mask-widening cost (~40 of the original 60 ops) collapses entirely.
@@ -34,7 +43,7 @@ The user named ternary MAC as "software doing the work of hardware" earlier in t
 |------|--------------|----------|
 | **T-G1** | New `m4t/tools/bench_vmlal_throughput.c` (3 patterns: independent, two-chain, single-chain). Two iterations of constant-fold defense (first attempt got compiler-folded to `add+branch`; fix: distinct inputs per call from heap pool). Pattern C (matches kernel) measured 0.84 vmlal/cycle. | `m4t/tools/bench_vmlal_throughput.c` |
 | **T-G2** | Added public `m4t_mtfp_ternary_matmul_bt_scalar_ref`. Lifted `ternary_dot_scalar` static helper. Production never calls scalar_ref; tests do. Same shift3-remediation pattern: separately-preserved oracle survives productionization. | `m4t/src/m4t_ternary_matmul.{h,c}` |
-| **T-G3** | Added `static int64_t ternary_dot_vmlal(...)` in m4t_ternary_matmul.c. Initial wrapper `m4t_mtfp_ternary_matmul_bt_vmlal` (later removed at T-G9). | (intermediate; fold at T-G9) |
+| **T-G3** | Added `static int64_t ternary_dot_vmlal(...)` in m4t_ternary_matmul.c — the inner-loop NEON helper. Productionized kernel calls it. Plus a transient public wrapper `m4t_mtfp_ternary_matmul_bt_vmlal` (removed at T-G9; was never publicly shipped — single-commit cycle). | `m4t/src/m4t_ternary_matmul.c::ternary_dot_vmlal` (permanent) |
 | **T-G4** | New `m4t/tests/test_m4t_ternary_matmul_neon.c` (originally `_vmlal.c`; renamed at T-G9). Coverage: 11 K boundary cases × 6 distributions × bulk shapes × seeds = 23 configurations. All bit-exact. | `m4t/tests/test_m4t_ternary_matmul_neon.c` |
 | **T-G5** | Inline saturation argument in source comment. Bound: \|acc\| ≤ K × MAX_VAL = K × 5.81×10⁸; for K ≤ 1.59×10¹⁰, fits int64. Same K-bound as the existing bsl-NEON path; no new constraint. | inline in `m4t_ternary_matmul.c` |
 | **T-G6** | Fork-and-verify-SIGABRT pattern (lifted from V4-G2 meta-test discipline). Y==X correctly aborts on assert(...). | inline in this cycle's bash |
