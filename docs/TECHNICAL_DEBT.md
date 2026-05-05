@@ -109,13 +109,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 **Unblocks:** new-reader orientation; reduces risk of misreading the verdict.
 **Priority hint:** medium. Would save downstream readers significant time.
 
-### TD-12 — Task #87 (A-G6: Disasm + multi-shape bench)
-
-**Source:** Old task list, cross-exp accum routing cycle.
-**State:** pending across many sessions. Cross-exp accum cycle moved on without it.
-**Unblocks:** explicit disasm + multi-shape bench evidence for cross-exp accum (informational; the cycle's other gates are met).
-**Priority hint:** low. Probably should be marked as deleted/superseded if it's no longer needed; otherwise execute as a quick measurement task.
-
 ---
 
 ## Spec-level deferrals
