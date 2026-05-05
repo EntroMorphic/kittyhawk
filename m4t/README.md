@@ -73,11 +73,12 @@ W layout for SDOT is **unpacked int8** in {-1, 0, +1} (not packed trits — SDOT
 
 ### MTFP19 × packed-ternary matmul (`m4t_ternary_matmul.h`) — Tier 3c
 
-For consumers that need full MTFP19 precision on activations (vs the MTFP4 SDOT path's narrower input). **NEON-accelerated** via 16-trit decode + bit-select + conditional negate; int64 accumulator; saturating clamp to MTFP19 on store.
+For consumers that need full MTFP19 precision on activations (vs the MTFP4 SDOT path's narrower input). **NEON-accelerated** via 16-trit decode + `vmlal_s32` widening multiply-accumulate; int64 accumulator; saturating clamp to MTFP19 on store. Plus public scalar reference (`m4t_mtfp_ternary_matmul_bt_scalar_ref`) for bit-exact testing.
 
 - `m4t_mtfp_ternary_matmul_bt(Y, X, W_packed, flags, M, K, N)` — MTFP19 × packed-trit → MTFP19. **Case S per §8.5: fixed-output saturate.** Optional per-block SATURATED flag tracking (`flags` non-NULL). Accumulator overflow point: K ≈ 1.59e10.
+- `m4t_mtfp_ternary_matmul_bt_scalar_ref(...)` — same semantics, always-scalar; test-only oracle exposed so bit-exact verification survives productionization.
 
-Inner loop uses `vbslq_s32` + `vnegq_s32` over decoded signs in {-1, 0, +1} — no `vmulq_s32`. Multiplying by a sign through a general-purpose multiply opcode is the base-2 shortcut; the base-3-native expression is mask-and-conditional-negate, which is what TBL + bit-select compute directly.
+Inner loop pipeline (per 16-trit block): decode 16 packed trits → 16 int8 signs (via TBL); sign-extend int8 → int32; 8× `vmlal_s32` widening MAC into int64x2 accumulator pair. Multiplying by trit ∈ {-1, 0, +1} subsumes both conditional-negate AND zero-gate — multiply IS the operation, no separate mask plane needed. ~17 cycles per 16-trit block on Apple Silicon. The closest existing M4/NEON hardware analog to a "ternary MAC at int32 width" given there is no native trit-aware silicon op. See `journal/ternary_mac_routing_*.md` for the LMM cycle that arrived at this routing.
 
 ### Routing primitives (`m4t_route.h`) — Tier 2
 
@@ -105,7 +106,7 @@ Requires aarch64 + NEON (Apple Silicon or compatible ARM). Non-NEON targets fail
 
 ## Tests — Tiers 1 + 2 + 3
 
-Ten ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-3 tests use bit-exact `int64` reference implementations as the oracle (no fp in any test path).
+Twelve ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-3 tests use bit-exact `int64` reference implementations as the oracle (no fp in any test path).
 
 | Binary | Coverage |
 |---|---|
@@ -119,6 +120,8 @@ Ten ctest binaries. Tier-1/2 tests use hand-derived integer golden values; tier-
 | `test_m4t_ternary_matmul` | 9 tests: golden 2×4×3, random vs reference (200 trials), long-K stress (K=1M), saturation clamp, saturation flags, **partial-block** (M·N=5 trailing-bits-stay-zero), **invalid trit code** (0b11 reserved → identical NEON/scalar handling), zero-dim, determinism. |
 | `test_m4t_elemental_floor` | three property tests on the cell-level elemental floor (`shift3`, `select`, neg-via-select composite re-derivation), plus the R-G3 path test for the cross-exponent accumulator's flags=NULL fast path. |
 | `test_m4t_assert_live` | V4 deliberate-abort meta-test: forks a child, calls `m4t_route_topk_abs(T=200)` (T > `M4T_ROUTE_MAX_T = 64`), verifies `WIFSIGNALED && WTERMSIG == SIGABRT`. Proves substrate asserts are actually compiled into `libm4t_test` and fire when triggered. |
+| `test_m4t_shift3_neon` | shift3 NEON divide path: bit-exact (`m4t_mtfp_shift3` NEON vs `m4t_mtfp_shift3_scalar_ref`) on sample + boundary + alias cases. Exhaustive mode (`./test_m4t_shift3_neon x`, ~25s) sweeps the full 22.08×10⁹ input space across all 19 k values. Plus min-of-5 perf bench. |
+| `test_m4t_ternary_matmul_neon` | Production NEON path of `m4t_mtfp_ternary_matmul_bt` (vmlal_s32-routed) vs `m4t_mtfp_ternary_matmul_bt_scalar_ref`. 23 curated configs + 1000 random + 3 saturation-edge (clamp + flag bits match) + alias assertions for both Y==X and Y==W_packed. Plus 5-shape BATCHED perf bench (speedup range 4.2× to 17.6× depending on shape). |
 
 ### Test-build discipline (V3 + V4)
 

@@ -102,9 +102,11 @@ void m4t_mtfp_ternary_matmul_bt_scalar_ref(
  * 16-lane int8 × int8 → int32 accumulate per cycle on Apple Silicon.
  *
  * Use this rather than `m4t_mtfp_ternary_matmul_bt` when activations
- * are ternary; that kernel's packed-trit-weight decode (~30 NEON ops
- * per 16 trits) is overkill for ternary × ternary, which the SDOT
- * kernel computes in a single 1-cycle instruction.
+ * are ternary; that kernel's vmlal_s32-routed inner loop (~18 NEON ops
+ * per 16-trit block, post the ternary_mac_routing cycle) still pays
+ * for int32×int32 multiply-accumulate, while SDOT does 16 int8×int8
+ * MACs in a single 1-cycle instruction. ~17× more throughput when
+ * activations fit in int8.
  *
  * Y[M, N] = X[M, K] @ W^T[K, N], all ternary.
  *

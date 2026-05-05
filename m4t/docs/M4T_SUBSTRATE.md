@@ -311,6 +311,9 @@ m4t/
     gen_pow3_magic.c         — generates + exhaustively verifies the
                                 m4t_pow3_magic.h constants (~25s runtime,
                                 run by hand when the table needs regeneration)
+    bench_vmlal_throughput.c — vmlal_s32 throughput characterization
+                                microbench (per ternary_mac_routing T-G1).
+                                Standalone build: cc -O3 -mcpu=native ...
   tests/
     test_m4t_mtfp.c
     test_m4t_trit_ops.c
@@ -327,6 +330,12 @@ m4t/
                                         m4t_mtfp_shift3_scalar_ref) + alias +
                                         perf bench. Exhaustive mode via
                                         `./test_m4t_shift3_neon x` (~25s).
+    test_m4t_ternary_matmul_neon.c   — bit-exact (production NEON vmlal path
+                                        of m4t_mtfp_ternary_matmul_bt vs
+                                        m4t_mtfp_ternary_matmul_bt_scalar_ref).
+                                        23 curated + 1000 random + saturation-
+                                        edge configs. Multi-shape BATCHED
+                                        perf bench (speedup 4.2x–17.6x range).
     bench_m4t_tier2_perf.c           — perf harness (build target only, not ctest)
     bench_m4t_lto.c                  — V4-residual-3 LTO microbench
   tools/                     — (DEFERRED in current tree; prior-cycle tools
