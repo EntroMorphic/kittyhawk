@@ -42,18 +42,61 @@ static const int8_t B2B_SIGN_LUT[16] __attribute__((aligned(16))) = {
      1, -1,  1, -1,
 };
 
-/* 5-in-8 trit-decode LUT (Path D). Indexed by digit value ∈ {0, 1, 2}:
- *   0 → 0
- *   1 → +1
- *   2 → -1
- * Byte storage convention: trit_to_unsigned: -1 → 2, 0 → 0, +1 → 1.
- * Pattern repeats 4× for vqtbl1q_s8 against any 16-byte digit vector
- * (lanes hold values in [0, 2]; lane 3+ is unused in our codepath). */
-static const int8_t TRIT5_DECODE_LUT[16] __attribute__((aligned(16))) = {
-     0,  1, -1,  0,
-     0,  1, -1,  0,
-     0,  1, -1,  0,
-     0,  1, -1,  0,
+/* P0-2: split-LUT decode tables for the 5-in-8 kernel.
+ *
+ * Old approach: 4 sequential div-by-3 magic-multiplies extract digits 0..4.
+ * New approach: 1 div-by-9 splits byte b into (high = b/9, low = b%9), then
+ * direct LUT lookups extract all 5 digits in parallel.
+ *
+ * Encoding (matches base3_5in8_pack):
+ *   trit_to_unsigned: -1 → 2, 0 → 0, +1 → 1
+ *   byte = u0 + 3*u1 + 9*u2 + 27*u3 + 81*u4
+ *
+ * Per byte b ∈ [0, 242]:
+ *   high = b / 9   (range [0, 26], encodes digits 4, 3, 2)
+ *   low  = b % 9   (range [0, 8],  encodes digits 1, 0)
+ *
+ * Then:
+ *   u0 = low % 3        u1 = low / 3
+ *   u2 = high % 3       u3 = (high / 3) % 3       u4 = high / 9
+ *
+ * trit_value(u) = {0 → 0, 1 → +1, 2 → -1}.
+ *
+ * 5 LUTs: 3 for high (vqtbl4q with 27 valid entries) and 2 for low (vqtbl1q
+ * with 9 valid entries). All 16-byte aligned for NEON loads. */
+
+/* LUT_LOW_DIGIT_d[low] = trit value for digit d, indexed by low ∈ [0, 8]. */
+static const int8_t LUT_LOW_DIGIT0[16] __attribute__((aligned(16))) = {
+    /* low % 3:  0,+1,-1, 0,+1,-1, 0,+1,-1, (rest auto-zero) */
+     0,  1, -1,  0,  1, -1,  0,  1, -1,
+};
+static const int8_t LUT_LOW_DIGIT1[16] __attribute__((aligned(16))) = {
+    /* low / 3:  0, 0, 0,+1,+1,+1,-1,-1,-1, (rest auto-zero) */
+     0,  0,  0,  1,  1,  1, -1, -1, -1,
+};
+
+/* LUT_HIGH_DIGIT_d[high] = trit value for digit d, indexed by high ∈ [0, 26].
+ * Stored as 32 bytes (2×16) for vqtbl2q_s8. Bytes >= 27 are unused (high<27). */
+static const int8_t LUT_HIGH_DIGIT2[32] __attribute__((aligned(16))) = {
+    /* high % 3, repeating every 3: */
+     0,  1, -1,  0,  1, -1,  0,  1, -1,    /* high 0..8 */
+     0,  1, -1,  0,  1, -1,  0,  1, -1,    /* high 9..17 */
+     0,  1, -1,  0,  1, -1,  0,  1, -1,    /* high 18..26 */
+    /* remaining 37 entries auto-zero per C standard. */
+};
+static const int8_t LUT_HIGH_DIGIT3[32] __attribute__((aligned(16))) = {
+    /* (high / 3) % 3: */
+     0,  0,  0,  1,  1,  1, -1, -1, -1,    /* high 0..8 */
+     0,  0,  0,  1,  1,  1, -1, -1, -1,    /* high 9..17 */
+     0,  0,  0,  1,  1,  1, -1, -1, -1,    /* high 18..26 */
+    /* remaining 37 entries auto-zero per C standard. */
+};
+static const int8_t LUT_HIGH_DIGIT4[32] __attribute__((aligned(16))) = {
+    /* high / 9: */
+     0,  0,  0,  0,  0,  0,  0,  0,  0,    /* high 0..8 → 0 */
+     1,  1,  1,  1,  1,  1,  1,  1,  1,    /* high 9..17 → +1 */
+    -1, -1, -1, -1, -1, -1, -1, -1, -1,    /* high 18..26 → -1 */
+    /* remaining 5 entries auto-zero per C standard. */
 };
 
 /* B2-B unified value LUT (Path C). Indexed by 2-bit B2-B code:
@@ -317,8 +360,23 @@ void base3_5in8_matmul_neon(
     int Kp = K / 5;  /* bytes per row */
     int K5 = K / 5;  /* length of each strided X array */
 
-    const int8x16_t  lut       = vld1q_s8(TRIT5_DECODE_LUT);
-    const uint8x16_t three_v   = vdupq_n_u8(3);
+    const uint8x16_t nine_v = vdupq_n_u8(9);
+
+    /* P0-2: split-LUT decode constants. Hoisted out of the inner loop. */
+    const int8x16_t lut_d0 = vld1q_s8(LUT_LOW_DIGIT0);
+    const int8x16_t lut_d1 = vld1q_s8(LUT_LOW_DIGIT1);
+    const int8x16x2_t lut_d2 = { {
+        vld1q_s8(LUT_HIGH_DIGIT2 +  0),
+        vld1q_s8(LUT_HIGH_DIGIT2 + 16),
+    } };
+    const int8x16x2_t lut_d3 = { {
+        vld1q_s8(LUT_HIGH_DIGIT3 +  0),
+        vld1q_s8(LUT_HIGH_DIGIT3 + 16),
+    } };
+    const int8x16x2_t lut_d4 = { {
+        vld1q_s8(LUT_HIGH_DIGIT4 +  0),
+        vld1q_s8(LUT_HIGH_DIGIT4 + 16),
+    } };
 
     /* P0-1 optimization: pre-permute X[i, :] into 5 strided arrays once per
      * row i. The inner-loop SDOT then uses contiguous vld1q_s8 against
@@ -350,52 +408,22 @@ void base3_5in8_matmul_neon(
 
             for (int k = 0; k < K; k += 80) {
                 /* Load 16 packed bytes (= 80 trits). */
-                uint8x16_t bytes = vld1q_u8(wj + k / 5);
+                uint8x16_t b = vld1q_u8(wj + k / 5);
 
-                /* Decode 5 digits via vectorized magic-multiply div-by-3.
-                 * Digits 0..3 each: q = b/3, m = b - 3q, lookup m. Then b←q.
-                 * Digit 4: just lookup the final quotient (b ∈ [0, 2]). */
-                int8x16_t d0, d1, d2, d3, d4;
-                uint8x16_t b = bytes;
+                /* P0-2: split-LUT decode.
+                 * high = b / 9 (magic-mul: (b * 57) >> 9), range [0, 26].
+                 * low  = b - 9 * high, range [0, 8].
+                 * 5 digits extracted via direct LUT lookups. */
+                uint16x8_t lo16 = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
+                uint16x8_t hi16 = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
+                uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
 
-                /* Digit 0 */
-                {
-                    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 171), 9);
-                    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 171), 9);
-                    uint8x16_t q  = vcombine_u8(vmovn_u16(lo), vmovn_u16(hi));
-                    uint8x16_t m  = vsubq_u8(b, vmulq_u8(q, three_v));
-                    d0 = vqtbl1q_s8(lut, m);
-                    b  = q;
-                }
-                /* Digit 1 */
-                {
-                    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 171), 9);
-                    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 171), 9);
-                    uint8x16_t q  = vcombine_u8(vmovn_u16(lo), vmovn_u16(hi));
-                    uint8x16_t m  = vsubq_u8(b, vmulq_u8(q, three_v));
-                    d1 = vqtbl1q_s8(lut, m);
-                    b  = q;
-                }
-                /* Digit 2 */
-                {
-                    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 171), 9);
-                    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 171), 9);
-                    uint8x16_t q  = vcombine_u8(vmovn_u16(lo), vmovn_u16(hi));
-                    uint8x16_t m  = vsubq_u8(b, vmulq_u8(q, three_v));
-                    d2 = vqtbl1q_s8(lut, m);
-                    b  = q;
-                }
-                /* Digit 3 */
-                {
-                    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 171), 9);
-                    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 171), 9);
-                    uint8x16_t q  = vcombine_u8(vmovn_u16(lo), vmovn_u16(hi));
-                    uint8x16_t m  = vsubq_u8(b, vmulq_u8(q, three_v));
-                    d3 = vqtbl1q_s8(lut, m);
-                    b  = q;
-                }
-                /* Digit 4: b is now in [0, 2]; direct lookup. */
-                d4 = vqtbl1q_s8(lut, b);
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
 
                 /* P0-1 optimization: direct loads from pre-permuted X.
                  * Each X_d[digit] is contiguous; lane i holds X[5*i + digit]
