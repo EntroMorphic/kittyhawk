@@ -8,9 +8,11 @@ Science deliverables. NOT in `ctest` — these are measurement tools producing j
 |---|---|
 | `tristate_audit.c` | Two-gate audit of third-state utilization across substrate layers L1-L4 + L6 on a 2-layer ternary GEMM workload. Per `journal/tristate_op_synthesize.md`. |
 | `b2b_matmul.{h,c}` | NEON kernels for the strong-claim test: Path A (base-3 4-in-8 packed), Path B (B2-B sign+mask honest), Path B-skip (B2-B with all-masked-block skip), Path C (B2-B optimal unified-LUT), Path D (base-3 5-in-8 packed). All NEON-only; no scalar reference. |
-| `tristate_strong_bench.c` | Strong-claim bench harness. Runs all 5 audit kernels + substrate's `m4t_ternary_dot_matmul_bt` for external grounding; verifies bit-exact equivalence; measures op count + wall-clock across L1-resident, L2-resident, and DRAM-bound regimes. |
+| `tristate_strong_bench.c` | Strong-claim bench harness. Runs all 5+ audit kernels + substrate's `m4t_ternary_dot_matmul_bt` and `m4t_ternary_5in8_matmul_bt` for external grounding; verifies bit-exact equivalence; measures op count + wall-clock across L1-resident, L2-resident, and DRAM-bound regimes. |
 | `results.csv`, `results_summary.txt` | Tristate audit per-seed CSV + per-config summary (last run; regenerate by re-running `tristate_audit`). |
 | `strong_results.csv`, `strong_summary.txt` | Strong-claim bench per-seed CSV + per-config summary. |
+
+**Moved to `m4t/tools/`:** `sdot_pipeline_bench.c` (SDOT throughput characterization tool). It's enduring hardware-characterization infrastructure rather than science-cycle scaffolding. Build manually per project tools convention: `cc -O3 -mcpu=native m4t/tools/sdot_pipeline_bench.c -o /tmp/sdb`.
 
 ## Running
 

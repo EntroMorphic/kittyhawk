@@ -1,6 +1,17 @@
 /*
- * audit/sdot_pipeline_bench.c — direct mechanism test for the strong-claim
- *                                  Path D vs Path A 1.8× wall-clock win.
+ * m4t/tools/sdot_pipeline_bench.c — characterize SDOT throughput on the
+ *                                    target M-series hardware.
+ *
+ * Per project tools convention (see bench_vmlal_throughput.c):
+ *   Build:  cc -O3 -mcpu=native m4t/tools/sdot_pipeline_bench.c -o /tmp/sdb
+ *   Run:    /tmp/sdb
+ *
+ * Originally lived in audit/ as the direct mechanism test for the strong-
+ * claim Path D vs Path A 1.8× wall-clock win (per
+ * journal/p0_concern1_mechanism.md). Moved here 2026-05-05 as enduring
+ * hardware-characterization infrastructure (per Item 3 of the production-
+ * shoring plan; see journal/m4t_5in8_closeout.md and the prior journal/
+ * p0_concern1_mechanism.md for context).
  *
  * Per concern raised in the strong-claim post-P0 review: the 1.8× wall-clock
  * advantage was ATTRIBUTED to "SDOT amortization" (Path D dispatches SDOTs

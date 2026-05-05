@@ -454,7 +454,7 @@ For readers tracing a spec section back to the code that realizes it.
 | 10 | Width conversions | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_to_mtfp19`, `m4t_mtfp19_to_mtfp4`) |
 | 11 | Routing-first surface | `m4t/src/m4t_route.{c,h}` (the five primitives), `m4t/src/m4t_ternary_matmul.{c,h}` (LSH-projection primitive) |
 | 12 | What is NOT in M4T | Prior-cycle artifacts preserved in `01MAY26_archived/` (gitignored, on-disk only) |
-| 13 | File organization | `m4t/src/`, `m4t/tests/` — see `m4t/README.md`. `m4t/tools/` deferred until a profiling consumer demands it. |
+| 13 | File organization | `m4t/src/`, `m4t/tests/`, `m4t/tools/` (hardware-characterization microbenches: gen_pow3_magic, bench_vmlal_throughput, bench_accum_baseline, sdot_pipeline_bench — manually compiled per file headers) — see `m4t/README.md`. |
 | 14.1 | Logical block size (OPEN) | Deferred; logical block = hardware block (1:1) |
 | 14.2 | Cross-block add policy (IMPLEMENTED 2026-05-01) | `m4t_mtfp_vec_accum_aligning` + pairwise wrapper; round-to-nearest; SATURATED+ROUNDED flag bits; named opt-in retains "widen-don't-round" as the default |
 | 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |

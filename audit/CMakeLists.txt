@@ -21,6 +21,6 @@ add_executable(tristate_strong_bench
 )
 target_link_libraries(tristate_strong_bench PRIVATE m4t m)
 
-# SDOT pipeline microbench — direct mechanism test for the strong-claim
-# Path D vs Path A wall-clock advantage. Per concern raised post-P0.
-add_executable(sdot_pipeline_bench sdot_pipeline_bench.c)
+# NOTE: sdot_pipeline_bench moved to m4t/tools/ on 2026-05-05 (per Item 3
+# of the production-shoring plan). Compile manually with:
+#   cc -O3 -mcpu=native m4t/tools/sdot_pipeline_bench.c -o /tmp/sdb
