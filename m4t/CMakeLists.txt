@@ -154,6 +154,14 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_ternary_matmul_neon)
     add_test(NAME m4t_ternary_matmul_neon COMMAND test_m4t_ternary_matmul_neon)
 
+    # §20 5-in-8 base-3 matmul tests. Pack/unpack roundtrip + golden values
+    # + bit-exact NEON-vs-scalar across multi-config × random samples.
+    # Per journal/m4t_5in8_synthesize.md G2/G3.
+    add_executable(test_m4t_ternary_5in8_matmul tests/test_m4t_ternary_5in8_matmul.c)
+    target_link_libraries(test_m4t_ternary_5in8_matmul PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_ternary_5in8_matmul)
+    add_test(NAME m4t_ternary_5in8_matmul COMMAND test_m4t_ternary_5in8_matmul)
+
     # Cross-exp accumulator NEON path test. Bit-exact verification of
     # m4t_mtfp_vec_accum_aligning_neon vs m4t_mtfp_vec_accum_aligning_scalar_ref
     # across n boundary, delta cases, saturation-edge, 1000 random configs,

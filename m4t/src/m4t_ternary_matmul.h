@@ -126,6 +126,53 @@ void m4t_ternary_dot_matmul_bt(
     int M, int K, int N
 );
 
+/* §20 sub-2-bit packed ternary × ternary → MTFP19 matmul.
+ *
+ * Y[M, N] = X[M, K] @ W^T[N, K], where:
+ *   X is unpacked ternary (m4t_trit_t = int8, values in {-1, 0, +1});
+ *   W is 5-trits-in-8-bits packed (1.6 bits/cell), per §20 encoding;
+ *   Y is MTFP19 (int32).
+ *
+ * Per M4T_SUBSTRATE.md §20: sub-2-bit base-3 packing as opt-in dense
+ * format. Storage savings ~5× over unpacked, ~1.25× over the default
+ * 4-in-8 packing.
+ *
+ * Packed W layout: row-major. Each row holds K trits in
+ * M4T_TRIT_PACKED5_BYTES(K) = (K+4)/5 bytes (5 trits per byte).
+ *
+ * Implementation: NEON-only, register-tile by 4 j cells, split-LUT decode
+ * (1× div-by-9 magic-multiply + 5× vqtbl1q/vqtbl2q lookups per byte).
+ * Per audit Path D + journal/m4t_5in8_synthesize.md.
+ *
+ * Output: per-cell |acc| ≤ K (each MAC is in {-1, 0, +1}). For
+ * K ≤ M4T_SDOT_K_MAX_EXACT, output fits MTFP19 by construction (Case W).
+ *
+ * Preconditions (asserted in debug):
+ *   M >= 0, K >= 0, N >= 0;
+ *   K % 80 == 0 (NEON inner-block alignment; no scalar tail per project rule);
+ *   N % 4 == 0 (register-tile alignment; no untiled tail);
+ *   K <= M4T_SDOT_K_MAX_EXACT (no overflow into int32 output);
+ *   X and W contain only valid trit codes;
+ *   Y, X, W non-NULL when M*N*K > 0;
+ *   Y must not alias X or W. */
+void m4t_ternary_5in8_matmul_bt(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
+/* Scalar-only reference. Same semantics as m4t_ternary_5in8_matmul_bt;
+ * never dispatches to NEON. Test-only verification oracle.
+ * Production code MUST NOT call this — intentionally slower.
+ * Per project pattern + journal/m4t_5in8_synthesize.md. */
+void m4t_ternary_5in8_matmul_bt_scalar_ref(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
 #ifdef __cplusplus
 }
 #endif

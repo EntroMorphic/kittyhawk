@@ -34,6 +34,7 @@
 #include "m4t_internal.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <assert.h>
 
 /* NEON 16-trit decode constants. Static to file scope so they are loaded
@@ -438,6 +439,197 @@ void m4t_mtfp_ternary_matmul_bt_scalar_ref(
                 m4t_flag_or(flags, cell_index, M4T_FLAG_SATURATED);
             }
             Y_row[j] = out;
+        }
+    }
+}
+
+/* ── §20 5-in-8 base-3 packed matmul ──────────────────────────────────────
+ *
+ * Per M4T_SUBSTRATE.md §20 + journal/m4t_5in8_synthesize.md.
+ * Ternary X (int8, unpacked) × 5-in-8 packed W → MTFP19 Y.
+ *
+ * Implementation ported from audit Path D (`base3_5in8_matmul_neon`) with
+ * the same split-LUT decode, pre-permuted X, register-tile-by-4 pattern.
+ * Bit-exact verified against scalar reference per ctest.
+ */
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+
+/* §20 split-LUT decode tables. trit_value(u) = {0→0, 1→+1, 2→-1}. */
+static const int8_t M4T_5IN8_LUT_LOW_D0[16] __attribute__((aligned(16))) = {
+     0,  1, -1,  0,  1, -1,  0,  1, -1,    /* low % 3, low ∈ [0, 8] */
+};
+static const int8_t M4T_5IN8_LUT_LOW_D1[16] __attribute__((aligned(16))) = {
+     0,  0,  0,  1,  1,  1, -1, -1, -1,    /* low / 3 */
+};
+static const int8_t M4T_5IN8_LUT_HIGH_D2[32] __attribute__((aligned(16))) = {
+     0,  1, -1,  0,  1, -1,  0,  1, -1,    /* high % 3, high ∈ [0, 26] */
+     0,  1, -1,  0,  1, -1,  0,  1, -1,
+     0,  1, -1,  0,  1, -1,  0,  1, -1,
+};
+static const int8_t M4T_5IN8_LUT_HIGH_D3[32] __attribute__((aligned(16))) = {
+     0,  0,  0,  1,  1,  1, -1, -1, -1,    /* (high/3) % 3 */
+     0,  0,  0,  1,  1,  1, -1, -1, -1,
+     0,  0,  0,  1,  1,  1, -1, -1, -1,
+};
+static const int8_t M4T_5IN8_LUT_HIGH_D4[32] __attribute__((aligned(16))) = {
+     0,  0,  0,  0,  0,  0,  0,  0,  0,    /* high / 9 */
+     1,  1,  1,  1,  1,  1,  1,  1,  1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
+#endif
+
+void m4t_ternary_5in8_matmul_bt(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K % 80 == 0);
+    assert(N % 4 == 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    int Kp = K / 5;
+    int K5 = K / 5;
+
+    const uint8x16_t nine_v = vdupq_n_u8(9);
+    const int8x16_t  lut_d0 = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
+    const int8x16_t  lut_d1 = vld1q_s8(M4T_5IN8_LUT_LOW_D1);
+    const int8x16x2_t lut_d2 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 + 16),
+    } };
+    const int8x16x2_t lut_d3 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 + 16),
+    } };
+    const int8x16x2_t lut_d4 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
+    } };
+
+    int8_t* X_strided = (int8_t*)malloc((size_t)K);
+    if (!X_strided) return;
+    int8_t* X_d[5];
+    for (int d = 0; d < 5; d++) {
+        X_d[d] = X_strided + (size_t)d * K5;
+    }
+
+    for (int i = 0; i < M; i++) {
+        const m4t_trit_t* xi = X + (size_t)i * K;
+
+        for (int n = 0; n < K5; n++) {
+            X_d[0][n] = xi[5 * n + 0];
+            X_d[1][n] = xi[5 * n + 1];
+            X_d[2][n] = xi[5 * n + 2];
+            X_d[3][n] = xi[5 * n + 3];
+            X_d[4][n] = xi[5 * n + 4];
+        }
+
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
+
+            for (int k = 0; k < K; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                #define M4T_5IN8_DECODE_AND_SDOT(WJ, ACC) do {                 \
+                    uint8x16_t b = vld1q_u8((WJ) + k / 5);                     \
+                    uint16x8_t lo16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                    uint16x8_t hi16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                    uint8x16_t high = vcombine_u8(                             \
+                        vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                    int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                    int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                    int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                    int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                    int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                    (ACC) = vdotq_s32((ACC), xv0, d0);                         \
+                    (ACC) = vdotq_s32((ACC), xv1, d1);                         \
+                    (ACC) = vdotq_s32((ACC), xv2, d2);                         \
+                    (ACC) = vdotq_s32((ACC), xv3, d3);                         \
+                    (ACC) = vdotq_s32((ACC), xv4, d4);                         \
+                } while (0)
+
+                M4T_5IN8_DECODE_AND_SDOT(wj0, acc0);
+                M4T_5IN8_DECODE_AND_SDOT(wj1, acc1);
+                M4T_5IN8_DECODE_AND_SDOT(wj2, acc2);
+                M4T_5IN8_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef M4T_5IN8_DECODE_AND_SDOT
+            }
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)vaddvq_s32(acc3);
+        }
+    }
+
+    free(X_strided);
+#else
+    /* Defensive: per project requires-aarch64-NEON rule, this path is
+     * unreachable at runtime. Production callers always have NEON. */
+    m4t_ternary_5in8_matmul_bt_scalar_ref(Y, X, W_packed, M, K, N);
+#endif
+}
+
+/* §20 scalar reference oracle. Per-cell decoded via the spec formula
+ * (u_i = (byte / 3^i) mod 3); never dispatches to NEON.
+ * Test-only; production code MUST NOT call this. */
+void m4t_ternary_5in8_matmul_bt_scalar_ref(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K % 80 == 0);
+    assert(N % 4 == 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    int Kp = K / 5;
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+    for (int i = 0; i < M; i++) {
+        const m4t_trit_t* xi = X + (size_t)i * K;
+        for (int j = 0; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32_t acc = 0;
+            for (int k = 0; k < K; k++) {
+                int byte_idx  = k / 5;
+                int digit_pos = k % 5;
+                uint8_t u = (uint8_t)((wj[byte_idx] / POW3[digit_pos]) % 3u);
+                int w = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+                acc += (int32_t)xi[k] * (int32_t)w;
+            }
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)acc;
         }
     }
 }

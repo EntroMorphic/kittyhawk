@@ -80,6 +80,40 @@ int32_t m4t_popcount_dist(
  * so that kernels can vqtbl1q_s8 against it without redefining the table. */
 extern const int8_t M4T_TRIT_DECODE_LUT[16];
 
+/* ── §20 5-in-8 base-3 packing (opt-in dense format) ──────────────────────
+ *
+ * Per m4t/docs/M4T_SUBSTRATE.md §20. Packs 5 trits per byte using positional
+ * base-3 encoding:
+ *
+ *   trit_to_unsigned: -1 → 2, 0 → 0, +1 → 1
+ *   byte = u_0 + 3*u_1 + 9*u_2 + 27*u_3 + 81*u_4
+ *
+ * Density: 1.6 bits/cell (vs the default 2 bits/cell of m4t_pack_trits_1d).
+ * Approaches the information-theoretic floor log2(3) ≈ 1.585. NO base-2
+ * representation can reach below 2 bits/cell (sign + mask are independent).
+ *
+ * Decode: u_i = (byte / 3^i) mod 3; trit_value(u) = {0→0, 1→+1, 2→-1}.
+ *
+ * Trade-offs vs the default 4-in-8 packing (m4t_pack_trits_1d):
+ *   - 5-in-8 has 1.25× tighter storage.
+ *   - 5-in-8 has more decode cost per byte (1× div-by-9 + 5 LUT lookups
+ *     vs 1× TBL lookup for 4-in-8).
+ *   - Use 5-in-8 when storage bandwidth dominates; default to 4-in-8 for
+ *     compute-bound paths.
+ *
+ * Trailing trits beyond `5 * floor(n/5)` are zero-padded in the final byte
+ * (preserves byte-level encoding when n % 5 != 0). */
+
+/* Number of bytes required to store n trits in 5-in-8 format. */
+#define M4T_TRIT_PACKED5_BYTES(n) (((n) + 4) / 5)
+
+/* Pack `n` trits into 5-in-8 format. dst must have at least
+ * M4T_TRIT_PACKED5_BYTES(n) bytes. */
+void m4t_pack_trits_5in8_1d(uint8_t* dst, const m4t_trit_t* src, int n);
+
+/* Unpack `n` trits from 5-in-8 format. Companion to m4t_pack_trits_5in8_1d. */
+void m4t_unpack_trits_5in8_1d(m4t_trit_t* dst, const uint8_t* src, int n);
+
 #ifdef __cplusplus
 }
 #endif

@@ -31,8 +31,9 @@
 
 #include "b2b_matmul.h"
 
-/* External grounding: substrate's verified ternary matmul. */
+/* External grounding: substrate's verified ternary matmul + §20 5-in-8. */
 #include "m4t_ternary_matmul.h"
+#include "m4t_trit_pack.h"
 #include "m4t_types.h"
 
 #include <stdio.h>
@@ -328,6 +329,30 @@ int main(void) {
             if (!ok_a_eq_f) {
                 fprintf(stderr, "[FAIL] Path F mismatch at cfg %d seed %u\n", c, seed);
                 return 1;
+            }
+
+            /* G6 (concern-2-cycle audit cross-check + §20 verification):
+             * the new libm4t kernel m4t_ternary_5in8_matmul_bt should
+             * produce bit-exact output identical to the audit's Path D
+             * (base3_5in8_matmul_neon). Both use the same encoding +
+             * decode by spec; this verifies they actually do.
+             *
+             * Only runs at K % 80 == 0 AND N % 4 == 0 (kernel asserts).
+             * Audit's bench already enforces this for Path D's configs. */
+            if (K % 80 == 0 && N % 4 == 0) {
+                m4t_mtfp_t* Y_substrate_5in8 = (m4t_mtfp_t*)calloc(
+                    (size_t)M * N, sizeof(m4t_mtfp_t));
+                m4t_ternary_5in8_matmul_bt(
+                    Y_substrate_5in8, X, Wp_d, M, K, N);
+                int ok_substrate_5in8 = (memcmp(Y_substrate_5in8, Yd,
+                    (size_t)M * N * sizeof(int32_t)) == 0) ? 1 : 0;
+                free(Y_substrate_5in8);
+                if (!ok_substrate_5in8) {
+                    fprintf(stderr,
+                        "[FAIL] m4t_ternary_5in8_matmul_bt mismatch vs "
+                        "audit Path D at cfg %d seed %u\n", c, seed);
+                    return 1;
+                }
             }
 
             /* Skip rate */

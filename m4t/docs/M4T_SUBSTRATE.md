@@ -460,6 +460,7 @@ For readers tracing a spec section back to the code that realizes it.
 | 14.3 | Tail-block padding (DECIDED: zero-pad) | Vec ops in `m4t/src/m4t_mtfp.c` process whole blocks + scalar tail with identical semantics |
 | 14.4 | Exponent status tracking (DECIDED) | No status array allocated until consumer requests |
 | 18 | Base-3 native criterion (emission coverage + review gate) | `journal/base3_native_criterion_*.md` + `journal/updated_model_scrutiny_*.md` (LMM cycles, 2026-04-14) |
+| 20 | Sub-2-bit base-3 packing (5-in-8) | `m4t/src/m4t_trit_pack.{h,c}` (`m4t_pack_trits_5in8_1d`, `m4t_unpack_trits_5in8_1d`, `M4T_TRIT_PACKED5_BYTES`); `m4t/src/m4t_ternary_matmul.{h,c}` (`m4t_ternary_5in8_matmul_bt`); `m4t/tests/test_m4t_ternary_5in8_matmul.c` |
 
 ---
 
@@ -624,3 +625,72 @@ Every primitive that consumes or produces three-state inputs MUST ship with:
 §19 exists because the P0-1 design cycle (`gesh_zero_signal_design_*.md`) surfaced that the substrate's structural zero was passing §18 emission coverage while failing operational distinction. The wildcard semantics introduced for `m4t_route_wildcard_dist` and `gesh_bank_build_class_wildcard` is the first new zero-state interpretation in the substrate; declaring it required §19 to formalize the audit category alongside §18.
 
 Journal record: `gesh_zero_signal_design_{raw,nodes,reflect,synthesize,closeout}.md`. Plan: `docs/REMEDIATION_PLAN_P0.md`.
+
+---
+
+## 20. Sub-2-bit base-3 packing (5-trits-in-8-bits, opt-in)
+
+The default ternary packing (`m4t_pack_trits_1d` in `m4t_trit_pack.h`) stores 4 trits per byte using 2-bit codes (0b00, 0b01, 0b10, with 0b11 reserved). Density: 2 bits/cell. This packing is SDOT-friendly, decodes via single-TBL, and is the right choice for compute-bound workloads.
+
+For storage-bandwidth-bound workloads, a tighter packing exists: **5 trits per 8 bits = 1.6 bits/cell**, approaching the information-theoretic limit `log2(3) ≈ 1.585`. This format is opt-in (added 2026-05-05) for consumers willing to trade decode complexity for storage density.
+
+### 20.1 Why this exists
+
+A base-2 representation of {-1, 0, +1} requires either (a) 1 bit per cell with the third state collapsed (information lost), or (b) ≥2 bits per cell with the third state encoded as an explicit overlay (e.g., sign bit + sparsity bit). The 2-bits-per-cell floor is structural: sign and mask are independent, so they cannot share information.
+
+Base-3 has no such floor. **5 base-3 digits encode 3^5 = 243 distinct values**, fitting in 8 bits with only 13 codes wasted (`[243, 255]`). This achieves 1.6 bits/cell density — strictly below the base-2 floor of 2 b/c.
+
+The audit (`audit/tristate_audit.c` + `audit/tristate_strong_bench.c`) demonstrated that this packing also wins on wall-clock at apples-to-apples kernel-cost comparison (~1.8× faster than the 4-in-8 packed base-3 kernel after register-tile-by-4 + split-LUT decode). Per `journal/tristate_strong_*` cycle.
+
+### 20.2 Encoding
+
+- Trit-to-unsigned mapping: `-1 → 2`, `0 → 0`, `+1 → 1`.
+- Byte composition: `byte = u_0 + 3·u_1 + 9·u_2 + 27·u_3 + 81·u_4`, where `u_i ∈ {0, 1, 2}` is the unsigned digit at position `i`.
+- Byte range: `[0, 242]`. Codes `[243, 255]` are unused (reserved; producers MUST NOT emit them).
+- Storage: `(n + 4) / 5` bytes for `n` trits. Macro: `M4T_TRIT_PACKED5_BYTES(n)`.
+
+Trailing trits beyond `5 * floor(n/5)` are padded with zero unsigned (= trit 0) in the final byte. This preserves the byte-level encoding integrity even when `n % 5 != 0`.
+
+### 20.3 Decode
+
+Per byte `b ∈ [0, 242]`:
+- `u_i = (b / 3^i) mod 3` for `i ∈ [0, 4]`.
+- `trit_value(u) = {0 → 0, 1 → +1, 2 → -1}`.
+
+NEON-vectorized decode pattern (from the production `m4t_ternary_5in8_matmul_bt`):
+1. Compute `high = (b * 57) >> 9` via magic-multiply (gives `b / 9` for `b ∈ [0, 255]`; valid bytes `[0, 242]`).
+2. Compute `low = b - 9 * high` (range `[0, 8]`).
+3. `digit_0 = low % 3` via `vqtbl1q_s8` against a 16-byte LUT.
+4. `digit_1 = low / 3` via `vqtbl1q_s8` against a 16-byte LUT.
+5. `digit_2 = high % 3` via `vqtbl2q_s8` against a 32-byte LUT (27 valid entries; rest zero-pad).
+6. `digit_3 = (high / 3) % 3` via `vqtbl2q_s8`.
+7. `digit_4 = high / 9` via `vqtbl2q_s8`.
+
+This split-LUT decode is the verified-fastest approach on Apple Silicon NEON; alternatives (sequential div-by-3 magic-multiply cascade) are slower per disassembly + wall-clock measurement.
+
+### 20.4 When to use which packing
+
+| Packing | Density | Decode cost | Storage savings vs unpacked | Use when |
+|---|---|---|---|---|
+| Unpacked (8 b/c) | 8 bits | None (SDOT direct) | 1× (baseline) | Compute-bound; hot weights in L1 |
+| 4-in-8 (2 b/c) | 2 bits | 1× TBL lookup | 4× | Default packed format (`m4t_pack_trits_1d`) |
+| **5-in-8 (1.6 b/c)** | 1.6 bits | div-by-9 + 5 LUTs | 5× | Storage-bandwidth-bound; opt-in via `m4t_pack_trits_5in8_1d` |
+
+The 5-in-8 packing is NOT a replacement for 4-in-8. They coexist; 4-in-8 stays the default for SDOT-friendly paths, and 5-in-8 is available when storage density justifies the decode cost.
+
+### 20.5 Spec discipline
+
+This is a NEW representation but does NOT amend the substrate's invariants:
+- Trit values still ∈ {-1, 0, +1}. Same ternary value space as 4-in-8.
+- Same per-block exponent semantics (the 5-in-8 packing is at the trit-storage layer, not the block-exponent layer).
+- Mantissa containers (MTFP4, MTFP9, MTFP19, MTFP39) unchanged.
+
+5-in-8 is purely a denser storage encoding for ternary values. It plugs into the existing arithmetic and routing primitives via the new pack/unpack primitives.
+
+### 20.6 Cross-references
+
+- Pack/unpack: `m4t/src/m4t_trit_pack.h` — `m4t_pack_trits_5in8_1d`, `m4t_unpack_trits_5in8_1d`, `M4T_TRIT_PACKED5_BYTES`.
+- Matmul: `m4t/src/m4t_ternary_matmul.h` — `m4t_ternary_5in8_matmul_bt`.
+- Test: `m4t/tests/test_m4t_ternary_5in8_matmul.c`.
+- Audit precursor: `audit/b2b_matmul.{h,c}` (Path D: `base3_5in8_matmul_neon`).
+- Journal: `journal/m4t_5in8_synthesize.md`, `journal/m4t_5in8_closeout.md`, `journal/tristate_strong_5in8_addendum.md`.

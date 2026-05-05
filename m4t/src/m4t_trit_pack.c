@@ -84,6 +84,48 @@ void m4t_unpack_trits_rowmajor(
     }
 }
 
+/* ── §20 5-in-8 base-3 packing ────────────────────────────────────────── */
+
+/* Per M4T_SUBSTRATE.md §20.
+ *   trit_to_unsigned: -1 → 2, 0 → 0, +1 → 1.
+ *   byte = u_0 + 3*u_1 + 9*u_2 + 27*u_3 + 81*u_4. */
+static inline uint8_t trit5_to_unsigned(m4t_trit_t t) {
+    assert(t >= -1 && t <= 1);
+    /* {-1, 0, +1} → {2, 0, 1}. Fallback to 0 in NDEBUG for noise. */
+    return (t == 1) ? 1u : (t == -1) ? 2u : 0u;
+}
+
+static inline m4t_trit_t unsigned_to_trit5(uint8_t u) {
+    /* {0, 1, 2} → {0, +1, -1}. Other values map to 0 (defensive). */
+    return (u == 1u) ? (m4t_trit_t)1
+         : (u == 2u) ? (m4t_trit_t)-1
+         :              (m4t_trit_t)0;
+}
+
+void m4t_pack_trits_5in8_1d(uint8_t* dst, const m4t_trit_t* src, int n) {
+    int nb = M4T_TRIT_PACKED5_BYTES(n);
+    memset(dst, 0, (size_t)nb);
+    /* POW3[i] = 3^i for i in [0, 5). */
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+    for (int i = 0; i < n; i++) {
+        uint8_t u = trit5_to_unsigned(src[i]);
+        int byte_idx  = i / 5;
+        int digit_pos = i % 5;
+        dst[byte_idx] = (uint8_t)(dst[byte_idx] + u * POW3[digit_pos]);
+    }
+}
+
+void m4t_unpack_trits_5in8_1d(m4t_trit_t* dst, const uint8_t* src, int n) {
+    /* POW3[i] = 3^i for i in [0, 5). */
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+    for (int i = 0; i < n; i++) {
+        int byte_idx  = i / 5;
+        int digit_pos = i % 5;
+        uint8_t u = (uint8_t)((src[byte_idx] / POW3[digit_pos]) % 3u);
+        dst[i] = unsigned_to_trit5(u);
+    }
+}
+
 /* ── Popcount distance with mask ───────────────────────────────────────── */
 
 int32_t m4t_popcount_dist(
