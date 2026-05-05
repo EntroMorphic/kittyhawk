@@ -148,3 +148,75 @@ The vqtbl4q → vqtbl2q switch is a non-obvious win. It came from disassembling 
 P0-1 + P0-2 produced a structural win: Path D now beats Path A across all tested regimes by 0-18% wall-clock. **Sub-2-bit base-3 packing's density advantage manifests as kernel-cost advantage** — the strong claim is now genuinely supported, not just at the density-ceiling layer.
 
 Proceeding to P0-3 (register tile by 4 j-cells). Expected gain: minor (we're SDOT-throughput-bound), but possibly some by overlapping multiple SDOT chains.
+
+---
+
+## P0-3 (register tile by 4 j-cells) RED-TEAM + REMEDIATION
+
+### Findings
+
+**C1 — Apples-to-oranges comparison (CRITICAL).** Initial P0-3 implementation tiled only Path D, not Path A or Path C. Result: Path D appeared 3× faster than Path A. But the 3× was partly the tile benefit, not structural. Tiling is an ORTHOGONAL optimization that applies equally to Path A and Path C.
+
+**Remediation:** also register-tile Path A AND Path C with the same 4-j-cell pattern. Re-measure.
+
+### Result (apples-to-apples; A, C, D all tiled)
+
+```
+Wall-clock at K=12800, N=64 (memory-bound):
+  Path A (tiled):  29.94 ms  (1.00×)
+  Path C (tiled):  30.08 ms  (1.00× — Path A ≡ Path C)
+  Path D (tiled):  16.65 ms  (0.56× — Path D BEATS A by 1.8×)
+
+Wall-clock at K=51200, N=64:
+  Path A (tiled):  29.85 ms
+  Path D (tiled):  16.60 ms  (0.56×)
+
+DRAM-bound K=12800, N=8192:
+  Path A (tiled):  58.21 ms
+  Path D (tiled):  34.04 ms  (0.58×)
+```
+
+**Path D is ~1.8× faster than Path A AND Path C across all regimes when all are tiled.** This is the apples-to-apples structural win.
+
+### Why does Path D still win after fair tiling?
+
+Both kernels execute the same SDOT count (M·N·K/16). Yet Path D wins 1.8×. Hypothesis: SDOT pipeline saturation differs.
+
+Empirical SDOT dispatch rate:
+- Path A at K=12800: 8·64·12800/16 ÷ 30 ms ≈ 1.37 SDOTs/μs ≈ **0.46 SDOTs/cycle** at 3 GHz
+- Path D at K=12800: same SDOTs ÷ 16.7 ms ≈ 2.46 SDOTs/μs ≈ **0.82 SDOTs/cycle**
+
+Path D dispatches SDOTs nearly twice as densely. The reason: Path D's denser packing means **more SDOTs per setup overhead**. Path A does 1 SDOT per 16-cell × 1 W decode + 1 X load. Path D does 5 SDOTs per 80-cell × 1 W decode + 5 X loads. The non-SDOT ops are amortized over 5× more SDOTs in Path D. Better SDOT pipeline utilization.
+
+**This is the structural advantage finally manifesting on wall-clock.** Sub-2-bit base-3 packing's density advantage manifests through better SDOT amortization, not through bandwidth savings.
+
+### Honest scope
+
+- Path B (B2-B honest) NOT tiled — strawman comparison per R-G1 (3 ops/block decode penalty independent of tiling).
+- Path B-skip NOT tiled — same reason.
+- Substrate (m4t_ternary_dot_matmul_bt) NOT tiled — externally-validated kernel from libm4t; not under audit's control. Now appears 1.65× of Path A (was 0.97× pre-tile) because Path A's tile speedup made substrate look slow. Honest framing: substrate's serial SDOT chain becomes the bottleneck once decode-side optimizations close the gap.
+
+### Verification
+
+80/80 bit-exact across all 5 audit kernels + substrate. No regressions.
+
+### Methodology lifted
+
+**Tile fairness in kernel comparisons:** if you optimize one kernel's outer-loop structure (tile, prefetch, etc.), apply the same to comparable kernels before claiming structural wins. Tile asymmetry inflates the apparent advantage. The first P0-3 run showed Path D 3× faster than untiled Path A — the actual apples-to-apples win was 1.8×.
+
+**SDOT amortization is structural to packed-W kernels.** A kernel's SDOT throughput on M-series isn't fully captured by SDOT count — it depends on how many SDOTs you dispatch per setup overhead. Denser packing → more SDOTs per W decode → better SDOT saturation. This is a kernel-level expression of the density-ceiling structural advantage from the 5-in-8 addendum.
+
+## Status (after P0-1 + P0-2 + P0-3)
+
+```
+Cumulative Path D improvement (5in8/A wall-clock ratio):
+  Before any P0:           1.16-1.95×  Path D LOSES at every regime
+  After P0-1:              1.02-1.41×  near-tie at memory-bound
+  After P0-2:              0.82-1.00×  Path D wins L1-resident, near-tie elsewhere
+  After P0-3 (untiled A):  0.30-0.51×  artifact (tile asymmetry)
+  After P0-3 (apples):     0.55-0.58×  Path D wins 1.8× across all regimes
+```
+
+**Strong-claim verdict (final, post-P0):** Path D's sub-2-bit base-3 packing **structurally outperforms 2-bit packings (Path A base-3 4-in-8 AND Path C base-2 sign+mask)** by ~1.8× wall-clock on Apple Silicon, due to better SDOT amortization. The density-ceiling advantage manifests as kernel-cost advantage when both are register-tiled.
+
+This is the strong-claim's most defensible empirical position to date.

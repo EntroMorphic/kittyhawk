@@ -175,6 +175,8 @@ void base3_packed_matmul_neon(
     assert(Y && (K == 0 || (X && W_packed)));
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_packed);
+    /* P0-3 (apples-to-apples): register-tile by 4 j cells. */
+    assert(N % 4 == 0);
 
     int Kp = (K + 3) / 4;
 
@@ -185,25 +187,45 @@ void base3_packed_matmul_neon(
 
     for (int i = 0; i < M; i++) {
         const int8_t* xi = X + (size_t)i * K;
-        for (int j = 0; j < N; j++) {
-            const uint8_t* wj = W_packed + (size_t)j * Kp;
-            int32x4_t acc = vdupq_n_s32(0);
+
+        /* Tile by 4 j cells: shared X load, 4 parallel SDOT chains. */
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
 
             for (int k = 0; k < K; k += 16) {
-                /* Inner-block decode + SDOT. ~7 NEON ops. */
-                uint32_t w32;
-                memcpy(&w32, wj + (k >> 2), 4);
-                uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
-                uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
-                uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
-                uint8x16_t codes   = vandq_u8(shifted, mask_03);
-                int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);
+                int8x16_t x_vec = vld1q_s8(xi + k);
 
-                int8x16_t  x_vec   = vld1q_s8(xi + k);
-                acc = vdotq_s32(acc, x_vec, w_vec);
+                #define A_DECODE_AND_SDOT(WJ, ACC) do {                        \
+                    uint32_t w32;                                              \
+                    memcpy(&w32, (WJ) + (k >> 2), 4);                          \
+                    uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));\
+                    uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);          \
+                    uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));     \
+                    uint8x16_t codes   = vandq_u8(shifted, mask_03);           \
+                    int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);               \
+                    (ACC) = vdotq_s32((ACC), x_vec, w_vec);                    \
+                } while (0)
+
+                A_DECODE_AND_SDOT(wj0, acc0);
+                A_DECODE_AND_SDOT(wj1, acc1);
+                A_DECODE_AND_SDOT(wj2, acc2);
+                A_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef A_DECODE_AND_SDOT
             }
 
-            Y[(size_t)i * N + j] = vaddvq_s32(acc);
+            Y[(size_t)i * N + j + 0] = vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = vaddvq_s32(acc3);
         }
     }
 }
@@ -390,6 +412,9 @@ void base3_5in8_matmul_neon(
         X_d[d] = X_strided + (size_t)d * K5;
     }
 
+    /* P0-3 requires N % 4 == 0 (register-tile by 4 j cells). */
+    assert(N % 4 == 0);
+
     for (int i = 0; i < M; i++) {
         const int8_t* xi = X + (size_t)i * K;
 
@@ -402,48 +427,66 @@ void base3_5in8_matmul_neon(
             X_d[4][n] = xi[5 * n + 4];
         }
 
-        for (int j = 0; j < N; j++) {
-            const uint8_t* wj = W_packed_5in8 + (size_t)j * Kp;
-            int32x4_t acc = vdupq_n_s32(0);
+        /* P0-3: register-tile by 4 j cells. 4 independent SDOT accumulator
+         * chains run in parallel — pipelines better on M-series (SDOT has
+         * ~3-4 cycle latency, 1/cycle throughput; serial dependency limits
+         * single-chain throughput). X loads are shared across 4 j cells:
+         * 5 X loads per outer iter cover 4 cells (was 4×5=20). */
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_packed_5in8 + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed_5in8 + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed_5in8 + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed_5in8 + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
 
             for (int k = 0; k < K; k += 80) {
-                /* Load 16 packed bytes (= 80 trits). */
-                uint8x16_t b = vld1q_u8(wj + k / 5);
-
-                /* P0-2: split-LUT decode.
-                 * high = b / 9 (magic-mul: (b * 57) >> 9), range [0, 26].
-                 * low  = b - 9 * high, range [0, 8].
-                 * 5 digits extracted via direct LUT lookups. */
-                uint16x8_t lo16 = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
-                uint16x8_t hi16 = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
-                uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));
-                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
-
-                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
-                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
-                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
-                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
-                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
-
-                /* P0-1 optimization: direct loads from pre-permuted X.
-                 * Each X_d[digit] is contiguous; lane i holds X[5*i + digit]
-                 * for the current outer-block's k. */
                 int x_idx = k / 5;
+
+                /* Shared X loads (5 vectors, used by all 4 j cells). */
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
                 int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
                 int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
                 int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-                /* SDOT each digit. */
-                acc = vdotq_s32(acc, xv0, d0);
-                acc = vdotq_s32(acc, xv1, d1);
-                acc = vdotq_s32(acc, xv2, d2);
-                acc = vdotq_s32(acc, xv3, d3);
-                acc = vdotq_s32(acc, xv4, d4);
+                /* Macro for one j cell's decode-and-SDOT chain. */
+                #define DECODE_AND_SDOT(WJ, ACC) do {                          \
+                    uint8x16_t b = vld1q_u8((WJ) + k / 5);                     \
+                    uint16x8_t lo16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                    uint16x8_t hi16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                    uint8x16_t high = vcombine_u8(                             \
+                        vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                    int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                    int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                    int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                    int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                    int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                    (ACC) = vdotq_s32((ACC), xv0, d0);                         \
+                    (ACC) = vdotq_s32((ACC), xv1, d1);                         \
+                    (ACC) = vdotq_s32((ACC), xv2, d2);                         \
+                    (ACC) = vdotq_s32((ACC), xv3, d3);                         \
+                    (ACC) = vdotq_s32((ACC), xv4, d4);                         \
+                } while (0)
+
+                DECODE_AND_SDOT(wj0, acc0);
+                DECODE_AND_SDOT(wj1, acc1);
+                DECODE_AND_SDOT(wj2, acc2);
+                DECODE_AND_SDOT(wj3, acc3);
+
+                #undef DECODE_AND_SDOT
             }
 
-            Y[(size_t)i * N + j] = vaddvq_s32(acc);
+            Y[(size_t)i * N + j + 0] = vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = vaddvq_s32(acc3);
         }
     }
 
@@ -465,6 +508,8 @@ void b2b_optimal_matmul_neon(
     assert(Y && (K == 0 || (X && W_b2b)));
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_b2b);
+    /* P0-3 (apples-to-apples): register-tile by 4 j cells. */
+    assert(N % 4 == 0);
 
     int Kp = (K + 3) / 4;
 
@@ -475,26 +520,44 @@ void b2b_optimal_matmul_neon(
 
     for (int i = 0; i < M; i++) {
         const int8_t* xi = X + (size_t)i * K;
-        for (int j = 0; j < N; j++) {
-            const uint8_t* wj = W_b2b + (size_t)j * Kp;
-            int32x4_t acc = vdupq_n_s32(0);
+
+        for (int j = 0; j < N; j += 4) {
+            const uint8_t* wj0 = W_b2b + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_b2b + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_b2b + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_b2b + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
 
             for (int k = 0; k < K; k += 16) {
-                /* Inner-block decode + SDOT. Identical structure to Path A;
-                 * only the LUT contents differ. ~7 NEON ops. */
-                uint32_t w32;
-                memcpy(&w32, wj + (k >> 2), 4);
-                uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
-                uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
-                uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
-                uint8x16_t codes   = vandq_u8(shifted, mask_03);
-                int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);
+                int8x16_t x_vec = vld1q_s8(xi + k);
 
-                int8x16_t  x_vec   = vld1q_s8(xi + k);
-                acc = vdotq_s32(acc, x_vec, w_vec);
+                #define C_DECODE_AND_SDOT(WJ, ACC) do {                        \
+                    uint32_t w32;                                              \
+                    memcpy(&w32, (WJ) + (k >> 2), 4);                          \
+                    uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));\
+                    uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);          \
+                    uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));     \
+                    uint8x16_t codes   = vandq_u8(shifted, mask_03);           \
+                    int8x16_t  w_vec   = vqtbl1q_s8(lut, codes);               \
+                    (ACC) = vdotq_s32((ACC), x_vec, w_vec);                    \
+                } while (0)
+
+                C_DECODE_AND_SDOT(wj0, acc0);
+                C_DECODE_AND_SDOT(wj1, acc1);
+                C_DECODE_AND_SDOT(wj2, acc2);
+                C_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef C_DECODE_AND_SDOT
             }
 
-            Y[(size_t)i * N + j] = vaddvq_s32(acc);
+            Y[(size_t)i * N + j + 0] = vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = vaddvq_s32(acc3);
         }
     }
 }
