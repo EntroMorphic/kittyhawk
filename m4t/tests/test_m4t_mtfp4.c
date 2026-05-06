@@ -422,6 +422,57 @@ static int test_narrow_property(void) {
     return 0;
 }
 
+/* NEON vs scalar_ref bit-exact for the conversion functions. Per
+ * no-scalar-audit remediation 2026-05-06: these were scalar in production
+ * until we added NEON paths. Ensure NEON output bit-exact matches the
+ * reference scalar implementation across diverse N values. */
+static int test_conversions_neon_vs_scalar_ref(void) {
+    g_rng = 0xfeed1234u;
+    const int Ns[] = { 1, 3, 4, 5, 8, 15, 16, 17, 31, 32, 33,
+                       63, 64, 65, 127, 128, 129, 255, 256, 257 };
+    for (size_t k = 0; k < sizeof(Ns)/sizeof(Ns[0]); k++) {
+        int n = Ns[k];
+
+        /* Test mtfp19_to_mtfp4 NEON vs scalar_ref. */
+        int32_t* src19 = malloc(sizeof(int32_t) * (size_t)n);
+        int8_t*  d_neon = malloc((size_t)n);
+        int8_t*  d_ref  = malloc((size_t)n);
+        uint8_t* f_neon = malloc(M4T_FLAG_BYTES(n));
+        uint8_t* f_ref  = malloc(M4T_FLAG_BYTES(n));
+        for (int s = 0; s < 100; s++) {
+            for (int i = 0; i < n; i++) src19[i] = rand_mtfp19();
+            memset(f_neon, 0, M4T_FLAG_BYTES(n));
+            memset(f_ref,  0, M4T_FLAG_BYTES(n));
+            m4t_mtfp19_to_mtfp4(d_neon, src19, f_neon, n);
+            m4t_mtfp19_to_mtfp4_scalar_ref(d_ref, src19, f_ref, n);
+            if (memcmp(d_neon, d_ref, (size_t)n) != 0 ||
+                memcmp(f_neon, f_ref, M4T_FLAG_BYTES(n)) != 0) {
+                fprintf(stderr, "FAIL mtfp19_to_mtfp4 NEON-vs-scalar n=%d sample=%d\n", n, s);
+                free(src19); free(d_neon); free(d_ref); free(f_neon); free(f_ref);
+                return 1;
+            }
+        }
+        free(src19); free(d_neon); free(d_ref); free(f_neon); free(f_ref);
+
+        /* Test mtfp4_to_mtfp19 NEON vs scalar_ref. */
+        int8_t*  src4  = malloc((size_t)n);
+        int32_t* w_neon = malloc(sizeof(int32_t) * (size_t)n);
+        int32_t* w_ref  = malloc(sizeof(int32_t) * (size_t)n);
+        for (int s = 0; s < 100; s++) {
+            for (int i = 0; i < n; i++) src4[i] = rand_mtfp4();
+            m4t_mtfp4_to_mtfp19(w_neon, src4, n);
+            m4t_mtfp4_to_mtfp19_scalar_ref(w_ref, src4, n);
+            if (memcmp(w_neon, w_ref, sizeof(int32_t) * (size_t)n) != 0) {
+                fprintf(stderr, "FAIL mtfp4_to_mtfp19 NEON-vs-scalar n=%d sample=%d\n", n, s);
+                free(src4); free(w_neon); free(w_ref);
+                return 1;
+            }
+        }
+        free(src4); free(w_neon); free(w_ref);
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_clamp_basic())                return 1;
     if (test_sdot_matmul_small())          return 1;
@@ -435,6 +486,7 @@ int main(void) {
     if (test_narrow_flags())               return 1;
     if (test_narrow_property())            return 1;
     if (test_roundtrip_widen_narrow())     return 1;
-    printf("m4t_mtfp4: all 12 tests passed\n");
+    if (test_conversions_neon_vs_scalar_ref()) return 1;
+    printf("m4t_mtfp4: all 13 tests passed\n");
     return 0;
 }

@@ -114,6 +114,14 @@ void m4t_pack_trits_5in8_1d(uint8_t* dst, const m4t_trit_t* src, int n);
 /* Unpack `n` trits from 5-in-8 format. Companion to m4t_pack_trits_5in8_1d. */
 void m4t_unpack_trits_5in8_1d(m4t_trit_t* dst, const uint8_t* src, int n);
 
+/* Scalar-only references for pack/unpack. Same semantics as the public
+ * dispatchers; never dispatch to NEON. Test-only oracles for bit-exact
+ * verification. Production code MUST NOT call these. */
+void m4t_pack_trits_1d_scalar_ref      (uint8_t* dst, const m4t_trit_t* src, int n);
+void m4t_unpack_trits_1d_scalar_ref    (m4t_trit_t* dst, const uint8_t* src, int n);
+void m4t_pack_trits_5in8_1d_scalar_ref (uint8_t* dst, const m4t_trit_t* src, int n);
+void m4t_unpack_trits_5in8_1d_scalar_ref(m4t_trit_t* dst, const uint8_t* src, int n);
+
 #ifdef __cplusplus
 }
 #endif

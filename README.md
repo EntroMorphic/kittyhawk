@@ -110,6 +110,7 @@ ctest --test-dir build
 | [`journal/tristate_dram_regime.md`](journal/tristate_dram_regime.md) | TD-9 closeout (v2): tightened gate FAILS — deep-DRAM D/A (0.631) > 0.8 × L1 D/A (0.492 threshold). PLATEAU verdict from membw addendum extends; Path D's ~1.7× advantage is SDOT-amortization-driven, workload-independent, no bandwidth crossover on Apple Silicon. |
 | [`journal/large_cycles_redteam_2026_05_06.md`](journal/large_cycles_redteam_2026_05_06.md) | Consolidated red-team of TD-4/5/6/9 v1 with 100/100 remediation. RC-1 through RC-15 finding-and-fix record. |
 | [`journal/td7_xpacked_bench.md`](journal/td7_xpacked_bench.md) | TD-7 X-packed §20 wall-clock bench: §20-xp 14-26% faster than §20 across all M/K (mechanism: NEON-vectorized permutation, NOT bandwidth savings as predicted). Single-token inference at K ≥ 4480: §20-xp also beats unpacked. |
+| [`journal/no_scalar_audit_2026_05_06.md`](journal/no_scalar_audit_2026_05_06.md) | No-scalar audit: 9 fully-scalar production functions found and NEON-ized (pack/unpack 4-in-8 + 5-in-8, mtfp4↔mtfp19 conversions, shift3 k>0 multiply, k≥20 saturation collapse). ~13,500 new NEON-vs-scalar_ref bit-exact assertions. Substrate now fully NEON in production. |
 
 ## License
 

@@ -229,8 +229,88 @@ static void perf_compare(int abs_k, int n, int call_count, const char* shape) {
 int main(int argc, char** argv) {
     int do_exhaustive = (argc > 1 && argv[1][0] == 'x');
 
-    printf("=== Bit-exact (sample): production m4t_mtfp_shift3 vs m4t_mtfp_shift3_scalar_ref ===\n");
+    printf("=== Bit-exact (sample): production m4t_mtfp_shift3 vs m4t_mtfp_shift3_scalar_ref (DIVIDE k<0) ===\n");
     for (int k = 1; k <= 19; k++) test_bit_exact_per_k(k);
+
+    /* k>0 multiply path bit-exact (no-scalar audit remediation: this path
+     * was scalar in production until 2026-05-06; now NEON-routed). Reuse
+     * test_bit_exact_per_k's mix of boundary + random inputs but with
+     * positive k. */
+    printf("\n=== Bit-exact (sample): production m4t_mtfp_shift3 vs m4t_mtfp_shift3_scalar_ref (MULTIPLY k>0) ===\n");
+    for (int k = 1; k <= 19; k++) {
+        enum { N_RAND = 50000 };
+        int n = N_RAND + 12 + 4;
+        m4t_mtfp_t* in_buf  = malloc(n * sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* out_neon = malloc(n * sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* out_ref  = malloc(n * sizeof(m4t_mtfp_t));
+        if (!in_buf || !out_neon || !out_ref) { fprintf(stderr, "malloc fail\n"); exit(1); }
+
+        int idx = 0;
+        in_buf[idx++] = 0;
+        in_buf[idx++] = 1;
+        in_buf[idx++] = -1;
+        in_buf[idx++] = (m4t_mtfp_t)MAX_VAL;
+        in_buf[idx++] = (m4t_mtfp_t)(-MAX_VAL);
+        in_buf[idx++] = (m4t_mtfp_t)(MAX_VAL - 1);
+        in_buf[idx++] = (m4t_mtfp_t)(-MAX_VAL + 1);
+        in_buf[idx++] = (m4t_mtfp_t)(MAX_VAL / 2);
+        in_buf[idx++] = (m4t_mtfp_t)(-MAX_VAL / 2);
+        in_buf[idx++] = 1000000;
+        in_buf[idx++] = -1000000;
+        in_buf[idx++] = 12345;
+        srand(42 + k);
+        for (int j = 0; j < N_RAND; j++) {
+            int64_t r = ((int64_t)rand() << 32) ^ rand();
+            r = r % (2 * MAX_VAL + 1) - MAX_VAL;
+            in_buf[idx++] = (m4t_mtfp_t)r;
+        }
+        for (; idx < n; idx++) in_buf[idx] = 0;
+        m4t_mtfp_shift3(out_neon, in_buf, k, n);
+        m4t_mtfp_shift3_scalar_ref(out_ref, in_buf, k, n);
+        int fails = 0;
+        for (int i = 0; i < n; i++) {
+            if (out_neon[i] != out_ref[i]) {
+                fails++;
+                if (fails <= 3) {
+                    fprintf(stderr,
+                        "  k=+%d FAIL i=%d in=%d production=%d scalar_ref=%d\n",
+                        k, i, (int)in_buf[i], (int)out_neon[i], (int)out_ref[i]);
+                }
+            }
+        }
+        if (fails == 0) {
+            printf("  k=+%2d PASS  (%d cases bit-exact vs scalar_ref)\n", k, n);
+        } else {
+            printf("  k=+%2d FAIL  (%d / %d mismatches)\n", k, fails, n);
+            g_fails += fails;
+        }
+        free(in_buf); free(out_neon); free(out_ref);
+    }
+
+    /* k>=20 saturation collapse path. */
+    printf("\n=== Bit-exact: k>=20 saturation collapse path ===\n");
+    {
+        const int kvals[] = {20, 25, 31};
+        for (size_t kk = 0; kk < sizeof(kvals)/sizeof(kvals[0]); kk++) {
+            int k = kvals[kk];
+            int n = 4096 + 13;
+            m4t_mtfp_t* in_buf  = malloc(n * sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* out_neon = malloc(n * sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* out_ref  = malloc(n * sizeof(m4t_mtfp_t));
+            srand(99 + k);
+            for (int i = 0; i < n; i++) {
+                int64_t r = ((int64_t)rand() << 32) ^ rand();
+                in_buf[i] = (m4t_mtfp_t)(r % (2 * MAX_VAL + 1) - MAX_VAL);
+            }
+            m4t_mtfp_shift3(out_neon, in_buf, k, n);
+            m4t_mtfp_shift3_scalar_ref(out_ref, in_buf, k, n);
+            int fails = 0;
+            for (int i = 0; i < n; i++) if (out_neon[i] != out_ref[i]) fails++;
+            if (fails == 0) printf("  k=+%d (saturate) PASS  (%d cases)\n", k, n);
+            else { printf("  k=+%d FAIL %d\n", k, fails); g_fails += fails; }
+            free(in_buf); free(out_neon); free(out_ref);
+        }
+    }
     if (g_fails > 0) {
         printf("\nFAIL: %d total mismatches across all k (sample)\n", g_fails);
         return 1;

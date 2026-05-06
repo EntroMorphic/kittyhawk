@@ -4,6 +4,27 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Changed — No-scalar audit + 100/100 remediation (2026-05-06)
+User-requested sweep of production code for scalar paths violating `feedback_function_over_speed_no_scalar` rule. Found 9 production functions with **zero NEON path** (fully scalar entry-to-exit) plus 2 stale "fallback" comments documenting patterns already-remediated in earlier cycles. All 11 fixed.
+
+**NEON-ized:**
+- `m4t_pack_trits_1d` / `m4t_unpack_trits_1d` (4-in-8 pack/unpack) — TBL + vmulq + vpaddq pattern; 16 trits → 4 bytes / 4 bytes → 16 trits per iter.
+- `m4t_pack_trits_5in8_1d` / `m4t_unpack_trits_5in8_1d` (5-in-8 pack/unpack) — workaround for missing LD5/ST5 instructions: `vqtbl4q_s8` (4-vector lookup) + `vqtbl1q_s8` (1-vector lookup) + `vorrq` combine, with pre-computed 5×16 (de)interleave index tables.
+- `m4t_pack_trits_rowmajor` / `m4t_unpack_trits_rowmajor` — auto-NEON-ized as wrappers around the _1d versions.
+- `m4t_mtfp_shift3` k>0 multiply branch — `vmull_s32` (int32×int32→int64) with `vbslq_s64` clamp via `vcgtq_s64`/`vcltq_s64` (toolchain has no `vminq_s64`/`vmaxq_s64`). Plus k≥20 saturation collapse via `vbslq_s32`.
+- `m4t_mtfp19_to_mtfp4` — magic-multiply divide-by-6561 (= 3^8) reusing `shift3_div_neon` pattern; per-cell flag tracking via small post-NEON scalar pass.
+- `m4t_mtfp4_to_mtfp19` — `vmovl_s8` widen int8→int32, `vmulq_s32` by SCALE_RATIO.
+
+**`_scalar_ref` public functions added** (test oracles only, mirrors prior `_scalar_ref` patterns): `m4t_pack_trits_{1d,5in8_1d}_scalar_ref`, `m4t_unpack_trits_{1d,5in8_1d}_scalar_ref`, `m4t_mtfp19_to_mtfp4_scalar_ref`, `m4t_mtfp4_to_mtfp19_scalar_ref`.
+
+**~13,500 new NEON-vs-scalar_ref bit-exact assertions** added across `test_m4t_trit_pack.c`, `test_m4t_shift3_neon.c`, `test_m4t_mtfp4.c`. 22/22 ctest binaries green.
+
+**Toolchain workarounds** (documented in journal): NEON has no LD5/ST5 (architectural limit), no `vmulq_n_u8`, no `vminq_s64`/`vmaxq_s64` in clang 17's `arm_neon.h`. Each worked around with equivalent intrinsics; ~1-2× of structurally-optimal pipeline.
+
+Stale comments fixed: `m4t_ternary_matmul.c:61` (claimed `ternary_dot_scalar` was production fallback — it's not; only `_scalar_ref` uses it), `m4t_mtfp.c:632` (same for `shift3_div_scalar`).
+
+Per `journal/no_scalar_audit_2026_05_06.md`. The substrate is now fully NEON in production with only allowed geometric scalar tails for sub-block remainders.
+
 ### Added — TD-7 X-packed wall-clock bench: §20-xp dominates §20 across all regimes (2026-05-06)
 Closes the wall-clock comparison that TD-7's closeout deferred. Bench `audit/td7_xpacked_bench.c` sweeps M ∈ [1, 4096] × K ∈ [1280, 12800] across 14 configs, comparing three kernels: unpacked dot, §20 (W-packed), §20-xp (W AND X packed).
 

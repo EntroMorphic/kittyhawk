@@ -59,8 +59,10 @@ static int64_t ternary_dot_vmlal(
 /* ── Inner product for a single output cell ───────────────────────────── */
 
 /* Scalar-only: pure C, no NEON regardless of M4T_HAS_NEON. The reference
- * implementation. Used by m4t_mtfp_ternary_matmul_bt_scalar_ref (test
- * oracle) AND as the tail / non-NEON fallback inside ternary_dot. */
+ * implementation. Used ONLY by m4t_mtfp_ternary_matmul_bt_scalar_ref
+ * (test oracle). The "fallback inside ternary_dot" framing in earlier
+ * comments was stale — production ternary_dot now dispatches directly
+ * to ternary_dot_vmlal (NEON) per the no-scalar-in-production rule. */
 static int64_t ternary_dot_scalar(
     const m4t_mtfp_t* xi,
     const uint8_t* wj,

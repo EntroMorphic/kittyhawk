@@ -629,8 +629,11 @@ void m4t_mtfp_vec_sub_aligning(
 
 /* ── shift3: base-3 positional shift (elemental floor primitive) ───────── */
 
-/* Scalar divide loop. Used by m4t_mtfp_shift3_scalar_ref directly and as
- * the non-NEON fallback inside m4t_mtfp_shift3. abs_k ∈ [1, 19]. */
+/* Scalar divide loop. Used ONLY by m4t_mtfp_shift3_scalar_ref (test
+ * oracle). The "non-NEON fallback inside m4t_mtfp_shift3" framing in
+ * earlier comments was stale — production m4t_mtfp_shift3 dispatches
+ * directly to shift3_div_neon per the no-scalar-in-production rule.
+ * abs_k ∈ [1, 19]. */
 static void shift3_div_scalar(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
                               int abs_k, int n) {
     int64_t divisor = M4T_POW3_TABLE[abs_k];
@@ -689,6 +692,73 @@ static void shift3_div_neon(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
         dst[i] = (m4t_mtfp_t)(adj >> N);
     }
 }
+
+/* NEON multiply path. abs_k ∈ [1, 19]. Computes dst[i] = clamp64(src[i]*3^k).
+ *
+ * Saturation analysis: |src| ≤ MAX_VAL ≈ 2^29.1; scale = 3^k for k ≤ 19, so
+ * scale < 2^31 (fits in int32). Product |v| ≤ 2^29.1 × 2^30.1 = 2^59.2 — well
+ * within int64. After clamp to ±MAX_VAL it fits int32.
+ *
+ * Pipeline per 4 lanes:
+ *   prod_lo64 = vmull_s32(low2_of_x,  scale_v)
+ *   prod_hi64 = vmull_s32(high2_of_x, scale_v)
+ *   clamp each to [-MAX_VAL, +MAX_VAL] in int64 space (vminq/vmaxq_s64)
+ *   narrow back to int32 (vmovn_s64)
+ *   combine and store. */
+static void shift3_mul_neon(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                            int k, int n) {
+    int32_t scale = (int32_t)M4T_POW3_TABLE[k];
+    int32x2_t scale_v = vdup_n_s32(scale);
+    int64x2_t max_v = vdupq_n_s64((int64_t)M4T_MTFP_MAX_VAL);
+    int64x2_t min_v = vdupq_n_s64(-(int64_t)M4T_MTFP_MAX_VAL);
+
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t x = vld1q_s32((const int32_t*)(src + i));
+        int64x2_t prod_lo = vmull_s32(vget_low_s32(x),  scale_v);
+        int64x2_t prod_hi = vmull_s32(vget_high_s32(x), scale_v);
+        /* Clamp to ±MAX_VAL via bsl (vminq_s64/vmaxq_s64 not always
+         * available depending on toolchain — use vcgtq_s64 + vbslq_s64). */
+        uint64x2_t over_lo  = vcgtq_s64(prod_lo, max_v);
+        uint64x2_t under_lo = vcltq_s64(prod_lo, min_v);
+        prod_lo = vbslq_s64(over_lo,  max_v, prod_lo);
+        prod_lo = vbslq_s64(under_lo, min_v, prod_lo);
+        uint64x2_t over_hi  = vcgtq_s64(prod_hi, max_v);
+        uint64x2_t under_hi = vcltq_s64(prod_hi, min_v);
+        prod_hi = vbslq_s64(over_hi,  max_v, prod_hi);
+        prod_hi = vbslq_s64(under_hi, min_v, prod_hi);
+        int32x4_t result = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
+        vst1q_s32((int32_t*)(dst + i), result);
+    }
+    /* Geometric scalar tail. */
+    for (; i < n; i++) {
+        int64_t v = (int64_t)src[i] * (int64_t)scale;
+        dst[i] = m4t_mtfp_clamp64(v);
+    }
+}
+
+/* NEON saturation collapse for k >= 20. Sign(src) → ±MAX_VAL or 0. */
+static void shift3_mul_saturate_neon(m4t_mtfp_t* dst, const m4t_mtfp_t* src,
+                                     int n) {
+    int32x4_t zero = vdupq_n_s32(0);
+    int32x4_t max_v = vdupq_n_s32(M4T_MTFP_MAX_VAL);
+    int32x4_t min_v = vdupq_n_s32(-M4T_MTFP_MAX_VAL);
+
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t x = vld1q_s32((const int32_t*)(src + i));
+        uint32x4_t pos = vcgtq_s32(x, zero);
+        uint32x4_t neg = vcltq_s32(x, zero);
+        int32x4_t out = vbslq_s32(pos, max_v, zero);
+        out = vbslq_s32(neg, min_v, out);
+        vst1q_s32((int32_t*)(dst + i), out);
+    }
+    for (; i < n; i++) {
+        if      (src[i] > 0) dst[i] =  M4T_MTFP_MAX_VAL;
+        else if (src[i] < 0) dst[i] = -M4T_MTFP_MAX_VAL;
+        else                  dst[i] = 0;
+    }
+}
 #endif
 
 void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
@@ -703,20 +773,13 @@ void m4t_mtfp_shift3(m4t_mtfp_t* dst, const m4t_mtfp_t* src, int k, int n) {
 
     if (k > 0) {
         /* Multiply by 3^k. Beyond k=19 the smallest nonzero mantissa
-         * already overflows MTFP19; collapse to saturation. */
+         * already overflows MTFP19; collapse to saturation.
+         * NEON-only production dispatch per project rule. */
         if (k >= 20) {
-            for (int i = 0; i < n; i++) {
-                if (src[i] > 0)      dst[i] =  M4T_MTFP_MAX_VAL;
-                else if (src[i] < 0) dst[i] = -M4T_MTFP_MAX_VAL;
-                else                  dst[i] = 0;
-            }
+            shift3_mul_saturate_neon(dst, src, n);
             return;
         }
-        int64_t scale = M4T_POW3_TABLE[k];
-        for (int i = 0; i < n; i++) {
-            int64_t v = (int64_t)src[i] * scale;
-            dst[i] = m4t_mtfp_clamp64(v);
-        }
+        shift3_mul_neon(dst, src, k, n);
         return;
     }
 

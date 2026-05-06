@@ -152,6 +152,21 @@ void m4t_mtfp4_to_mtfp19(
     int               n
 );
 
+/* Scalar-only references for the conversion functions. Same semantics
+ * as the public dispatchers; never dispatch to NEON. Test-only oracles
+ * for bit-exact verification. Production code MUST NOT call these. */
+void m4t_mtfp19_to_mtfp4_scalar_ref(
+    m4t_mtfp4_t*      dst,
+    const m4t_mtfp_t* src,
+    uint8_t*          flags,
+    int               n
+);
+void m4t_mtfp4_to_mtfp19_scalar_ref(
+    m4t_mtfp_t*       dst,
+    const m4t_mtfp4_t* src,
+    int               n
+);
+
 #ifdef __cplusplus
 }
 #endif

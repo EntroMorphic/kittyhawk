@@ -245,6 +245,90 @@ static void test_popcount_dist_unaligned_offset(void) {
     }
 }
 
+/* ── NEON vs scalar_ref bit-exact gates (no-scalar audit remediation) ── */
+
+static uint32_t g_xs_state = 0xc0ffeeu;
+static uint32_t xs(void) {
+    uint32_t x = g_xs_state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    g_xs_state = x;
+    return x;
+}
+
+static void test_pack_1d_neon_vs_scalar(void) {
+    /* Cover N from 1 to 320, including non-multiples of 16 (the NEON
+     * block size for 4-in-8 pack). 100 random inputs per N. */
+    const int Ns[] = {
+        1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 47, 48, 49,
+        63, 64, 65, 79, 80, 81, 127, 128, 129, 255, 256, 257, 319, 320
+    };
+    for (size_t k = 0; k < sizeof(Ns)/sizeof(Ns[0]); k++) {
+        int n = Ns[k];
+        m4t_trit_t* src = malloc((size_t)n * sizeof(m4t_trit_t));
+        uint8_t* pk_neon = malloc((size_t)M4T_TRIT_PACKED_BYTES(n));
+        uint8_t* pk_ref  = malloc((size_t)M4T_TRIT_PACKED_BYTES(n));
+        m4t_trit_t* up_neon = malloc((size_t)n * sizeof(m4t_trit_t));
+        m4t_trit_t* up_ref  = malloc((size_t)n * sizeof(m4t_trit_t));
+        for (int s = 0; s < 100; s++) {
+            for (int i = 0; i < n; i++) src[i] = (m4t_trit_t)((int)(xs() % 3u) - 1);
+            m4t_pack_trits_1d(pk_neon, src, n);
+            m4t_pack_trits_1d_scalar_ref(pk_ref, src, n);
+            if (memcmp(pk_neon, pk_ref, (size_t)M4T_TRIT_PACKED_BYTES(n)) != 0) {
+                fprintf(stderr, "FAIL: pack_1d NEON vs scalar at n=%d sample=%d\n", n, s);
+                g_failed++;
+                goto cleanup;
+            }
+            m4t_unpack_trits_1d(up_neon, pk_neon, n);
+            m4t_unpack_trits_1d_scalar_ref(up_ref, pk_neon, n);
+            if (memcmp(up_neon, up_ref, (size_t)n * sizeof(m4t_trit_t)) != 0) {
+                fprintf(stderr, "FAIL: unpack_1d NEON vs scalar at n=%d sample=%d\n", n, s);
+                g_failed++;
+                goto cleanup;
+            }
+        }
+cleanup:
+        free(src); free(pk_neon); free(pk_ref); free(up_neon); free(up_ref);
+        if (g_failed) return;
+    }
+}
+
+static void test_pack_5in8_neon_vs_scalar(void) {
+    /* Cover N from 1 to 800, including non-multiples of 80 (5-in-8 NEON
+     * block size). 50 random samples per N. */
+    const int Ns[] = {
+        1, 4, 5, 6, 9, 10, 15, 16, 50, 79, 80, 81, 100, 159, 160, 161,
+        239, 240, 241, 320, 400, 480, 560, 640, 720, 800
+    };
+    for (size_t k = 0; k < sizeof(Ns)/sizeof(Ns[0]); k++) {
+        int n = Ns[k];
+        m4t_trit_t* src = malloc((size_t)n * sizeof(m4t_trit_t));
+        uint8_t* pk_neon = malloc((size_t)M4T_TRIT_PACKED5_BYTES(n));
+        uint8_t* pk_ref  = malloc((size_t)M4T_TRIT_PACKED5_BYTES(n));
+        m4t_trit_t* up_neon = malloc((size_t)n * sizeof(m4t_trit_t));
+        m4t_trit_t* up_ref  = malloc((size_t)n * sizeof(m4t_trit_t));
+        for (int s = 0; s < 50; s++) {
+            for (int i = 0; i < n; i++) src[i] = (m4t_trit_t)((int)(xs() % 3u) - 1);
+            m4t_pack_trits_5in8_1d(pk_neon, src, n);
+            m4t_pack_trits_5in8_1d_scalar_ref(pk_ref, src, n);
+            if (memcmp(pk_neon, pk_ref, (size_t)M4T_TRIT_PACKED5_BYTES(n)) != 0) {
+                fprintf(stderr, "FAIL: pack_5in8 NEON vs scalar at n=%d sample=%d\n", n, s);
+                g_failed++;
+                goto cleanup;
+            }
+            m4t_unpack_trits_5in8_1d(up_neon, pk_neon, n);
+            m4t_unpack_trits_5in8_1d_scalar_ref(up_ref, pk_neon, n);
+            if (memcmp(up_neon, up_ref, (size_t)n * sizeof(m4t_trit_t)) != 0) {
+                fprintf(stderr, "FAIL: unpack_5in8 NEON vs scalar at n=%d sample=%d\n", n, s);
+                g_failed++;
+                goto cleanup;
+            }
+        }
+cleanup:
+        free(src); free(pk_neon); free(pk_ref); free(up_neon); free(up_ref);
+        if (g_failed) return;
+    }
+}
+
 int main(void) {
     test_pack_unpack_roundtrip_various_n();
 
@@ -254,6 +338,9 @@ int main(void) {
     test_popcount_dist_random_equivalence();
     test_popcount_dist_mask_all_zero();
     test_popcount_dist_unaligned_offset();
+
+    test_pack_1d_neon_vs_scalar();
+    test_pack_5in8_neon_vs_scalar();
 
     if (g_failed > 0) {
         fprintf(stderr, "test_m4t_trit_pack: %d FAILURES\n", g_failed);

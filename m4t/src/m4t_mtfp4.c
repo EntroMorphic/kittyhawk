@@ -139,19 +139,18 @@ void m4t_mtfp4_sdot_matmul_bt(
 
 /* ── Cell-width conversion ──────────────────────────────────────────────── */
 
-void m4t_mtfp19_to_mtfp4(
+/* Per project rule (feedback_function_over_speed_no_scalar): production
+ * conversion paths are NEON-only. Internal _scalar helpers are reused by
+ * the public _scalar_ref test oracles. */
+
+static void mtfp19_to_mtfp4_scalar(
     m4t_mtfp4_t* dst, const m4t_mtfp_t* src,
     uint8_t* flags, int n)
 {
-    assert(n >= 0);
-    if (n == 0) return;
-    assert(dst && src);
-
     for (int i = 0; i < n; i++) {
         int32_t v = src[i];
         /* Base-3 round-to-nearest-even divide by 6561. Odd divisor →
-         * ties impossible. Same algorithm as m4t_pow3_round_div in
-         * m4t_mtfp.c, inlined here to avoid linkage. */
+         * ties impossible. */
         int32_t q = v / SCALE_RATIO;
         int32_t rem = v - q * SCALE_RATIO;
         int rounded = (rem != 0);
@@ -171,16 +170,152 @@ void m4t_mtfp19_to_mtfp4(
     }
 }
 
+static void mtfp4_to_mtfp19_scalar(
+    m4t_mtfp_t* dst, const m4t_mtfp4_t* src, int n)
+{
+    for (int i = 0; i < n; i++) {
+        dst[i] = (m4t_mtfp_t)src[i] * SCALE_RATIO;
+    }
+}
+
+#if M4T_HAS_NEON
+
+#include "m4t_pow3_magic.h"
+
+/* MTFP19 → MTFP4 NEON path. Magic-multiply divide by 6561 (= 3^8) with
+ * round-to-nearest, then clamp to ±MTFP4_MAX_VAL. Bit-exact vs scalar
+ * by construction (vmull_s32 is exact int32×int32→int64; bias add and
+ * arithmetic shift compose to one rounding step end-to-end; same as
+ * shift3_div_neon). Flag tracking is per-cell — handled outside the
+ * vector loop by a quick scalar pass over the cells where the flag
+ * could fire (rare: most cells are exact). */
+static void mtfp19_to_mtfp4_neon(
+    m4t_mtfp4_t* dst, const m4t_mtfp_t* src,
+    uint8_t* flags, int n)
+{
+    /* SCALE_RATIO = 6561 = 3^8 → use M_table[8], N_table[8]. */
+    int32_t M = M4T_POW3_DIV_M[8];
+    int     N = M4T_POW3_DIV_N[8];
+    int32x2_t Mv = vdup_n_s32(M);
+    int64x2_t bias = vdupq_n_s64((int64_t)1 << (N - 1));
+    int64x2_t neg_N = vdupq_n_s64(-(int64_t)N);
+
+    int32_t q_buf[4];   /* int32 quotient before clamp */
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t v = vld1q_s32((const int32_t*)(src + i));
+        int64x2_t prod_lo = vmull_s32(vget_low_s32(v),  Mv);
+        int64x2_t prod_hi = vmull_s32(vget_high_s32(v), Mv);
+        prod_lo = vaddq_s64(prod_lo, bias);
+        prod_hi = vaddq_s64(prod_hi, bias);
+        prod_lo = vshlq_s64(prod_lo, neg_N);
+        prod_hi = vshlq_s64(prod_hi, neg_N);
+        int32x4_t q = vcombine_s32(vmovn_s64(prod_lo), vmovn_s64(prod_hi));
+        vst1q_s32(q_buf, q);
+
+        for (int j = 0; j < 4; j++) {
+            int32_t qj = q_buf[j];
+            m4t_mtfp4_t out = m4t_mtfp4_clamp(qj);
+            int saturated = (qj != (int32_t)out);
+            if (flags) {
+                int32_t v_orig = src[i + j];
+                int32_t rem = v_orig - qj * SCALE_RATIO;
+                int rounded = (rem != 0);
+                uint8_t bits = 0;
+                if (rounded)   bits |= M4T_FLAG_ROUNDED;
+                if (saturated) bits |= M4T_FLAG_SATURATED;
+                if (bits) m4t_flag_or(flags, i + j, bits);
+            }
+            dst[i + j] = out;
+        }
+    }
+    /* Geometric scalar tail (n not a multiple of 4). */
+    for (; i < n; i++) {
+        int32_t v = src[i];
+        int32_t q = v / SCALE_RATIO;
+        int32_t rem = v - q * SCALE_RATIO;
+        int rounded = (rem != 0);
+        if (rem > 0 && 2 * rem > SCALE_RATIO) q += 1;
+        else if (rem < 0 && 2 * (-rem) > SCALE_RATIO) q -= 1;
+        m4t_mtfp4_t out = m4t_mtfp4_clamp(q);
+        int saturated = (q != (int32_t)out);
+        if (flags) {
+            uint8_t bits = 0;
+            if (rounded)   bits |= M4T_FLAG_ROUNDED;
+            if (saturated) bits |= M4T_FLAG_SATURATED;
+            if (bits) m4t_flag_or(flags, i, bits);
+        }
+        dst[i] = out;
+    }
+}
+
+/* MTFP4 → MTFP19 NEON path. Sign-extend int8 → int32, multiply by
+ * SCALE_RATIO (6561, fits in int16 → use vmulq_n_s32 directly).
+ * Exact: |src| ≤ 40 < 2^6, scaled ≤ 262 440 < 2^19 — well within int32. */
+static void mtfp4_to_mtfp19_neon(
+    m4t_mtfp_t* dst, const m4t_mtfp4_t* src, int n)
+{
+    int32x4_t scale = vdupq_n_s32(SCALE_RATIO);
+    int i = 0;
+    /* Process 16 mtfp4 cells per iter (one int8x16 input → 4 int32x4 outputs). */
+    for (; i + 16 <= n; i += 16) {
+        int8x16_t s8 = vld1q_s8((const int8_t*)(src + i));
+        int16x8_t lo16 = vmovl_s8(vget_low_s8(s8));    /* lanes 0..7 */
+        int16x8_t hi16 = vmovl_s8(vget_high_s8(s8));   /* lanes 8..15 */
+        int32x4_t q0 = vmovl_s16(vget_low_s16(lo16));  /* 0..3 */
+        int32x4_t q1 = vmovl_s16(vget_high_s16(lo16)); /* 4..7 */
+        int32x4_t q2 = vmovl_s16(vget_low_s16(hi16));  /* 8..11 */
+        int32x4_t q3 = vmovl_s16(vget_high_s16(hi16)); /* 12..15 */
+        vst1q_s32((int32_t*)(dst + i +  0), vmulq_s32(q0, scale));
+        vst1q_s32((int32_t*)(dst + i +  4), vmulq_s32(q1, scale));
+        vst1q_s32((int32_t*)(dst + i +  8), vmulq_s32(q2, scale));
+        vst1q_s32((int32_t*)(dst + i + 12), vmulq_s32(q3, scale));
+    }
+    /* Geometric scalar tail (n not a multiple of 16). */
+    for (; i < n; i++) {
+        dst[i] = (m4t_mtfp_t)src[i] * SCALE_RATIO;
+    }
+}
+
+#endif /* M4T_HAS_NEON */
+
+void m4t_mtfp19_to_mtfp4(
+    m4t_mtfp4_t* dst, const m4t_mtfp_t* src,
+    uint8_t* flags, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
+    /* NEON-only production dispatch. Per project rule
+     * (feedback_function_over_speed_no_scalar). */
+    mtfp19_to_mtfp4_neon(dst, src, flags, n);
+}
+
 void m4t_mtfp4_to_mtfp19(
     m4t_mtfp_t* dst, const m4t_mtfp4_t* src, int n)
 {
     assert(n >= 0);
     if (n == 0) return;
     assert(dst && src);
+    /* NEON-only production dispatch. */
+    mtfp4_to_mtfp19_neon(dst, src, n);
+}
 
-    /* Widen exactly: |src| ≤ 40, output ≤ 40·6561 = 262 440 < MTFP19_MAX.
-     * Static-asserted at file top. */
-    for (int i = 0; i < n; i++) {
-        dst[i] = (m4t_mtfp_t)src[i] * SCALE_RATIO;
-    }
+void m4t_mtfp19_to_mtfp4_scalar_ref(
+    m4t_mtfp4_t* dst, const m4t_mtfp_t* src,
+    uint8_t* flags, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
+    mtfp19_to_mtfp4_scalar(dst, src, flags, n);
+}
+
+void m4t_mtfp4_to_mtfp19_scalar_ref(
+    m4t_mtfp_t* dst, const m4t_mtfp4_t* src, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
+    mtfp4_to_mtfp19_scalar(dst, src, n);
 }
