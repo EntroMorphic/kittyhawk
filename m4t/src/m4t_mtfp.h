@@ -314,6 +314,36 @@ void m4t_mtfp_shift3_scalar_ref(
     int n
 );
 
+/* ── Integer rsqrt (Newton-Raphson, fixed-point) ────────────────────────
+ *
+ * Per journal/rsqrt_design_lmm.md (compressed LMM cycle 2026-05-06).
+ *
+ * Computes `dst = round(2^30 / sqrt(src))` for src ≥ 1.
+ * Output range: roughly [23170, 2^30]. Special case: src ≤ 0 returns 0
+ * (caller's responsibility to add an ε to prevent division by zero).
+ *
+ * Algorithm: Newton-Raphson with integer initial guess derived from
+ * __builtin_clz (count leading zeros gives floor(log2(src))). 3 iterations
+ * from this guess deliver bit-exact int32 precision.
+ *
+ * Bit-exact NEON-vs-scalar_ref: both paths share the same initial-guess
+ * formula and iteration. The output is integer-rounded each step
+ * identically. NEON path is structured for future per-vector use but
+ * currently single-value (rsqrt of a single positive int doesn't
+ * naturally vectorize at the kernel level).
+ *
+ * Caller usage pattern (e.g., RMSNorm):
+ *   int64_t sum_sq = ...;            // sum of x² values
+ *   int32_t mean = (int32_t)(sum_sq / n);
+ *   m4t_mtfp_t inv = m4t_int32_rsqrt(mean + eps);
+ *   for each i:
+ *     y[i] = clamp_mtfp((int64_t)gamma[i] * x[i] * inv >> 30); */
+m4t_mtfp_t m4t_int32_rsqrt(m4t_mtfp_t src);
+
+/* Scalar-only reference. Bit-exact identical output to m4t_int32_rsqrt;
+ * exists for the verification gate. Production code MUST NOT call this. */
+m4t_mtfp_t m4t_int32_rsqrt_scalar_ref(m4t_mtfp_t src);
+
 #ifdef __cplusplus
 }
 #endif

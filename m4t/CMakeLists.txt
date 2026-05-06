@@ -145,6 +145,14 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_shift3_neon)
     add_test(NAME m4t_shift3_neon COMMAND test_m4t_shift3_neon)
 
+    # Integer rsqrt primitive (work-unit 2 of bitnet_phase1 LMM cycle).
+    # Per journal/rsqrt_design_lmm.md: pure-int Newton-Raphson with
+    # __int128 intermediate, bit-exact match against libm-sqrt scalar_ref.
+    add_executable(test_m4t_rsqrt tests/test_m4t_rsqrt.c)
+    target_link_libraries(test_m4t_rsqrt PRIVATE m4t_test m)
+    gesh_test_undebug(test_m4t_rsqrt)
+    add_test(NAME m4t_rsqrt COMMAND test_m4t_rsqrt)
+
     # Ternary MAC NEON path test. Bit-exact verification of production
     # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
     # M4T_HAS_NEON) against m4t_mtfp_ternary_matmul_bt_scalar_ref
