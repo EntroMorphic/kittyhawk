@@ -35,23 +35,23 @@
 void bitnet_block_scratch_alloc(bitnet_block_scratch_t* s) {
     /* Single-token forward pass: each [HIDDEN] or [INTERMEDIATE] buffer
      * holds one row. Multi-token prefill widens these (work-unit 7+). */
-    s->x              = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->residual       = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->x_norm         = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->q              = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->k              = calloc(BITNET_KV_PROJ_DIM,         sizeof(int32_t));
-    s->v              = calloc(BITNET_KV_PROJ_DIM,         sizeof(int32_t));
+    s->x              = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->residual       = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->x_norm         = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->q              = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->k              = calloc(BITNET_KV_PROJ_DIM,         sizeof(m4t_mtfp_t));
+    s->v              = calloc(BITNET_KV_PROJ_DIM,         sizeof(m4t_mtfp_t));
     /* Single-token: attn_scores is just [num_heads × 1 × 1] = 20 cells.
      * Multi-token: would scale with seq_len. */
-    s->attn_scores    = calloc(BITNET_NUM_ATTENTION_HEADS, sizeof(int32_t));
-    s->attn_output    = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->attn_sub_norm  = calloc(BITNET_HIDDEN_SIZE,         sizeof(int32_t));
-    s->gate           = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(int32_t));
-    s->up             = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(int32_t));
-    s->gate_act       = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(int32_t));
-    s->ffn_sub_norm   = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(int32_t));
+    s->attn_scores    = calloc(BITNET_NUM_ATTENTION_HEADS, sizeof(m4t_mtfp_t));
+    s->attn_output    = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->attn_sub_norm  = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->gate           = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(m4t_mtfp_t));
+    s->up             = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(m4t_mtfp_t));
+    s->gate_act       = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(m4t_mtfp_t));
+    s->ffn_sub_norm   = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(m4t_mtfp_t));
     s->q_int8         = calloc(BITNET_INTERMEDIATE_SIZE,   sizeof(int8_t));
-    s->q_scale        = 0;
+    s->q_absmax       = 0;
 }
 
 void bitnet_block_scratch_free(bitnet_block_scratch_t* s) {
@@ -82,19 +82,19 @@ void bitnet_block_scratch_free(bitnet_block_scratch_t* s) {
  *   x = residual + x
  */
 static void bitnet_forward_block(
-    int32_t* x_io,
+    m4t_mtfp_t* x_io,
     const bitnet_layer_weights_t* w,
     bitnet_block_scratch_t* s,
     int position)
 {
     /* For now: x_io aliased into s->x at entry, copied back at exit.
      * Future cleanup may eliminate the copy. */
-    memcpy(s->x, x_io, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memcpy(s->x, x_io, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* ── Attention sub-block ──────────────────────────────────────── */
 
     /* residual = x */
-    memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x_norm = input_layernorm(x) */
     bitnet_stub_rmsnorm(s->x_norm, s->x, w->gamma_input_norm,
@@ -116,11 +116,11 @@ static void bitnet_forward_block(
      *                                     1, BITNET_HIDDEN_SIZE,
      *                                     BITNET_HIDDEN_SIZE);
      * STUB: zero out for now. */
-    memset(s->q, 0, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memset(s->q, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     /* K = x_norm @ W_k^T */
-    memset(s->k, 0, BITNET_KV_PROJ_DIM * sizeof(int32_t));
+    memset(s->k, 0, BITNET_KV_PROJ_DIM * sizeof(m4t_mtfp_t));
     /* V = x_norm @ W_v^T */
-    memset(s->v, 0, BITNET_KV_PROJ_DIM * sizeof(int32_t));
+    memset(s->v, 0, BITNET_KV_PROJ_DIM * sizeof(m4t_mtfp_t));
 
     /* RoPE on Q, K. */
     bitnet_stub_rope_apply(s->q, s->k, position,
@@ -135,8 +135,8 @@ static void bitnet_forward_block(
      * current token attending to itself). Sanity-check shape only. */
     /* TODO: Q @ K^T scaled, then softmax, then × V.
      * Stubbed for now. */
-    memset(s->attn_scores, 0, BITNET_NUM_ATTENTION_HEADS * sizeof(int32_t));
-    memset(s->attn_output, 0, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memset(s->attn_scores, 0, BITNET_NUM_ATTENTION_HEADS * sizeof(m4t_mtfp_t));
+    memset(s->attn_output, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* attn_sub_norm: y = γ · y · rsqrt(mean(y²) + ε) */
     bitnet_stub_rmsnorm(s->attn_sub_norm, s->attn_output,
@@ -144,7 +144,7 @@ static void bitnet_forward_block(
 
     /* O projection: y = attn_sub_norm @ W_o^T. STUB. */
     /* Result goes back into s->x. */
-    memcpy(s->x, s->attn_sub_norm, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memcpy(s->x, s->attn_sub_norm, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x = residual + x. */
     for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
@@ -156,16 +156,16 @@ static void bitnet_forward_block(
     /* ── FFN sub-block ────────────────────────────────────────────── */
 
     /* residual = x */
-    memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x_norm = post_attention_layernorm(x) */
     bitnet_stub_rmsnorm(s->x_norm, s->x, w->gamma_post_attn_norm,
                         1, BITNET_HIDDEN_SIZE);
 
     /* gate = x_norm @ W_gate^T. STUB. */
-    memset(s->gate, 0, BITNET_INTERMEDIATE_SIZE * sizeof(int32_t));
+    memset(s->gate, 0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
     /* up = x_norm @ W_up^T. STUB. */
-    memset(s->up, 0, BITNET_INTERMEDIATE_SIZE * sizeof(int32_t));
+    memset(s->up, 0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
 
     /* gate_act = relu²(gate). */
     bitnet_stub_relu2_inplace(s->gate, BITNET_INTERMEDIATE_SIZE);
@@ -178,7 +178,7 @@ static void bitnet_forward_block(
                         w->gamma_ffn_sub_norm, 1, BITNET_INTERMEDIATE_SIZE);
 
     /* down = ffn_sub_norm @ W_down^T. STUB. */
-    memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x = residual + x. */
     for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
@@ -188,7 +188,7 @@ static void bitnet_forward_block(
     }
 
     /* Copy back to caller's buffer. */
-    memcpy(x_io, s->x, BITNET_HIDDEN_SIZE * sizeof(int32_t));
+    memcpy(x_io, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 }
 
 /* ── main ─────────────────────────────────────────────────────────── */
@@ -219,15 +219,17 @@ int main(int argc, char** argv) {
     bitnet_block_scratch_t s = {0};
     bitnet_block_scratch_alloc(&s);
 
-    int32_t x[BITNET_HIDDEN_SIZE];
+    m4t_mtfp_t x[BITNET_HIDDEN_SIZE];
     memset(x, 0, sizeof(x));
     /* Dummy weights — all-zero pointers will be replaced by real load. */
     bitnet_layer_weights_t w_layer0 = {0};
 
     /* Currently the forward pass uses only γ pointers (for stubbed
      * RMSNorm calls); BitLinear weights are stubbed to zero output.
-     * γ = NULL would crash in the stub — fake it with an all-ones γ. */
-    int32_t gamma_dummy[BITNET_INTERMEDIATE_SIZE];
+     * γ = NULL would crash in the stub — fake it with an all-ones γ.
+     * Sized for the largest norm (FFN sub-norm, INTERMEDIATE_SIZE);
+     * the smaller HIDDEN-sized norms read only the first HIDDEN cells. */
+    m4t_mtfp_t gamma_dummy[BITNET_INTERMEDIATE_SIZE];
     for (int i = 0; i < BITNET_INTERMEDIATE_SIZE; i++) gamma_dummy[i] = 1;
     w_layer0.gamma_input_norm     = gamma_dummy;
     w_layer0.gamma_post_attn_norm = gamma_dummy;

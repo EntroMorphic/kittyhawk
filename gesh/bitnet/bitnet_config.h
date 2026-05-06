@@ -10,6 +10,8 @@
 #ifndef GESH_BITNET_CONFIG_H
 #define GESH_BITNET_CONFIG_H
 
+#include "m4t_types.h"
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -96,21 +98,23 @@ typedef struct {
     const uint8_t* w_gate;     /* [INTERMEDIATE × ⌈HIDDEN/5⌉] */
     const uint8_t* w_up;       /* [INTERMEDIATE × ⌈HIDDEN/5⌉] */
     const uint8_t* w_down;     /* [HIDDEN × ⌈INTERMEDIATE/5⌉] */
-    /* RMSNorm γ scales (MTFP19 mantissas). */
-    const int32_t* gamma_input_norm;       /* [HIDDEN] */
-    const int32_t* gamma_post_attn_norm;   /* [HIDDEN] */
-    const int32_t* gamma_attn_sub_norm;    /* [HIDDEN] */
-    const int32_t* gamma_ffn_sub_norm;     /* [INTERMEDIATE] */
+    /* RMSNorm γ scales (MTFP19 mantissas). RC-4: use m4t_mtfp_t to make
+     * the substrate-native semantic explicit (typedef'd to int32_t but
+     * the type carries the intent). */
+    const m4t_mtfp_t* gamma_input_norm;       /* [HIDDEN] */
+    const m4t_mtfp_t* gamma_post_attn_norm;   /* [HIDDEN] */
+    const m4t_mtfp_t* gamma_attn_sub_norm;    /* [HIDDEN] */
+    const m4t_mtfp_t* gamma_ffn_sub_norm;     /* [INTERMEDIATE] */
 } bitnet_layer_weights_t;
 
 /* ── Whole-model weight set ─────────────────────────────────────────── */
 
 typedef struct {
     /* Embedding + LM head (likely tied; same buffer, different access). */
-    const int32_t* embedding;        /* [VOCAB × HIDDEN] MTFP19 mantissas */
-    const int32_t* lm_head;          /* [VOCAB × HIDDEN] MTFP19 mantissas (may alias embedding) */
+    const m4t_mtfp_t* embedding;        /* [VOCAB × HIDDEN] MTFP19 mantissas */
+    const m4t_mtfp_t* lm_head;          /* [VOCAB × HIDDEN] MTFP19 mantissas (may alias embedding) */
     /* Final pre-LM-head norm. */
-    const int32_t* gamma_final_norm; /* [HIDDEN] */
+    const m4t_mtfp_t* gamma_final_norm; /* [HIDDEN] */
     /* Per-layer weight sets. */
     bitnet_layer_weights_t layers[BITNET_NUM_LAYERS];
 } bitnet_weights_t;
@@ -121,32 +125,35 @@ typedef struct {
  * Allocated once and reused across blocks (overwritten per-block). KV
  * cache buffers are separate (work-unit 7).
  *
+ * RC-4: all activation buffers use m4t_mtfp_t (== int32_t) to make the
+ * substrate-native semantic explicit at every call site.
+ *
  * Naming: shape suffixes denote `[seq_len, hidden]` or similar. M=1 for
  * single-token prefill; multi-token prefill is a Phase-1-batch concern
  * (work-unit 8 if we get there).
  */
 typedef struct {
     /* Block input/output (also residual buffer). MTFP19. */
-    int32_t* x;                /* [HIDDEN] */
-    int32_t* residual;         /* [HIDDEN] — pre-norm copy of x */
+    m4t_mtfp_t* x;                /* [HIDDEN] */
+    m4t_mtfp_t* residual;         /* [HIDDEN] — pre-norm copy of x */
     /* Post-norm intermediate. MTFP19. */
-    int32_t* x_norm;           /* [HIDDEN] */
+    m4t_mtfp_t* x_norm;           /* [HIDDEN] */
     /* QKV projections (post-BitLinear, MTFP19). */
-    int32_t* q;                /* [NUM_ATTENTION_HEADS × HEAD_DIM] = [HIDDEN] */
-    int32_t* k;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
-    int32_t* v;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
+    m4t_mtfp_t* q;                /* [NUM_ATTENTION_HEADS × HEAD_DIM] = [HIDDEN] */
+    m4t_mtfp_t* k;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
+    m4t_mtfp_t* v;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
     /* Attention scratch. */
-    int32_t* attn_scores;      /* [NUM_ATTENTION_HEADS × seq_q × seq_k] — small for single-token */
-    int32_t* attn_output;      /* [HIDDEN] post-attention, pre-O */
-    int32_t* attn_sub_norm;    /* [HIDDEN] post-sub-LN, pre-O */
+    m4t_mtfp_t* attn_scores;      /* [NUM_ATTENTION_HEADS × seq_q × seq_k] — small for single-token */
+    m4t_mtfp_t* attn_output;      /* [HIDDEN] post-attention, pre-O */
+    m4t_mtfp_t* attn_sub_norm;    /* [HIDDEN] post-sub-LN, pre-O */
     /* FFN scratch. */
-    int32_t* gate;             /* [INTERMEDIATE] */
-    int32_t* up;               /* [INTERMEDIATE] */
-    int32_t* gate_act;         /* [INTERMEDIATE] = relu²(gate) * up */
-    int32_t* ffn_sub_norm;     /* [INTERMEDIATE] post-sub-LN, pre-down */
-    /* A8 quantization scratch (per-token: one int8 buffer + scale per quantize call). */
-    int8_t*  q_int8;           /* [INTERMEDIATE or HIDDEN] worst case */
-    int32_t  q_scale;          /* per-token absmax scale (MTFP19 storage) */
+    m4t_mtfp_t* gate;             /* [INTERMEDIATE] */
+    m4t_mtfp_t* up;               /* [INTERMEDIATE] */
+    m4t_mtfp_t* gate_act;         /* [INTERMEDIATE] = relu²(gate) * up */
+    m4t_mtfp_t* ffn_sub_norm;     /* [INTERMEDIATE] post-sub-LN, pre-down */
+    /* A8 quantization scratch (per-token: one int8 buffer + absmax per quantize call). */
+    int8_t*    q_int8;            /* [INTERMEDIATE or HIDDEN] worst case */
+    m4t_mtfp_t q_absmax;          /* per-token absmax (RC-3: rename from q_scale) */
 } bitnet_block_scratch_t;
 
 /* ── Allocation / free ──────────────────────────────────────────────── */

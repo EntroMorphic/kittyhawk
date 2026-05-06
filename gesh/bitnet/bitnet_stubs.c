@@ -10,6 +10,7 @@
  */
 
 #include "bitnet_stubs.h"
+#include "m4t_types.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -28,23 +29,21 @@ static inline int32_t clamp_to_mtfp19(int64_t v) {
 /* ── RMSNorm ─────────────────────────────────────────────────────── */
 
 void bitnet_stub_rmsnorm(
-    int32_t* y, const int32_t* x, const int32_t* gamma,
-    int32_t eps_mtfp19, int n)
+    m4t_mtfp_t* y, const m4t_mtfp_t* x, const m4t_mtfp_t* gamma,
+    m4t_mtfp_t eps_mtfp19, int n)
 {
-    /* Compute mean(x²) in int64 to avoid overflow.
-     * Max |x|² = MTFP19_MAX² ≈ 3.4e17, fits int64 (max 9.2e18).
-     * Sum of n=2560 such values up to ~8.6e20 — overflows int64.
-     * Mitigation: scale down (divide each square by n before summing).
-     * Stub does the simpler form and accepts that very-large-x inputs
-     * may overflow; production path will use a Welford-style accumulator
-     * or a scaled sum. */
-    int64_t sum_sq = 0;
+    /* Per RC-1 (red-team 2026-05-06): use double accumulator to avoid
+     * int64 overflow at MTFP19_MAX-magnitude inputs. n=2560 squares of
+     * MTFP19_MAX produces ~8.7e20 — overflows int64 (max 9.2e18). FP
+     * accumulator is fine in stubs (stubs ARE scaffolding, not
+     * production paths). Production path (work-unit 2) will use a
+     * scaled-sum or Welford accumulator instead. */
+    double sum_sq = 0.0;
     for (int i = 0; i < n; i++) {
-        int64_t xi = (int64_t)x[i];
+        double xi = (double)x[i];
         sum_sq += xi * xi;
     }
-    /* mean = sum / n (integer divide; fine for stub). */
-    double mean_sq = (double)sum_sq / (double)n + (double)eps_mtfp19;
+    double mean_sq = sum_sq / (double)n + (double)eps_mtfp19;
     double inv_rms = 1.0 / sqrt(mean_sq);
     /* y[i] = γ[i] · x[i] · inv_rms */
     for (int i = 0; i < n; i++) {
@@ -56,7 +55,7 @@ void bitnet_stub_rmsnorm(
 /* ── RoPE ────────────────────────────────────────────────────────── */
 
 void bitnet_stub_rope_apply(
-    int32_t* q, int32_t* k,
+    m4t_mtfp_t* q, m4t_mtfp_t* k,
     int position,
     int num_q_heads, int num_kv_heads, int head_dim,
     double theta_base)
@@ -68,7 +67,7 @@ void bitnet_stub_rope_apply(
 
     /* Apply to all Q heads. */
     for (int h = 0; h < num_q_heads; h++) {
-        int32_t* qh = q + (size_t)h * head_dim;
+        m4t_mtfp_t* qh = q + (size_t)h * head_dim;
         for (int i = 0; i < half; i++) {
             double freq = pow(theta_base, -2.0 * i / (double)head_dim);
             double angle = (double)position * freq;
@@ -81,7 +80,7 @@ void bitnet_stub_rope_apply(
     }
     /* Apply to all K heads (same formula). */
     for (int h = 0; h < num_kv_heads; h++) {
-        int32_t* kh = k + (size_t)h * head_dim;
+        m4t_mtfp_t* kh = k + (size_t)h * head_dim;
         for (int i = 0; i < half; i++) {
             double freq = pow(theta_base, -2.0 * i / (double)head_dim);
             double angle = (double)position * freq;
@@ -96,10 +95,10 @@ void bitnet_stub_rope_apply(
 
 /* ── Softmax ─────────────────────────────────────────────────────── */
 
-void bitnet_stub_softmax(int32_t* y, const int32_t* x, int n) {
+void bitnet_stub_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
     if (n <= 0) return;
     /* Find max for numerical stability. */
-    int32_t mx = x[0];
+    m4t_mtfp_t mx = x[0];
     for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
     /* exp(x[i] - max) and sum. Use double for stability — production
      * path will use an exp LUT in MTFP19. */
@@ -121,19 +120,22 @@ void bitnet_stub_softmax(int32_t* y, const int32_t* x, int n) {
 
 /* ── A8 quantize / dequantize ────────────────────────────────────── */
 
-int32_t bitnet_stub_a8_quantize(int8_t* y, const int32_t* x, int n) {
+m4t_mtfp_t bitnet_stub_a8_quantize(int8_t* y, const m4t_mtfp_t* x, int n) {
+    /* Per RC-3 (red-team 2026-05-06): the returned value is the
+     * per-token absmax, NOT the scale (= absmax/127). Dequant applies
+     * the /127 explicitly. Renamed parameter at the dequant call site
+     * to reflect this. */
     if (n <= 0) return 0;
-    int32_t max_abs = 0;
+    m4t_mtfp_t max_abs = 0;
     for (int i = 0; i < n; i++) {
-        int32_t a = x[i] < 0 ? -x[i] : x[i];
+        m4t_mtfp_t a = x[i] < 0 ? -x[i] : x[i];
         if (a > max_abs) max_abs = a;
     }
     if (max_abs == 0) {
         memset(y, 0, (size_t)n);
         return 0;
     }
-    /* scale = max_abs / 127. Stored as MTFP19 mantissa.
-     * y_int8 = round(x · 127 / max_abs) */
+    /* y_int8 = round(x · 127 / max_abs) */
     for (int i = 0; i < n; i++) {
         double v = (double)x[i] * 127.0 / (double)max_abs;
         int32_t r = (int32_t)(v < 0 ? v - 0.5 : v + 0.5);
@@ -141,22 +143,23 @@ int32_t bitnet_stub_a8_quantize(int8_t* y, const int32_t* x, int n) {
         if (r < -127) r = -127;
         y[i] = (int8_t)r;
     }
-    return max_abs;  /* Return absmax, not scale. Dequant divides by 127. */
+    return max_abs;
 }
 
 void bitnet_stub_a8_dequantize(
-    int32_t* y, const int8_t* x, int32_t scale_mtfp19, int n)
+    m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax_mtfp19, int n)
 {
-    /* y[i] = x_int8[i] · scale / 127 — using scale = max_abs (per stub_quantize). */
+    /* y[i] = x_int8[i] · absmax / 127 — RC-3 rename: parameter is the
+     * absmax stored by stub_quantize, not the scale. */
     for (int i = 0; i < n; i++) {
-        double v = (double)x[i] * (double)scale_mtfp19 / 127.0;
+        double v = (double)x[i] * (double)absmax_mtfp19 / 127.0;
         y[i] = clamp_to_mtfp19((int64_t)v);
     }
 }
 
 /* ── Element-wise ops ────────────────────────────────────────────── */
 
-void bitnet_stub_relu2_inplace(int32_t* x, int n) {
+void bitnet_stub_relu2_inplace(m4t_mtfp_t* x, int n) {
     for (int i = 0; i < n; i++) {
         if (x[i] <= 0) {
             x[i] = 0;
@@ -168,7 +171,7 @@ void bitnet_stub_relu2_inplace(int32_t* x, int n) {
 }
 
 void bitnet_stub_elementwise_mul(
-    int32_t* y, const int32_t* a, const int32_t* b, int n)
+    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n)
 {
     for (int i = 0; i < n; i++) {
         int64_t v = (int64_t)a[i] * (int64_t)b[i];
