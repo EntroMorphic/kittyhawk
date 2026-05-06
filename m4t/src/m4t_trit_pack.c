@@ -189,25 +189,40 @@ static void unpack_trits_1d_neon(m4t_trit_t* dst, const uint8_t* src, int n) {
 #endif /* M4T_HAS_NEON */
 
 void m4t_pack_trits_1d(uint8_t* dst, const m4t_trit_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     /* NEON-only production dispatch. Scalar reference via _scalar_ref. */
     pack_trits_1d_neon(dst, src, n);
 }
 
 void m4t_unpack_trits_1d(m4t_trit_t* dst, const uint8_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     unpack_trits_1d_neon(dst, src, n);
 }
 
 void m4t_pack_trits_1d_scalar_ref(uint8_t* dst, const m4t_trit_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     pack_trits_1d_scalar(dst, src, n);
 }
 
 void m4t_unpack_trits_1d_scalar_ref(m4t_trit_t* dst, const uint8_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     unpack_trits_1d_scalar(dst, src, n);
 }
 
 void m4t_pack_trits_rowmajor(
     uint8_t* dst, const m4t_trit_t* src, int M, int K)
 {
+    assert(M >= 0 && K >= 0);
+    if (M == 0 || K == 0) return;
+    assert(dst && src);
     int Kp = M4T_TRIT_PACKED_BYTES(K);
     memset(dst, 0, (size_t)M * (size_t)Kp);
     for (int m = 0; m < M; m++) {
@@ -218,6 +233,9 @@ void m4t_pack_trits_rowmajor(
 void m4t_unpack_trits_rowmajor(
     m4t_trit_t* dst, const uint8_t* src, int M, int K)
 {
+    assert(M >= 0 && K >= 0);
+    if (M == 0 || K == 0) return;
+    assert(dst && src);
     int Kp = M4T_TRIT_PACKED_BYTES(K);
     for (int m = 0; m < M; m++) {
         m4t_unpack_trits_1d(dst + (size_t)m * K, src + (size_t)m * Kp, K);
@@ -513,18 +531,30 @@ static void unpack_trits_5in8_1d_neon(m4t_trit_t* dst, const uint8_t* src, int n
 #endif /* M4T_HAS_NEON */
 
 void m4t_pack_trits_5in8_1d(uint8_t* dst, const m4t_trit_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     pack_trits_5in8_1d_neon(dst, src, n);
 }
 
 void m4t_unpack_trits_5in8_1d(m4t_trit_t* dst, const uint8_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     unpack_trits_5in8_1d_neon(dst, src, n);
 }
 
 void m4t_pack_trits_5in8_1d_scalar_ref(uint8_t* dst, const m4t_trit_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     pack_trits_5in8_1d_scalar(dst, src, n);
 }
 
 void m4t_unpack_trits_5in8_1d_scalar_ref(m4t_trit_t* dst, const uint8_t* src, int n) {
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(dst && src);
     unpack_trits_5in8_1d_scalar(dst, src, n);
 }
 
