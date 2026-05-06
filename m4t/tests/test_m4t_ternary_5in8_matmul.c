@@ -131,7 +131,10 @@ static int test_pack_golden(void) {
 
 /* Test 3: bit-exact NEON vs scalar across random workloads. */
 static int test_matmul_bit_exact(int K, int M, int N, int n_samples) {
-    int Kp = K / 5;
+    /* Per TD-1 / spec §20: Kp = ceil(K/5) bytes per packed row. For
+     * K%5 == 0 this matches K/5; for K%5 != 0 the trailing byte holds
+     * (K%5) valid trits + zero padding. */
+    int Kp = (K + 4) / 5;
     m4t_trit_t* X = (m4t_trit_t*)calloc((size_t)M * K, sizeof(m4t_trit_t));
     m4t_trit_t* W_unp = (m4t_trit_t*)calloc((size_t)N * K, sizeof(m4t_trit_t));
     uint8_t* W_pkd = (uint8_t*)calloc((size_t)N * Kp, 1);
@@ -166,32 +169,59 @@ int main(void) {
     if (test_pack_unpack_roundtrip()) return 1;
     if (test_pack_golden()) return 1;
 
-    /* Multi-config bit-exact verification.
-     * K must be multiple of 80 (kernel requirement). N multiple of 4. */
-    int Ks[] = { 80, 160, 320, 1280 };
+    /* Aligned configs: K multiple of 80, N multiple of 4. Exercises the
+     * tile body without touching the K-tail or N-tail paths. */
+    int Ks_aligned[] = { 80, 160, 320, 1280 };
     int Ms[] = { 8, 16 };
-    int Ns[] = { 4, 16, 64 };
-    int n_samples = 25;  /* per (K, M, N) triple */
+    int Ns_aligned[] = { 4, 16, 64 };
+    int n_samples = 25;
 
-    for (size_t ki = 0; ki < sizeof(Ks)/sizeof(Ks[0]); ki++) {
+    for (size_t ki = 0; ki < sizeof(Ks_aligned)/sizeof(Ks_aligned[0]); ki++) {
         for (size_t mi = 0; mi < sizeof(Ms)/sizeof(Ms[0]); mi++) {
-            for (size_t ni = 0; ni < sizeof(Ns)/sizeof(Ns[0]); ni++) {
-                if (test_matmul_bit_exact(Ks[ki], Ms[mi], Ns[ni], n_samples)) {
+            for (size_t ni = 0; ni < sizeof(Ns_aligned)/sizeof(Ns_aligned[0]); ni++) {
+                if (test_matmul_bit_exact(Ks_aligned[ki], Ms[mi], Ns_aligned[ni], n_samples)) {
                     return 1;
                 }
             }
         }
     }
 
+    /* Per TD-1: tail-path tests. K%80 != 0 (covers K-tail) AND N%4 != 0
+     * (covers N-tail). Each test exercises 1+ tail path. */
+
+    /* Sanity: K=160 (multiple of 80) with M=4 to verify the tile body alone. */
+    if (test_matmul_bit_exact(160, 4, 4, 1)) return 1;
+
+    /* K-tail only: N%4 == 0 but K%80 != 0. */
+    int Ks_k_tail[]  = { 5, 80 + 5, 80 + 79, 160 + 1, 240 + 47 };
+    int Ns_k_tail[]  = { 4, 16 };
+    for (size_t ki = 0; ki < sizeof(Ks_k_tail)/sizeof(Ks_k_tail[0]); ki++) {
+        for (size_t ni = 0; ni < sizeof(Ns_k_tail)/sizeof(Ns_k_tail[0]); ni++) {
+            if (test_matmul_bit_exact(Ks_k_tail[ki], 4, Ns_k_tail[ni], 10)) {
+                return 1;
+            }
+        }
+    }
+
+    /* N-tail only: K%80 == 0 but N%4 != 0. Covers j_tail = 1, 2, 3 cases. */
+    int Ns_n_tail[]  = { 1, 2, 3, 5, 6, 7, 17 };
+    for (size_t ni = 0; ni < sizeof(Ns_n_tail)/sizeof(Ns_n_tail[0]); ni++) {
+        if (test_matmul_bit_exact(80, 4, Ns_n_tail[ni], 10)) return 1;
+        if (test_matmul_bit_exact(320, 8, Ns_n_tail[ni], 10)) return 1;
+    }
+
+    /* Both tails: K%80 != 0 AND N%4 != 0. Most combinatoric coverage. */
+    int Ks_both[]    = { 5, 17, 80 + 17, 160 + 5 };
+    int Ns_both[]    = { 1, 3, 5, 7 };
+    for (size_t ki = 0; ki < sizeof(Ks_both)/sizeof(Ks_both[0]); ki++) {
+        for (size_t ni = 0; ni < sizeof(Ns_both)/sizeof(Ns_both[0]); ni++) {
+            if (test_matmul_bit_exact(Ks_both[ki], 4, Ns_both[ni], 10)) {
+                return 1;
+            }
+        }
+    }
+
     printf("PASS: m4t_ternary_5in8_matmul (pack/unpack roundtrip + golden + "
-           "%d × %zu × %zu × %zu = %zu bit-exact NEON/scalar samples)\n",
-           n_samples,
-           sizeof(Ks)/sizeof(Ks[0]),
-           sizeof(Ms)/sizeof(Ms[0]),
-           sizeof(Ns)/sizeof(Ns[0]),
-           (size_t)n_samples *
-           (sizeof(Ks)/sizeof(Ks[0])) *
-           (sizeof(Ms)/sizeof(Ms[0])) *
-           (sizeof(Ns)/sizeof(Ns[0])));
+           "aligned bit-exact + K-tail + N-tail + both-tail bit-exact)\n");
     return 0;
 }

@@ -4,6 +4,17 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Changed — TD-1 closure: §20 `m4t_ternary_5in8_matmul_bt` accepts arbitrary K and N (2026-05-05)
+Relaxed the strict `K % 80 == 0` and `N % 4 == 0` preconditions on `m4t_ternary_5in8_matmul_bt`. Tile body unchanged: still 5 SDOTs × 4 j cells per 80-trit chunk, register-tile-by-4. Two new tail paths bring non-aligned shapes to bit-exact correctness without breaking the project's no-scalar-in-production rule:
+- **K%80 tail** — per-trit scalar accumulation for the trailing K%80 trits (geometric sub-block scalar tail; allowed by project rule). 4 j cells in lockstep.
+- **N%4 tail** — single-acc NEON inner loop covering full K (tile body + K-tail) for each of the trailing 1-3 j cells. NEON throughout the bulk; no scalar fallback for the main path.
+
+`m4t_ternary_5in8_matmul_bt_scalar_ref` updated symmetrically (uses `Kp = (K+4)/5` for K%5 != 0 support). Test `test_m4t_ternary_5in8_matmul.c` extended with K-tail-only / N-tail-only / both-tails coverage (K ∈ {5, 17, 85, 159, 161, 287}, N ∈ {1, 2, 3, 5, 6, 7, 17}).
+
+**Red-team caught a test bug:** initial test allocation used `Kp = K/5` (pre-relaxation assumption) but the new kernel uses `Kp = (K+4)/5`. For K%5 != 0 this under-sized W_pkd by N bytes, causing W_pkd to overlap Y_ref in heap layout. The bug surfaced as a single-trit mismatch only when both kernels ran back-to-back (Y_ref's writes overwrote W_pkd's last byte before scalar_ref read it). Fix: test now uses `Kp = (K+4)/5` consistently. Mechanism is a useful artifact: silent buffer-size drift between caller and kernel is exactly the class of bug that grows with parameter relaxations, so the test discipline now matches the kernel contract.
+
+Spec §20.4.1 added to document the alignment recommendation (best throughput when K%80==0 and N%4==0; off-alignment shapes are functionally correct but pay a small per-call overhead). Header docs in `m4t_ternary_matmul.h` updated; the previous "future work" note is removed. Closes TD-1 from `docs/TECHNICAL_DEBT.md`.
+
 ### Added — `docs/TECHNICAL_DEBT.md` centralized debt index (2026-05-05)
 Per session housekeeping. Project had no central debt-tracking doc; debt was scattered across journal closeouts' "future work" sections, THESIS.md "open questions", the pending task list, and spec-level deferrals in M4T_SUBSTRATE.md. New doc consolidates 18 deferred items organized by category (functional gaps / open follow-on cycles / housekeeping / spec deferrals / open questions / methodology debts). Each entry includes Source (cycle/file pointer), State, Unblocks, Priority hint. README.md Documentation table updated; CONTRIBUTING.md post-commit checklist gained a TECHNICAL_DEBT-currency rule (cycles closing with deferred work add an entry; resolved items get removed). Subsequent commit closed TD-12 (task #87 A-G6 was completed inline in the cross-exp accum routing test; tracker was just stale).
 

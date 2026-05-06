@@ -20,14 +20,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Functional gaps (consumer-visible)
 
-### TD-1 — `m4t_ternary_5in8_matmul_bt` strict K%80 + N%4 alignment
-
-**Source:** `journal/m4t_5in8_synthesize.md` H2; `journal/production_shoring_redteam.md` H2.
-**State:** spec §20.4 already documents the limitation; kernel header notes "future work."
-**Unblocks:** consumers with arbitrary (K, N) calling §20 directly without padding.
-**Tail handling pattern:** mirror Item 1's `j_tile_end + tail` pattern, plus a K%80 tail.
-**Priority hint:** medium. Pad-to-multiple is a viable workaround until a real consumer needs it.
-
 ### TD-2 — MTFP19-X variant of 5-in-8 packed matmul
 
 **Source:** `journal/m4t_5in8_closeout.md` "Honest scope."

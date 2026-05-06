@@ -149,19 +149,20 @@ void m4t_ternary_dot_matmul_bt(
  *
  * Preconditions (asserted in debug):
  *   M >= 0, K >= 0, N >= 0;
- *   K % 80 == 0 (NEON inner-block alignment; no scalar tail per project rule);
- *   N % 4 == 0 (register-tile alignment; no untiled tail);
  *   K <= M4T_SDOT_K_MAX_EXACT (no overflow into int32 output);
  *   X and W contain only valid trit codes;
  *   Y, X, W non-NULL when M*N*K > 0;
  *   Y must not alias X or W.
  *
- * Strict alignment is intentional and matches the audit's verified shape.
- * Real consumers with non-aligned (K, N) should pad to the next multiple
- * of 80 / 4 (the trailing trits/cells contribute 0 since pack zero-pads).
- * Future work: K%80 + N%4 tail handling for non-aligned shapes — would
- * mirror Item 1's tile-with-tail pattern, deferred until a consumer
- * demands it. */
+ * Alignment recommendation (NOT a precondition): K % 80 == 0 and N % 4 == 0
+ * keep the entire computation in the SDOT tile body (5 SDOTs × 4 j cells per
+ * 80-trit chunk). For K % 80 != 0, the trailing K%80 trits are processed by
+ * a per-trit scalar tail (geometric scalar tail per project rule — sub-block
+ * tails are allowed; main path remains NEON-only). For N % 4 != 0, the
+ * trailing 1-3 j cells are processed by a single-acc NEON inner loop.
+ * Both tails are bit-exact vs the scalar reference; non-aligned shapes are
+ * functionally correct but pay a small per-call overhead proportional to
+ * the tail size. */
 void m4t_ternary_5in8_matmul_bt(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,

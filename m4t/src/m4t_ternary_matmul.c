@@ -487,8 +487,6 @@ void m4t_ternary_5in8_matmul_bt(
     int M, int K, int N)
 {
     assert(M >= 0 && K >= 0 && N >= 0);
-    assert(K % 80 == 0);
-    assert(N % 4 == 0);
     assert(K <= M4T_SDOT_K_MAX_EXACT);
     if (M == 0 || N == 0) return;
     assert(Y && (K == 0 || (X && W_packed)));
@@ -496,8 +494,17 @@ void m4t_ternary_5in8_matmul_bt(
     assert((const void*)Y != (const void*)W_packed);
 
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
-    int Kp = K / 5;
-    int K5 = K / 5;
+    /* Per TD-1 (relaxation of strict K%80 + N%4 alignment):
+     *   k_tile_end = K - K%80 (multiple of 80; tile body covers this range)
+     *   j_tile_end = N - N%4  (multiple of 4)
+     *   K%80 trailing trits and N%4 trailing j cells handled by geometric
+     *   scalar tail per project rule (sub-block scalar tails are allowed). */
+    int Kp = (K + 4) / 5;            /* packed bytes per row */
+    int K5 = (K + 4) / 5;            /* strided X array length per digit */
+    int k_tile_end = K - (K % 80);
+    int j_tile_end = N - (N % 4);
+
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
 
     const uint8x16_t nine_v = vdupq_n_u8(9);
     const int8x16_t  lut_d0 = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
@@ -515,8 +522,10 @@ void m4t_ternary_5in8_matmul_bt(
         vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
     } };
 
-    int8_t* X_strided = (int8_t*)malloc((size_t)K);
-    if (!X_strided) return;
+    /* Strided X buffer: K5 * 5 ≥ K bytes. Trailing slots (K5*5 - K) zero-padded. */
+    int alloc_size = K5 * 5;
+    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)malloc((size_t)alloc_size) : NULL;
+    if (alloc_size > 0 && !X_strided) return;
     int8_t* X_d[5];
     for (int d = 0; d < 5; d++) {
         X_d[d] = X_strided + (size_t)d * K5;
@@ -525,15 +534,20 @@ void m4t_ternary_5in8_matmul_bt(
     for (int i = 0; i < M; i++) {
         const m4t_trit_t* xi = X + (size_t)i * K;
 
+        /* Permute X[i, :] into 5 stride-aligned arrays. Trit indices >= K
+         * are zero-padded so tile body's vld1q_s8 reads valid data even
+         * if the last X_d entry corresponds to trits past K (it won't be
+         * used by the tile body, which stops at k_tile_end/5; but the
+         * permutation pass must avoid OOB read on xi). */
         for (int n = 0; n < K5; n++) {
-            X_d[0][n] = xi[5 * n + 0];
-            X_d[1][n] = xi[5 * n + 1];
-            X_d[2][n] = xi[5 * n + 2];
-            X_d[3][n] = xi[5 * n + 3];
-            X_d[4][n] = xi[5 * n + 4];
+            for (int d = 0; d < 5; d++) {
+                int trit_idx = 5 * n + d;
+                X_d[d][n] = (trit_idx < K) ? xi[trit_idx] : 0;
+            }
         }
 
-        for (int j = 0; j < N; j += 4) {
+        /* Tile body: 4 j cells × full 80-trit chunks. */
+        for (int j = 0; j < j_tile_end; j += 4) {
             const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
             const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
             const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
@@ -544,7 +558,7 @@ void m4t_ternary_5in8_matmul_bt(
             int32x4_t acc2 = vdupq_n_s32(0);
             int32x4_t acc3 = vdupq_n_s32(0);
 
-            for (int k = 0; k < K; k += 80) {
+            for (int k = 0; k < k_tile_end; k += 80) {
                 int x_idx = k / 5;
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
@@ -581,14 +595,82 @@ void m4t_ternary_5in8_matmul_bt(
                 #undef M4T_5IN8_DECODE_AND_SDOT
             }
 
-            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)vaddvq_s32(acc0);
-            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)vaddvq_s32(acc1);
-            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)vaddvq_s32(acc2);
-            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)vaddvq_s32(acc3);
+            int32_t s0 = vaddvq_s32(acc0);
+            int32_t s1 = vaddvq_s32(acc1);
+            int32_t s2 = vaddvq_s32(acc2);
+            int32_t s3 = vaddvq_s32(acc3);
+
+            /* Geometric scalar tail: K%80 trailing trits per j cell (4 in lockstep). */
+            for (int k = k_tile_end; k < K; k++) {
+                int byte_idx  = k / 5;
+                int digit_pos = k % 5;
+                int8_t x_k = xi[k];
+                #define M4T_5IN8_DECODE_TRIT(WJ) (                             \
+                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 1u ?  1 : \
+                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 2u ? -1 : \
+                                                                              0)
+                s0 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj0);
+                s1 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj1);
+                s2 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj2);
+                s3 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj3);
+                #undef M4T_5IN8_DECODE_TRIT
+            }
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)s0;
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)s1;
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)s2;
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)s3;
+        }
+
+        /* N-tail: 1-3 trailing j cells. Single-acc NEON inner loop +
+         * scalar K-tail. NEON throughout the bulk; geometric scalar tail
+         * for K%80 trits per project rule. */
+        for (int j = j_tile_end; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32x4_t acc = vdupq_n_s32(0);
+
+            for (int k = 0; k < k_tile_end; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                uint8x16_t b = vld1q_u8(wj + k / 5);
+                uint16x8_t lo16 = vshrq_n_u16(
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
+                uint16x8_t hi16 = vshrq_n_u16(
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
+                uint8x16_t high = vcombine_u8(
+                    vmovn_u16(lo16), vmovn_u16(hi16));
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
+                acc = vdotq_s32(acc, xv0, d0);
+                acc = vdotq_s32(acc, xv1, d1);
+                acc = vdotq_s32(acc, xv2, d2);
+                acc = vdotq_s32(acc, xv3, d3);
+                acc = vdotq_s32(acc, xv4, d4);
+            }
+
+            int32_t s = vaddvq_s32(acc);
+            for (int k = k_tile_end; k < K; k++) {
+                int byte_idx  = k / 5;
+                int digit_pos = k % 5;
+                uint8_t u = (uint8_t)((wj[byte_idx] / POW3[digit_pos]) % 3u);
+                int w = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+                s += (int32_t)xi[k] * (int32_t)w;
+            }
+
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)s;
         }
     }
 
-    free(X_strided);
+    if (X_strided) free(X_strided);
 #else
     /* Per project no-scalar-in-production rule (CONTRIBUTING.md +
      * feedback_function_over_speed_no_scalar memory): production
@@ -609,15 +691,13 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
     int M, int K, int N)
 {
     assert(M >= 0 && K >= 0 && N >= 0);
-    assert(K % 80 == 0);
-    assert(N % 4 == 0);
     assert(K <= M4T_SDOT_K_MAX_EXACT);
     if (M == 0 || N == 0) return;
     assert(Y && (K == 0 || (X && W_packed)));
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_packed);
 
-    int Kp = K / 5;
+    int Kp = (K + 4) / 5;
     static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
 
     for (int i = 0; i < M; i++) {

@@ -678,6 +678,15 @@ This split-LUT decode is the verified-fastest approach on Apple Silicon NEON; al
 
 The 5-in-8 packing is NOT a replacement for 4-in-8. They coexist; 4-in-8 stays the default for SDOT-friendly paths, and 5-in-8 is available when storage density justifies the decode cost.
 
+### 20.4.1 Shape support
+
+The §20 matmul `m4t_ternary_5in8_matmul_bt` accepts arbitrary `(K, N)`. Best-case throughput when `K % 80 == 0` and `N % 4 == 0` (the entire computation runs in the SDOT tile body: 5 SDOTs per 80-trit chunk × 4 j cells per register tile). Off-alignment shapes pay a small overhead:
+
+- `K % 80 != 0`: trailing `K%80` trits handled by per-trit scalar accumulation (geometric scalar tail per project rule — sub-block tails are allowed; main path remains NEON-only).
+- `N % 4 != 0`: trailing 1-3 j cells handled by a single-acc NEON inner loop (full NEON throughout).
+
+Both tails are bit-exact vs the scalar reference.
+
 ### 20.5 Spec discipline
 
 This is a NEW representation but does NOT amend the substrate's invariants:
