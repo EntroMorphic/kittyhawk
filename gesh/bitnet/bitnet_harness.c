@@ -152,11 +152,11 @@ static void bitnet_forward_block(
     }
 
     /* RoPE on Q, K. */
-    bitnet_stub_rope_apply(s->q, s->k, position,
-                           BITNET_NUM_ATTENTION_HEADS,
-                           BITNET_NUM_KV_HEADS,
-                           BITNET_HEAD_DIM,
-                           BITNET_ROPE_THETA);
+    m4t_mtfp_rope_apply(s->q, s->k, position,
+                        BITNET_NUM_ATTENTION_HEADS,
+                        BITNET_NUM_KV_HEADS,
+                        BITNET_HEAD_DIM,
+                        BITNET_ROPE_THETA);
 
     /* Attention scores = Q @ K^T * (1/sqrt(head_dim)).
      * Single-token decode: K from cache is [n_kv_heads × seq_k × head_dim];

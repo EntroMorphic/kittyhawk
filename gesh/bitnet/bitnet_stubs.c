@@ -31,45 +31,9 @@ static inline int32_t clamp_to_mtfp19(int64_t v) {
  * close of work-unit 2 of bitnet_phase1. */
 
 /* ── RoPE ────────────────────────────────────────────────────────── */
-
-void bitnet_stub_rope_apply(
-    m4t_mtfp_t* q, m4t_mtfp_t* k,
-    int position,
-    int num_q_heads, int num_kv_heads, int head_dim,
-    double theta_base)
-{
-    /* RoPE pairs adjacent dims: (q[2i], q[2i+1]) → (q[2i]·cos − q[2i+1]·sin,
-     *                                                q[2i]·sin + q[2i+1]·cos)
-     * with θ_i = position / (theta_base ^ (2i / head_dim)) */
-    int half = head_dim / 2;
-
-    /* Apply to all Q heads. */
-    for (int h = 0; h < num_q_heads; h++) {
-        m4t_mtfp_t* qh = q + (size_t)h * head_dim;
-        for (int i = 0; i < half; i++) {
-            double freq = pow(theta_base, -2.0 * i / (double)head_dim);
-            double angle = (double)position * freq;
-            double c = cos(angle), s = sin(angle);
-            double a = (double)qh[2*i];
-            double b = (double)qh[2*i + 1];
-            qh[2*i]     = clamp_to_mtfp19((int64_t)(a * c - b * s));
-            qh[2*i + 1] = clamp_to_mtfp19((int64_t)(a * s + b * c));
-        }
-    }
-    /* Apply to all K heads (same formula). */
-    for (int h = 0; h < num_kv_heads; h++) {
-        m4t_mtfp_t* kh = k + (size_t)h * head_dim;
-        for (int i = 0; i < half; i++) {
-            double freq = pow(theta_base, -2.0 * i / (double)head_dim);
-            double angle = (double)position * freq;
-            double c = cos(angle), s = sin(angle);
-            double a = (double)kh[2*i];
-            double b = (double)kh[2*i + 1];
-            kh[2*i]     = clamp_to_mtfp19((int64_t)(a * c - b * s));
-            kh[2*i + 1] = clamp_to_mtfp19((int64_t)(a * s + b * c));
-        }
-    }
-}
+/* Removed: replaced by m4t_mtfp_rope_apply (substrate primitive,
+ * rotate_half convention) at the close of work-unit 3 of bitnet_phase1.
+ * The previous stub used the WRONG (adjacent-pair) convention. */
 
 /* ── Softmax ─────────────────────────────────────────────────────── */
 

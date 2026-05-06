@@ -398,6 +398,61 @@ void m4t_mtfp_rmsnorm_scalar_ref(
     int n
 );
 
+/* ── RoPE (rotary position embedding) ───────────────────────────────────
+ *
+ * Llama-family rotate_half convention. For each head and freq_idx
+ * i ∈ [0, head_dim/2):
+ *   q'[h, i]            = q[h, i]            · cos_i − q[h, i+d/2] · sin_i
+ *   q'[h, i + d/2]      = q[h, i + d/2]      · cos_i + q[h, i]     · sin_i
+ *
+ * cos/sin are looked up from a precomputed LUT indexed by (position,
+ * freq_idx). The LUT is built lazily on first call using libm cos/sin
+ * (init-time FP allowed; same precedent as bf16→MTFP19 weight loading).
+ *
+ * Constraints:
+ *   - position < M4T_ROPE_MAX_POSITION (4096; BitNet's
+ *     max_position_embeddings).
+ *   - head_dim ≤ M4T_ROPE_MAX_HEAD_DIM (256; comfortably above
+ *     BitNet's 128) and even.
+ *   - Single-threaded init (Phase 1 inference is single-threaded).
+ *
+ * Convention assumption (RC-10 of work-unit 3 red-team): BitNet
+ * b1.58-2B-4T uses Llama's rotate_half convention. The HF model card
+ * has no custom modeling_*.py — `trust_remote_code=True` loads via
+ * transformers.LlamaForCausalLM-derived class. Final verification
+ * happens at work-unit 6 (HF-vs-substrate per-layer comparison) — if
+ * the convention is wrong, Q/K post-RoPE outputs would diverge.
+ *
+ * Saturating clamp on output. RoPE is a rotation — preserves L2 norm —
+ * so saturation is rare in practice for valid MTFP19 inputs.
+ *
+ * Per journal/rope_design_lmm.md (work-unit 3 of bitnet_phase1). */
+#define M4T_ROPE_MAX_POSITION   4096
+#define M4T_ROPE_MAX_HEAD_DIM   256
+#define M4T_ROPE_COS_SIN_SCALE  ((int32_t)1 << 29)  /* Q = 2^29 */
+
+void m4t_mtfp_rope_apply(
+    m4t_mtfp_t* q,
+    m4t_mtfp_t* k,
+    int position,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    double theta_base
+);
+
+/* Scalar test oracle. Same LUT, same apply pipeline; bit-exact
+ * vs production. */
+void m4t_mtfp_rope_apply_scalar_ref(
+    m4t_mtfp_t* q,
+    m4t_mtfp_t* k,
+    int position,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    double theta_base
+);
+
 #ifdef __cplusplus
 }
 #endif

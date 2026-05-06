@@ -32,17 +32,10 @@ extern "C" {
  * after the full bring-up converges. New callers MUST use the substrate
  * primitive. */
 
-/* RoPE: applies rotary position embedding to (q, k) in-place.
- * q: [num_q_heads × head_dim]
- * k: [num_kv_heads × head_dim]
- * position: token's position index (0-based). Stub uses the formula
- * directly; production version uses precomputed cos/sin LUT. */
-void bitnet_stub_rope_apply(
-    m4t_mtfp_t* q, m4t_mtfp_t* k,
-    int position,
-    int num_q_heads, int num_kv_heads, int head_dim,
-    double theta_base
-);
+/* RoPE: replaced by m4t_mtfp_rope_apply in m4t_mtfp.h (work-unit 3).
+ * Note: the original stub used the adjacent-pair convention; BitNet
+ * actually uses Llama's rotate_half convention. The substrate primitive
+ * is the only correct path. */
 
 /* Softmax (numerically stable: subtract max, exp, normalize).
  * y[i] = exp(x[i] - max(x)) / sum_j exp(x[j] - max(x))

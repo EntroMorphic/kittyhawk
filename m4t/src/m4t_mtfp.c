@@ -19,7 +19,8 @@
 #include "m4t_internal.h"
 #include "m4t_pow3_magic.h"   /* divide-by-3^k magic-multiply table (shift3 NEON path) */
 
-#include <math.h>             /* sqrt — used ONLY in m4t_int32_rsqrt_scalar_ref test oracle */
+#include <math.h>             /* sqrt/cos/sin — _scalar_ref oracles + RoPE LUT init */
+#include <stdlib.h>           /* realloc — RoPE LUT lifecycle */
 #include <string.h>
 
 /* ── Block-native ─────────────────────────────────────────────────────── */
@@ -1026,5 +1027,146 @@ void m4t_mtfp_rmsnorm_scalar_ref(
         if (v >  (double)M4T_MTFP_MAX_VAL) v =  (double)M4T_MTFP_MAX_VAL;
         if (v < -(double)M4T_MTFP_MAX_VAL) v = -(double)M4T_MTFP_MAX_VAL;
         y[i] = (m4t_mtfp_t)(v < 0 ? v - 0.5 : v + 0.5);
+    }
+}
+
+/* ── RoPE ───────────────────────────────────────────────────────────────
+ *
+ * Llama rotate_half convention; LUT-based cos/sin precomputed at first
+ * call. Per journal/rope_design_lmm.md.
+ *
+ * LUT is owned by this translation unit (single-threaded; BitNet
+ * inference is single-threaded). Re-init triggered if (head_dim,
+ * theta_base) changes — supports models with different RoPE configs,
+ * though typical use is one config per process.
+ *
+ * libm cos/sin used at init only — equivalent precedent to weight
+ * loading's bf16→MTFP19 conversion (init-time FP, runtime pure-int). */
+
+static int32_t* g_rope_cos_lut = NULL;
+static int32_t* g_rope_sin_lut = NULL;
+static int      g_rope_lut_initialized = 0;
+static int      g_rope_lut_head_dim = 0;
+static double   g_rope_lut_theta_base = 0.0;
+
+static void rope_init_lut(int head_dim, double theta_base) {
+    if (g_rope_lut_initialized
+        && g_rope_lut_head_dim == head_dim
+        && g_rope_lut_theta_base == theta_base) {
+        return;
+    }
+    assert(head_dim > 0);
+    assert(head_dim % 2 == 0);
+    assert(head_dim <= M4T_ROPE_MAX_HEAD_DIM);
+
+    int half = head_dim / 2;
+    size_t n = (size_t)M4T_ROPE_MAX_POSITION * (size_t)half;
+    int32_t* new_cos = (int32_t*)realloc(g_rope_cos_lut, n * sizeof(int32_t));
+    int32_t* new_sin = (int32_t*)realloc(g_rope_sin_lut, n * sizeof(int32_t));
+    assert(new_cos && new_sin);
+    g_rope_cos_lut = new_cos;
+    g_rope_sin_lut = new_sin;
+
+    double scale = (double)M4T_ROPE_COS_SIN_SCALE;
+    for (int pos = 0; pos < M4T_ROPE_MAX_POSITION; pos++) {
+        for (int i = 0; i < half; i++) {
+            double freq  = pow(theta_base, -2.0 * (double)i / (double)head_dim);
+            double angle = (double)pos * freq;
+            double cv = cos(angle) * scale;
+            double sv = sin(angle) * scale;
+            /* Round half-away-from-zero. */
+            int32_t ci = (int32_t)(cv < 0 ? cv - 0.5 : cv + 0.5);
+            int32_t si = (int32_t)(sv < 0 ? sv - 0.5 : sv + 0.5);
+            g_rope_cos_lut[pos*half + i] = ci;
+            g_rope_sin_lut[pos*half + i] = si;
+        }
+    }
+    g_rope_lut_initialized = 1;
+    g_rope_lut_head_dim = head_dim;
+    g_rope_lut_theta_base = theta_base;
+}
+
+/* Apply RoPE to one head's worth of d-dim values, in place.
+ * For i ∈ [0, half):
+ *   a' = (a · c − b · s) >> 29
+ *   b' = (b · c + a · s) >> 29
+ * Saturating clamp on output. */
+static inline void rope_apply_one_head(
+    m4t_mtfp_t* h, int half,
+    const int32_t* cos_row, const int32_t* sin_row)
+{
+    for (int i = 0; i < half; i++) {
+        int64_t a = h[i];
+        int64_t b = h[i + half];
+        int64_t c = cos_row[i];
+        int64_t s = sin_row[i];
+        int64_t new_a = (a * c - b * s) >> 29;
+        int64_t new_b = (b * c + a * s) >> 29;
+        h[i]        = m4t_mtfp_clamp64(new_a);
+        h[i + half] = m4t_mtfp_clamp64(new_b);
+    }
+}
+
+void m4t_mtfp_rope_apply(
+    m4t_mtfp_t* q, m4t_mtfp_t* k,
+    int position,
+    int num_q_heads, int num_kv_heads, int head_dim,
+    double theta_base)
+{
+    assert(q && k);
+    assert(position >= 0 && position < M4T_ROPE_MAX_POSITION);
+    assert(num_q_heads > 0 && num_kv_heads > 0);
+    assert(head_dim > 0 && head_dim % 2 == 0);
+
+    rope_init_lut(head_dim, theta_base);
+
+    int half = head_dim / 2;
+    const int32_t* cos_row = g_rope_cos_lut + (size_t)position * (size_t)half;
+    const int32_t* sin_row = g_rope_sin_lut + (size_t)position * (size_t)half;
+
+    for (int h = 0; h < num_q_heads; h++) {
+        rope_apply_one_head(q + (size_t)h * head_dim, half, cos_row, sin_row);
+    }
+    for (int h = 0; h < num_kv_heads; h++) {
+        rope_apply_one_head(k + (size_t)h * head_dim, half, cos_row, sin_row);
+    }
+}
+
+void m4t_mtfp_rope_apply_scalar_ref(
+    m4t_mtfp_t* q, m4t_mtfp_t* k,
+    int position,
+    int num_q_heads, int num_kv_heads, int head_dim,
+    double theta_base)
+{
+    /* Independent FP test oracle — does NOT use the LUT. Runtime libm
+     * cos/sin per call (FP allowed in scaffolding). Verifies both:
+     *   (a) the rotate_half convention matches the FP reference, and
+     *   (b) the LUT-quantized production produces output within
+     *       tolerance of the FP-runtime answer. */
+    assert(q && k);
+    assert(position >= 0);
+    assert(num_q_heads > 0 && num_kv_heads > 0);
+    assert(head_dim > 0 && head_dim % 2 == 0);
+
+    int half = head_dim / 2;
+
+    /* For each freq_idx, compute FP cos/sin at runtime, apply to all heads. */
+    for (int hh = 0; hh < num_q_heads + num_kv_heads; hh++) {
+        m4t_mtfp_t* head = (hh < num_q_heads)
+            ? (q + (size_t)hh * head_dim)
+            : (k + (size_t)(hh - num_q_heads) * head_dim);
+        for (int i = 0; i < half; i++) {
+            double freq  = pow(theta_base, -2.0 * (double)i / (double)head_dim);
+            double angle = (double)position * freq;
+            double c = cos(angle), s = sin(angle);
+            double a = (double)head[i];
+            double b = (double)head[i + half];
+            double new_a_d = a * c - b * s;
+            double new_b_d = b * c + a * s;
+            int64_t new_a = (int64_t)(new_a_d < 0 ? new_a_d - 0.5 : new_a_d + 0.5);
+            int64_t new_b = (int64_t)(new_b_d < 0 ? new_b_d - 0.5 : new_b_d + 0.5);
+            head[i]        = m4t_mtfp_clamp64(new_a);
+            head[i + half] = m4t_mtfp_clamp64(new_b);
+        }
     }
 }
