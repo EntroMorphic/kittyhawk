@@ -4,6 +4,15 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — TD-7 closure: §20 X-packed sibling `m4t_ternary_5in8_matmul_xpacked_bt` (2026-05-05)
+Symmetric to §20 (5-in-8 W) but with X also packed at 5-in-8 (1.6 bits/cell). Per i, decodes `X_packed[i, :]` into the same 5 stride-aligned int8 arrays via the split-LUT pattern (1× div-by-9 magic-multiply + 5× vqtbl1q/vqtbl2q lookups per 16-byte chunk; scalar geometric tail for trailing Kp%16 bytes). Tile body identical to §20: 5 SDOTs × 4 j cells per 80-trit chunk. Same arbitrary-(K, N) shape support as §20 (K%80 + N%4 tail handling per TD-1).
+
+Verification (`test_m4t_ternary_5in8_xpacked.c`):
+- **G1 — NEON vs scalar_ref:** bit-exact across aligned (K ∈ {80, 160, 320, 640} × N ∈ {4, 16, 64} × M ∈ {4, 8, 16}) and tail (K ∈ {5, 17, 85, 159, 161, 287} × N ∈ {1, 2, 3, 4, 5, 7, 16}) configurations.
+- **G2 — cross-equivalence with §20:** xpacked kernel produces the same Y as `m4t_ternary_5in8_matmul_bt(X_unpacked, W_packed, ...)` when `X_unpacked = unpack(X_packed)` and the same W_packed is reused. Strong cross-check: any X-decode bug surfaces as a Y mismatch against the canonical X-unpacked kernel (catches silent decode-side drift that G1 alone could miss if scalar_ref shared the same bug).
+
+22/22 ctest binaries green. Spec §20.6 added documenting the X-packed sibling and the bench-deferral rationale (primitive ships per project rule; wall-clock comparison vs §20 deferred until a consumer demands it). Closes TD-7.
+
 ### Changed — TD-1 closure: §20 `m4t_ternary_5in8_matmul_bt` accepts arbitrary K and N (2026-05-05)
 Relaxed the strict `K % 80 == 0` and `N % 4 == 0` preconditions on `m4t_ternary_5in8_matmul_bt`. Tile body unchanged: still 5 SDOTs × 4 j cells per 80-trit chunk, register-tile-by-4. Two new tail paths bring non-aligned shapes to bit-exact correctness without breaking the project's no-scalar-in-production rule:
 - **K%80 tail** — per-trit scalar accumulation for the trailing K%80 trits (geometric sub-block scalar tail; allowed by project rule). 4 j cells in lockstep.

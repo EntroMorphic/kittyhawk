@@ -716,3 +716,262 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
         }
     }
 }
+
+/* Per TD-7: §20 sibling with X also packed 5-in-8.
+ * Implementation: per i, decode X_packed[i, :] into 5 stride-aligned int8
+ * arrays via the same split-LUT pattern used for W. Then run the §20 tile
+ * body verbatim. Same arbitrary-(K,N) support as §20 (TD-1). */
+void m4t_ternary_5in8_matmul_xpacked_bt(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X_packed && W_packed)));
+    assert((const void*)Y != (const void*)X_packed);
+    assert((const void*)Y != (const void*)W_packed);
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    int Kp = (K + 4) / 5;
+    int K5 = (K + 4) / 5;
+    int k_tile_end = K - (K % 80);
+    int j_tile_end = N - (N % 4);
+    int kp_tile = Kp - (Kp % 16);    /* multiple of 16 for X-decode chunking */
+
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+    const uint8x16_t nine_v = vdupq_n_u8(9);
+    const int8x16_t  lut_d0 = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
+    const int8x16_t  lut_d1 = vld1q_s8(M4T_5IN8_LUT_LOW_D1);
+    const int8x16x2_t lut_d2 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 + 16),
+    } };
+    const int8x16x2_t lut_d3 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 + 16),
+    } };
+    const int8x16x2_t lut_d4 = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
+    } };
+
+    int alloc_size = K5 * 5;
+    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)malloc((size_t)alloc_size) : NULL;
+    if (alloc_size > 0 && !X_strided) return;
+    int8_t* X_d[5];
+    for (int d = 0; d < 5; d++) {
+        X_d[d] = X_strided + (size_t)d * K5;
+    }
+
+    /* Scratch xi buffer for per-trit scalar K-tail (decoded once per row). */
+    int8_t* xi_scratch = (K % 80 != 0)
+        ? (int8_t*)malloc((size_t)(K % 80))
+        : NULL;
+    if ((K % 80 != 0) && !xi_scratch) {
+        if (X_strided) free(X_strided);
+        return;
+    }
+
+    for (int i = 0; i < M; i++) {
+        const uint8_t* xi_p = X_packed + (size_t)i * Kp;
+
+        /* Decode X_packed[i, :] into 5 stride-aligned arrays via split-LUT
+         * (full 16-byte chunks NEON, trailing bytes scalar — geometric tail). */
+        for (int b = 0; b < kp_tile; b += 16) {
+            uint8x16_t bv = vld1q_u8(xi_p + b);
+            uint16x8_t lo16 = vshrq_n_u16(
+                vmulq_n_u16(vmovl_u8(vget_low_u8(bv)), 57), 9);
+            uint16x8_t hi16 = vshrq_n_u16(
+                vmulq_n_u16(vmovl_u8(vget_high_u8(bv)), 57), 9);
+            uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));
+            uint8x16_t low  = vsubq_u8(bv, vmulq_u8(high, nine_v));
+            vst1q_s8(X_d[0] + b, vqtbl1q_s8(lut_d0, low));
+            vst1q_s8(X_d[1] + b, vqtbl1q_s8(lut_d1, low));
+            vst1q_s8(X_d[2] + b, vqtbl2q_s8(lut_d2, high));
+            vst1q_s8(X_d[3] + b, vqtbl2q_s8(lut_d3, high));
+            vst1q_s8(X_d[4] + b, vqtbl2q_s8(lut_d4, high));
+        }
+        for (int b = kp_tile; b < Kp; b++) {
+            uint8_t byte = xi_p[b];
+            for (int d = 0; d < 5; d++) {
+                uint8_t u = (uint8_t)((byte / POW3[d]) % 3u);
+                X_d[d][b] = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+            }
+        }
+
+        /* Materialize the K-tail xi values once (raw int8 trits at k=k_tile_end..K-1)
+         * by decoding from X_packed. Used by both K-tail paths below. */
+        if (xi_scratch) {
+            for (int k = k_tile_end; k < K; k++) {
+                int b = k / 5, dp = k % 5;
+                uint8_t u = (uint8_t)((xi_p[b] / POW3[dp]) % 3u);
+                xi_scratch[k - k_tile_end] = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+            }
+        }
+
+        /* Tile body: 4 j cells × full 80-trit chunks. (Identical to §20.) */
+        for (int j = 0; j < j_tile_end; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
+
+            for (int k = 0; k < k_tile_end; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                #define M4T_5IN8_DECODE_AND_SDOT(WJ, ACC) do {                 \
+                    uint8x16_t b = vld1q_u8((WJ) + k / 5);                     \
+                    uint16x8_t lo16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                    uint16x8_t hi16 = vshrq_n_u16(                             \
+                        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                    uint8x16_t high = vcombine_u8(                             \
+                        vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                    int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                    int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                    int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                    int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                    int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                    (ACC) = vdotq_s32((ACC), xv0, d0);                         \
+                    (ACC) = vdotq_s32((ACC), xv1, d1);                         \
+                    (ACC) = vdotq_s32((ACC), xv2, d2);                         \
+                    (ACC) = vdotq_s32((ACC), xv3, d3);                         \
+                    (ACC) = vdotq_s32((ACC), xv4, d4);                         \
+                } while (0)
+
+                M4T_5IN8_DECODE_AND_SDOT(wj0, acc0);
+                M4T_5IN8_DECODE_AND_SDOT(wj1, acc1);
+                M4T_5IN8_DECODE_AND_SDOT(wj2, acc2);
+                M4T_5IN8_DECODE_AND_SDOT(wj3, acc3);
+
+                #undef M4T_5IN8_DECODE_AND_SDOT
+            }
+
+            int32_t s0 = vaddvq_s32(acc0);
+            int32_t s1 = vaddvq_s32(acc1);
+            int32_t s2 = vaddvq_s32(acc2);
+            int32_t s3 = vaddvq_s32(acc3);
+
+            for (int k = k_tile_end; k < K; k++) {
+                int byte_idx  = k / 5;
+                int digit_pos = k % 5;
+                int8_t x_k = xi_scratch[k - k_tile_end];
+                #define M4T_5IN8_DECODE_TRIT(WJ) (                             \
+                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 1u ?  1 : \
+                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 2u ? -1 : \
+                                                                              0)
+                s0 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj0);
+                s1 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj1);
+                s2 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj2);
+                s3 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj3);
+                #undef M4T_5IN8_DECODE_TRIT
+            }
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)s0;
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)s1;
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)s2;
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)s3;
+        }
+
+        for (int j = j_tile_end; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32x4_t acc = vdupq_n_s32(0);
+
+            for (int k = 0; k < k_tile_end; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                uint8x16_t b = vld1q_u8(wj + k / 5);
+                uint16x8_t lo16 = vshrq_n_u16(
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
+                uint16x8_t hi16 = vshrq_n_u16(
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
+                uint8x16_t high = vcombine_u8(
+                    vmovn_u16(lo16), vmovn_u16(hi16));
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
+                acc = vdotq_s32(acc, xv0, d0);
+                acc = vdotq_s32(acc, xv1, d1);
+                acc = vdotq_s32(acc, xv2, d2);
+                acc = vdotq_s32(acc, xv3, d3);
+                acc = vdotq_s32(acc, xv4, d4);
+            }
+
+            int32_t s = vaddvq_s32(acc);
+            for (int k = k_tile_end; k < K; k++) {
+                int byte_idx  = k / 5;
+                int digit_pos = k % 5;
+                uint8_t u = (uint8_t)((wj[byte_idx] / POW3[digit_pos]) % 3u);
+                int w = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+                s += (int32_t)xi_scratch[k - k_tile_end] * (int32_t)w;
+            }
+
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)s;
+        }
+    }
+
+    if (X_strided)  free(X_strided);
+    if (xi_scratch) free(xi_scratch);
+#else
+#error "m4t_ternary_5in8_matmul_xpacked_bt requires NEON + ARM_FEATURE_DOTPROD; \
+no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
+#endif
+}
+
+/* Scalar reference for the X-packed variant. Test-only. */
+void m4t_ternary_5in8_matmul_xpacked_bt_scalar_ref(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X_packed && W_packed)));
+    assert((const void*)Y != (const void*)X_packed);
+    assert((const void*)Y != (const void*)W_packed);
+
+    int Kp = (K + 4) / 5;
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+    for (int i = 0; i < M; i++) {
+        const uint8_t* xi_p = X_packed + (size_t)i * Kp;
+        for (int j = 0; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32_t acc = 0;
+            for (int k = 0; k < K; k++) {
+                int b_i = k / 5, d_p = k % 5;
+                uint8_t ux = (uint8_t)((xi_p[b_i] / POW3[d_p]) % 3u);
+                uint8_t uw = (uint8_t)((wj[b_i]   / POW3[d_p]) % 3u);
+                int x = (ux == 1u) ? 1 : (ux == 2u) ? -1 : 0;
+                int w = (uw == 1u) ? 1 : (uw == 2u) ? -1 : 0;
+                acc += (int32_t)x * (int32_t)w;
+            }
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)acc;
+        }
+    }
+}

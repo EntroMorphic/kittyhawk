@@ -696,10 +696,20 @@ This is a NEW representation but does NOT amend the substrate's invariants:
 
 5-in-8 is purely a denser storage encoding for ternary values. It plugs into the existing arithmetic and routing primitives via the new pack/unpack primitives.
 
-### 20.6 Cross-references
+### 20.6 X-packed sibling (TD-7)
+
+`m4t_ternary_5in8_matmul_xpacked_bt` extends §20 to also pack the X (activation) operand at 5-in-8 (1.6 bits/cell). Implementation: per row, decode `X_packed[i, :]` into the same 5 stride-aligned int8 arrays via the split-LUT pattern, then run §20's tile body verbatim. Same arbitrary-(K, N) shape support as §20 (per TD-1).
+
+When to use which:
+- **`m4t_ternary_5in8_matmul_bt`** — X stays unpacked (8 b/c). Best when X is L1-resident and bandwidth doesn't dominate (typical inference shapes with small batch).
+- **`m4t_ternary_5in8_matmul_xpacked_bt`** — X also packed at 1.6 b/c. Adds X-decode cost (1 div-by-9 + 5 LUTs per byte, amortized once per row). Pays off when X-side memory bandwidth is the bottleneck (large-batch training, KV cache density).
+
+The xpacked kernel is verified bit-exact against both its own scalar reference (gate G1) and against `m4t_ternary_5in8_matmul_bt` with `X_unpacked = unpack(X_packed)` (gate G2 — strong cross-check). Wall-clock comparison against `m4t_ternary_5in8_matmul_bt` is not benchmarked here; TD-7 closeout records that the primitive ships per project rule (foundational primitives don't gate on consumer demand) and that bench harness extension is a separate concern when a consumer surfaces.
+
+### 20.7 Cross-references
 
 - Pack/unpack: `m4t/src/m4t_trit_pack.h` — `m4t_pack_trits_5in8_1d`, `m4t_unpack_trits_5in8_1d`, `M4T_TRIT_PACKED5_BYTES`.
-- Matmul: `m4t/src/m4t_ternary_matmul.h` — `m4t_ternary_5in8_matmul_bt`.
-- Test: `m4t/tests/test_m4t_ternary_5in8_matmul.c`.
-- Audit precursor: `audit/b2b_matmul.{h,c}` (Path D: `base3_5in8_matmul_neon`).
+- Matmul: `m4t/src/m4t_ternary_matmul.h` — `m4t_ternary_5in8_matmul_bt`, `m4t_ternary_5in8_matmul_xpacked_bt`.
+- Tests: `m4t/tests/test_m4t_ternary_5in8_matmul.c`, `m4t/tests/test_m4t_ternary_5in8_xpacked.c`.
+- Audit precursor: `audit/b2b_matmul.{h,c}` (Path D: `base3_5in8_matmul_neon`; Path E: 4-in-8 X+W).
 - Journal: `journal/m4t_5in8_synthesize.md`, `journal/m4t_5in8_closeout.md`, `journal/tristate_strong_5in8_addendum.md`.

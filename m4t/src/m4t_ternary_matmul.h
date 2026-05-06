@@ -181,6 +181,40 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
     int M, int K, int N
 );
 
+/* Per TD-7: §20 sibling with X also packed 5-in-8 (sub-2-bit X-packing).
+ *   Y = X @ W^T  where both X and W are §20-packed.
+ *
+ * X_packed: M rows × M4T_TRIT_PACKED5_BYTES(K) = (K+4)/5 bytes (row-major).
+ * W_packed: N rows × M4T_TRIT_PACKED5_BYTES(K) bytes (row-major; W^T layout
+ *   so each row j holds K trits of W's column j — same convention as
+ *   m4t_ternary_5in8_matmul_bt).
+ * Y: M × N int32 outputs.
+ *
+ * Implementation: NEON-only. Per i, X_packed[i, :] is decoded into 5
+ * stride-aligned int8 arrays via the same split-LUT pattern used for W
+ * (1× div-by-9 magic-multiply + 5× vqtbl1q/vqtbl2q lookups per byte).
+ * Then the tile body runs identically to §20.
+ *
+ * Same arbitrary-(K,N) support as §20 (TD-1 relaxation): K%80 trailing
+ * trits handled by per-trit scalar geometric tail; N%4 trailing j cells
+ * handled by single-acc NEON inner loop.
+ *
+ * Preconditions identical to §20 (modulo the X type difference). */
+void m4t_ternary_5in8_matmul_xpacked_bt(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
+/* Scalar-only reference oracle for the X-packed variant. Test-only. */
+void m4t_ternary_5in8_matmul_xpacked_bt_scalar_ref(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
 #ifdef __cplusplus
 }
 #endif

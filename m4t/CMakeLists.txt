@@ -162,6 +162,13 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_ternary_5in8_matmul)
     add_test(NAME m4t_ternary_5in8_matmul COMMAND test_m4t_ternary_5in8_matmul)
 
+    # §20 X-packed sibling test (TD-7). Bit-exact NEON-vs-scalar +
+    # cross-equivalence with §20 (xpacked == bt when X_packed unpacks to X).
+    add_executable(test_m4t_ternary_5in8_xpacked tests/test_m4t_ternary_5in8_xpacked.c)
+    target_link_libraries(test_m4t_ternary_5in8_xpacked PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_ternary_5in8_xpacked)
+    add_test(NAME m4t_ternary_5in8_xpacked COMMAND test_m4t_ternary_5in8_xpacked)
+
     # Cross-exp accumulator NEON path test. Bit-exact verification of
     # m4t_mtfp_vec_accum_aligning_neon vs m4t_mtfp_vec_accum_aligning_scalar_ref
     # across n boundary, delta cases, saturation-edge, 1000 random configs,

@@ -62,13 +62,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 **Unblocks:** verdict generalization across all packing-relevant layers.
 **Priority hint:** low. Symmetry argument is strong; explicit measurement would harden the claim but isn't required.
 
-### TD-7 — Sub-2-bit X-packing (5-in-8 X)
-
-**Source:** `journal/p0_concern2_l2.md` "What this does NOT establish."
-**State:** §20 packs W only. Path E in audit packed both X and W at 4-in-8; sub-2-bit X-packing (5-in-8 X) remains untested.
-**Unblocks:** evidence whether sub-2-bit X gives wall-clock benefit at any regime (audit's M=8 is too small for X-bandwidth to matter).
-**Priority hint:** low. KV cache and large-batch training shapes might benefit; not relevant for current single-token inference workloads.
-
 ### TD-8 — R1 falsification F-G5 "held-out routing accuracy"
 
 **Source:** `journal/r1_falsify_closeout.md` F-G5.
