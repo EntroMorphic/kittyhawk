@@ -57,6 +57,13 @@ target_link_libraries(tristate_dram_regime PRIVATE m4t m)
 add_executable(td7_xpacked_bench td7_xpacked_bench.c)
 target_link_libraries(td7_xpacked_bench PRIVATE m4t m)
 
+# No-scalar audit setup-time bench (2026-05-06): quantifies the speedup
+# from NEON-izing pack/unpack/conversion/shift3-multiply primitives.
+# NEON public dispatcher vs _scalar_ref test oracle, per function, across
+# L1/L2/DRAM-resident N values plus tail-exercise rows.
+add_executable(no_scalar_audit_bench no_scalar_audit_bench.c)
+target_link_libraries(no_scalar_audit_bench PRIVATE m4t m)
+
 # NOTE: sdot_pipeline_bench moved to m4t/tools/ on 2026-05-05 (per Item 3
 # of the production-shoring plan). Compile manually with:
 #   cc -O3 -mcpu=native m4t/tools/sdot_pipeline_bench.c -o /tmp/sdb
