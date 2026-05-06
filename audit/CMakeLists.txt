@@ -51,6 +51,12 @@ add_executable(tristate_dram_regime
 )
 target_link_libraries(tristate_dram_regime PRIVATE m4t m)
 
+# TD-7 X-packed §20 vs §20 vs unpacked benchmark — closes the wall-clock
+# comparison TD-7's closeout deferred. Sweeps M, K to find the regime
+# where 5-in-8 X-packing begins to beat unpacked-X §20.
+add_executable(td7_xpacked_bench td7_xpacked_bench.c)
+target_link_libraries(td7_xpacked_bench PRIVATE m4t m)
+
 # NOTE: sdot_pipeline_bench moved to m4t/tools/ on 2026-05-05 (per Item 3
 # of the production-shoring plan). Compile manually with:
 #   cc -O3 -mcpu=native m4t/tools/sdot_pipeline_bench.c -o /tmp/sdb

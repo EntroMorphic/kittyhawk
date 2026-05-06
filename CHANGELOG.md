@@ -4,6 +4,21 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — TD-7 X-packed wall-clock bench: §20-xp dominates §20 across all regimes (2026-05-06)
+Closes the wall-clock comparison that TD-7's closeout deferred. Bench `audit/td7_xpacked_bench.c` sweeps M ∈ [1, 4096] × K ∈ [1280, 12800] across 14 configs, comparing three kernels: unpacked dot, §20 (W-packed), §20-xp (W AND X packed).
+
+**Headline:** §20-xp is consistently 14-26% faster than §20 (xp/§20 = 0.74-0.86) across ALL tested (M, K). This contradicts TD-7 closeout's prediction that X-packing should LOSE at small M. Mechanism (post-bench): §20-xp's NEON-vectorized permutation pass is faster than §20's scalar X-permute; the "X bandwidth savings" the closeout predicted as the load-bearing benefit is essentially absent at tested workloads. The X-packing kernel inadvertently improved permutation efficiency.
+
+**§20-xp vs unpacked dot** is regime-dependent:
+- M=1 single-token inference, K ≥ 4480: §20-xp WINS (xp/dot = 0.47-0.86)
+- M ≥ 8 batched: unpacked dot faster (xp/dot = 1.05-1.5)
+
+**Production guidance** (M4T_SUBSTRATE.md §20.6 updated): single-token-inference paths should use §20-xp; batched workloads should use unpacked dot; storage-bound workloads should use §20-xp. **§20 (W-only-packed) is dominated by §20-xp at every workload** — kept for backwards compat, §20-xp is the recommended packed kernel.
+
+Bit-exactness verified: all three kernels produce byte-identical Y at every tested (M, K, N).
+
+Per `journal/td7_xpacked_bench.md`.
+
 ### Changed — Large-cycle (TD-4/5/6/9) red-team + 100/100 remediation (2026-05-06)
 Per user-requested red-team after the four-cycle batch landed. RC-1 through RC-15 documented in `journal/large_cycles_redteam_2026_05_06.md`; all benches, closeouts, and verdicts updated to v2.
 

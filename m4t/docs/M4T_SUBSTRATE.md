@@ -700,11 +700,20 @@ This is a NEW representation but does NOT amend the substrate's invariants:
 
 `m4t_ternary_5in8_matmul_xpacked_bt` extends §20 to also pack the X (activation) operand at 5-in-8 (1.6 bits/cell). Implementation: per row, decode `X_packed[i, :]` into the same 5 stride-aligned int8 arrays via the split-LUT pattern, then run §20's tile body verbatim. Same arbitrary-(K, N) shape support as §20 (per TD-1).
 
-When to use which:
-- **`m4t_ternary_5in8_matmul_bt`** — X stays unpacked (8 b/c). Best when X is L1-resident and bandwidth doesn't dominate (typical inference shapes with small batch).
-- **`m4t_ternary_5in8_matmul_xpacked_bt`** — X also packed at 1.6 b/c. Adds X-decode cost (1 div-by-9 + 5 LUTs per byte, amortized once per row). Pays off when X-side memory bandwidth is the bottleneck (large-batch training, KV cache density).
+**Wall-clock comparison (per `journal/td7_xpacked_bench.md`):**
 
-The xpacked kernel is verified bit-exact against both its own scalar reference (gate G1) and against `m4t_ternary_5in8_matmul_bt` with `X_unpacked = unpack(X_packed)` (gate G2 — strong cross-check). Wall-clock comparison against `m4t_ternary_5in8_matmul_bt` is not benchmarked here; TD-7 closeout records that the primitive ships per project rule (foundational primitives don't gate on consumer demand) and that bench harness extension is a separate concern when a consumer surfaces.
+§20-xp BEATS §20 at every tested (M, K) config. Ratio §20-xp/§20 = 0.74-0.86 across M ∈ [1, 4096], K ∈ [1280, 12800]. The mechanism is not what TD-7's original closeout predicted (X bandwidth savings); it's that §20-xp's NEON-vectorized permutation pass is faster than §20's scalar X-permute. So §20-xp is *consistently* the better choice over §20 — both faster AND 5× smaller storage.
+
+§20-xp vs `m4t_ternary_dot_matmul_bt` (unpacked) is regime-dependent:
+- **Single-token inference (M=1), K ≥ 4480:** §20-xp WINS (xp/dot = 0.47-0.86).
+- **M=1, K=1280:** unpacked slightly faster (xp/dot = 0.84).
+- **M ≥ 8 (batched):** unpacked faster (xp/dot = 1.05-1.5).
+
+When to use which:
+- **Single-token inference paths**: §20-xp (both fastest AND smallest at K ≥ 4480).
+- **Batched inference / fine-tune / training**: `m4t_ternary_dot_matmul_bt` for raw speed, OR §20-xp if storage matters more (≈1.1× speed cost).
+- **Memory-bandwidth-bound workloads**: §20-xp (5× X savings × 5× W savings = 25× total bandwidth).
+- **§20 (`m4t_ternary_5in8_matmul_bt` with unpacked X) is dominated** by §20-xp at every tested workload. Kept for backward compatibility but §20-xp is the recommended packed path.
 
 ### 20.7 Cross-references
 
