@@ -38,36 +38,7 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Open follow-on cycles (research)
 
-### TD-4 — L4 strong-claim cycle (audit Track A weak-deepening)
-
-**Source:** `journal/tristate_op_closeout.md` Track A; concern 1/2 from `journal/p0_concern1_mechanism.md`.
-**State:** L4 was the audit's least load-bearing layer (mean cos ≈ 0.94 post-redteam-fix). Three operationalization candidates pre-named:
-  - A.1 absmean-threshold ternarization (BitNet b1.58 rule)
-  - A.2 zero-flag forwarding (track structural-zero events)
-  - A.3 two-channel sign+magnitude split
-**Unblocks:** evidence that L4's third state can be made load-bearing OR confirmation that it can't (informative either way).
-**Priority hint:** medium. Settles whether L4's "least load-bearing" verdict is fundamental or fixable.
-
-### TD-5 — L5 strong-claim (cross-exp accumulator)
-
-**Source:** `journal/tristate_strong_closeout.md` Track C.
-**State:** L5 (cross-exp accum) requires a residual-style workload not produced by GEMM-only. Audit didn't measure; strong claim doesn't extend automatically.
-**Unblocks:** L5's third-state utilization measured; strong claim verdict for cross-exp arithmetic.
-**Priority hint:** low-medium. Requires designing a workload that exercises cross-exp accum naturally.
-
-### TD-6 — L6 strong-claim cycle
-
-**Source:** `journal/p0_concern2_l2.md` "What this does NOT establish."
-**State:** L6 (post-ternarization activations) parallel to L1/L2 in shape; verdict likely follows L1/L2 by structural symmetry but not directly measured.
-**Unblocks:** verdict generalization across all packing-relevant layers.
-**Priority hint:** low. Symmetry argument is strong; explicit measurement would harden the claim but isn't required.
-
-### TD-9 — DRAM-bound regime test (push beyond L2)
-
-**Source:** `journal/tristate_strong_membw_addendum.md`; `journal/tristate_strong_membw_redteam.md` C3.
-**State:** tested up to W = 25.6 MB (exceeds L1 + L2 partially). True DRAM-bound (W > L2 = 16 MB on M-series, ideally > L3 if it existed) requires N=2048+ or K > 1M. Not tested.
-**Unblocks:** Whether sub-2-bit base-3's density advantage manifests at true DRAM-bound regime (membw addendum showed plateau, not crossover, within tested range).
-**Priority hint:** low. Apple Silicon's unified memory bandwidth is generous enough that decode cost dominates at all reachable workloads; true crossover may be hardware-specific (older ARM, embedded, or non-Apple ARM).
+(All initially-listed research cycles closed in 2026-05-05 batch — see CHANGELOG and `journal/tristate_l4_strong.md`, `journal/tristate_l5_strong.md`, `journal/tristate_l6_strong.md`, `journal/tristate_dram_regime.md`. New entries appear here as future cycles surface deferred work.)
 
 ---
 

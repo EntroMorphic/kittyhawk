@@ -104,6 +104,10 @@ ctest --test-dir build
 | [`journal/tristate_strong_membw_*.md`](journal/tristate_strong_membw_addendum.md) | Memory-bandwidth regime test + red-team (trajectory plateau finding refutes first-draft crossover prediction). |
 | [`journal/p0_kernel_opt_redteam.md`](journal/p0_kernel_opt_redteam.md) | P0-1/P0-2/P0-3 kernel optimizations (pre-permute X, split-LUT decode, register-tile) with per-item red-team. Path D ratio: 1.95× → 0.55× across all regimes. |
 | [`journal/strong_claim_retrospective.md`](journal/strong_claim_retrospective.md) | Single-doc consolidation of the strong-claim verdict across 8 refinement rounds. Where to land if you don't want to traverse the cycle history. |
+| [`journal/tristate_l4_strong.md`](journal/tristate_l4_strong.md) | TD-4 closeout: L4 strong-claim cycle. Per-cell L4 IS load-bearing (audit's verdict was cohort-size artifact); A.1 absmean rule does not change the verdict; A.2/A.3 deferred (substrate extension required). |
+| [`journal/tristate_l5_strong.md`](journal/tristate_l5_strong.md) | TD-5 closeout: L5 cross-exp accum strong-claim. L5 IS load-bearing in residual workloads (cancellation regimes); SINK in independent-residual workloads. |
+| [`journal/tristate_l6_strong.md`](journal/tristate_l6_strong.md) | TD-6 closeout: L6 LOAD-BEARING (cos ≈ 0.74); base-3 ↔ B2-B encoding-label equivalence verified by direct round-trip across 60/60 runs. |
+| [`journal/tristate_dram_regime.md`](journal/tristate_dram_regime.md) | TD-9 closeout: Path D wins ~1.7× over Path A across full W spectrum (L1 → 200 MB DRAM). PLATEAU finding from membw addendum extends; no DRAM-driven crossover on Apple Silicon. |
 
 ## License
 

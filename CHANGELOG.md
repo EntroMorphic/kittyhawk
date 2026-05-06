@@ -4,6 +4,40 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — TD-9 closure: DRAM-bound regime test (Path D wins consistently across full W range) (2026-05-05)
+Extends `tristate_strong_membw_addendum.md`'s sweep from W = 25.6 MB up to W = 200 MB. Compares Path A (4-in-8 packed W) vs Path D (5-in-8 packed W) at 9 configs spanning L1-resident to far-past-DRAM, with cache-flush + warmup discipline mirrored from the existing strong-claim bench.
+
+D/A ratios: 0.625 (L1) → 0.571 (L2) → 0.554 (3.2 MB) → 0.583 (25.6 MB) → 0.611 (51.2 MB) → 0.584 (102 MB) → 0.573 (204 MB). Path D wins by ~1.6-1.8× at every regime. The ratio is roughly stable across the W spectrum (no monotone decrease that would indicate a true bandwidth-driven crossover).
+
+**Verdict:** the membw addendum's "PLATEAU not crossover" finding extends to W = 200 MB. Path D's advantage is workload-independent — driven by SDOT amortization (per `journal/p0_concern1_mechanism.md`), not by Path D's 0.8× density advantage. Apple Silicon's unified memory bandwidth (~70-200 GB/s) is generous enough that decode work saved by SDOT amortization dominates over the bandwidth savings from tighter packing throughout the tested range. True DRAM-bound crossover may exist on hardware with tighter bandwidth/compute ratio (older ARM, embedded, non-Apple Silicon); not a substrate finding. Closes TD-9 per `journal/tristate_dram_regime.md`.
+
+### Added — TD-6 closure: L6 strong-claim cycle (LOAD-BEARING + encoding equivalence verified) (2026-05-05)
+Two-question cycle. **Q1 (load-bearingness):** Gate II at L6 cohort (X2==0 cells) gives mean cos = 0.7390 across 12 configs × 5 seeds — LOAD-BEARING (cos < 0.85), matches original audit's reported cos_L6 ≈ 0.74 within RNG variance. **Q2 (encoding-label equivalence at L6):** base-3 ↔ B2-B round-trip preserves all per-cell trit values across 60/60 runs. The L1 R-G1 verdict (encoding-label equivalence at L1, established by disasm comparison) generalizes to L6 by direct round-trip evidence rather than the previous symmetry argument. Closes TD-6 per `journal/tristate_l6_strong.md`.
+
+### Added — TD-5 closure: L5 cross-exp accum strong-claim (consumer-pattern-dependent) (2026-05-05)
+Tests L5's third state (exact-zero output of cross-exp accumulation) across four residual regimes. Workload pattern: `Y_post = Y_pre + R` where Y_pre is a ternary GEMM output and R varies per regime.
+
+Results (mean cos across 12 configs × 5 seeds):
+- Cancel 90%: cos = 0.844 (LOAD-BEARING)
+- Cancel 50%: cos = 0.930 (MIXED)
+- Decay (small-exp): cos = 0.954 (SINK aggregate, but highest per-cell impact at 4.085)
+- Independent: cos = 0.992 (SINK)
+
+**Verdict:** L5 IS load-bearing in residual-style workloads with structural cancellation. SINK in independent-residual workloads. Confirms why GEMM-only audits gave no L5 verdict — they don't exercise cross-exp accum scenarios. Per-cell, even decay-regime zeros are highly load-bearing (4.085 per-cell impact, the highest of any cohort). Closes TD-5 per `journal/tristate_l5_strong.md`.
+
+### Added — TD-4 closure: L4 strong-claim cycle (per-cell load-bearing; A.1 no improvement; A.2/A.3 substrate-deferred) (2026-05-05)
+Two-axis test on L4's third state.
+
+**Part 1 (cohort-definition sensitivity):** The audit's verdict that L4 is "least load-bearing" was driven by cohort SIZE, not per-cell weakness. The audit's Y1==0 cohort is the SMALLEST tested (~106 cells avg) and has by far the HIGHEST per-cell impact (5.06 ×10000), 3× higher than the broader X2==0 cohort (1.75) or near-threshold cohort (2.13). Reframe: L4's third state is small in count but each cell carries disproportionate downstream weight.
+
+**Part 2 (A.1 test on L4 cohort):** Comparing absmean (BitNet b1.58) rule vs quantile rule on the same Y1==0 cohort: cos 0.946 (quantile) vs 0.944 (absmean), gap +0.002 — well below the 0.05 verdict threshold. A.1 does NOT meaningfully change L4's load-bearingness.
+
+**RC-1 (caught pre-execution):** A.2 (zero-flag forwarding) and A.3 (two-channel sign+magnitude) require Layer 2 matmul augmentation (4- or 5-state input instead of ternary). Implementing them is a multi-cycle substrate extension; both are documented as design-only with explanation.
+
+**Methodology lift:** TD-4's RC-1 (cohort-size confound) was applied as a check against TD-5 and TD-6 — both report per-cell impact alongside aggregate cos to avoid the same artifact.
+
+Closes TD-4 per `journal/tristate_l4_strong.md`.
+
 ### Added — TD-8 closure: F-G5 (held-out routing accuracy) for R1 (2026-05-05)
 Closes the 5th axis of the R1 falsification matrix that the original 4-axis closeout deferred for "external equivalence ground truth requires substantial engineering."
 
