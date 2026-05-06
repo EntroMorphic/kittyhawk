@@ -4,6 +4,19 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — bitnet_phase1 work-unit 1 part 2: Python conversion + reference scripts (2026-05-06)
+Per `journal/bitnet_phase1_*` and `gesh/bitnet/scripts/README.md`. Three Python helpers landed:
+- `inspect.py` — lists tensor names/shapes/dtypes from BitNet's `model.safetensors`. Used to ground the conversion script against actual storage rather than assumed names.
+- `convert_weights.py` — emits a single substrate-format binary blob: BitLinear weights repacked from HF's 4-in-8 to substrate's 5-in-8 (1.25× density advantage), bf16 norm γ + embedding + BitLinear scales α converted to MTFP19 with per-tensor block exponents (`value ≈ mantissa × 3^(-block_exp)`). Output blob + metadata JSON.
+- `dump_reference.py` — runs HF's BitNet via `transformers`, captures per-(layer, sublayer) activations via forward hooks for the per-layer L2-tolerance comparison gate.
+
+**Two newly-surfaced substrate gaps** (work-unit 1 doing its job — surfacing what wasn't planned for):
+
+- **Gap #5 — `m4t_mtfp_vec_scale`** (scalar × vector multiply with saturating clamp). Each BitLinear's matmul output must be multiplied by `α_w × s_activation / 127` to dequantize. Current substrate has shift3 (multiply by 3^k) and m4t_mtfp_vec_add_inplace, but no arbitrary-scalar multiply. NEON: `vmulq_n_s32` + `clamp64`. Trivial primitive; just wasn't planned.
+- **Gap #6 — bf16 → MTFP19 cell conversion.** Loading embeddings, norm γ vectors, and BitLinear scales requires converting bf16 floats to substrate's int32 mantissa + block-exp representation. Python script does it offline (option (a) per scripts/README.md); the substrate's per-tensor block-exp infrastructure carries the encoding. No new substrate primitive required; just need consumer-side awareness.
+
+Both gaps documented in scripts/README.md. Gap #5 will close as a quick libm4t addition during work-unit 5 or earlier as needed; Gap #6 is consumer-side only.
+
 ### Changed — No-scalar audit + 100/100 remediation (2026-05-06)
 User-requested sweep of production code for scalar paths violating `feedback_function_over_speed_no_scalar` rule. Found 9 production functions with **zero NEON path** (fully scalar entry-to-exit) plus 2 stale "fallback" comments documenting patterns already-remediated in earlier cycles. All 11 fixed.
 
