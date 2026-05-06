@@ -98,7 +98,7 @@ static void bitnet_forward_block(
     memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x_norm = input_layernorm(x) */
-    bitnet_stub_rmsnorm(s->x_norm, s->x, w->gamma_input_norm,
+    m4t_mtfp_rmsnorm(s->x_norm, s->x, w->gamma_input_norm,
                         /* eps_mtfp19 */ 1, BITNET_HIDDEN_SIZE);
     /* TODO(work-unit 1.5): empirically determine eps_mtfp19. The HF
      * eps is 1e-5 (FP); the substrate-side equivalent depends on
@@ -168,7 +168,7 @@ static void bitnet_forward_block(
     memset(s->attn_output, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* attn_sub_norm: y = γ · y · rsqrt(mean(y²) + ε) */
-    bitnet_stub_rmsnorm(s->attn_sub_norm, s->attn_output,
+    m4t_mtfp_rmsnorm(s->attn_sub_norm, s->attn_output,
                         w->gamma_attn_sub_norm, 1, BITNET_HIDDEN_SIZE);
 
     /* O projection: y = attn_sub_norm @ W_o^T (BitLinear, A8-quantized).
@@ -196,7 +196,7 @@ static void bitnet_forward_block(
     memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x_norm = post_attention_layernorm(x) */
-    bitnet_stub_rmsnorm(s->x_norm, s->x, w->gamma_post_attn_norm,
+    m4t_mtfp_rmsnorm(s->x_norm, s->x, w->gamma_post_attn_norm,
                         1, BITNET_HIDDEN_SIZE);
 
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
@@ -220,7 +220,7 @@ static void bitnet_forward_block(
                                 BITNET_INTERMEDIATE_SIZE);
 
     /* ffn_sub_norm(gate_act). */
-    bitnet_stub_rmsnorm(s->ffn_sub_norm, s->gate_act,
+    m4t_mtfp_rmsnorm(s->ffn_sub_norm, s->gate_act,
                         w->gamma_ffn_sub_norm, 1, BITNET_INTERMEDIATE_SIZE);
 
     /* down = ffn_sub_norm @ W_down^T (BitLinear, A8). Different input than

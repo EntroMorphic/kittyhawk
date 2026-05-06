@@ -904,3 +904,127 @@ m4t_mtfp_t m4t_int32_rsqrt(m4t_mtfp_t src) {
     }
     return (m4t_mtfp_t)y;
 }
+
+/* ── RMSNorm ────────────────────────────────────────────────────────────
+ *
+ * y[i] = γ[i] · x[i] · rsqrt(mean(x²) + ε)
+ *
+ * Sum-of-squares overflow analysis:
+ *   x ∈ MTFP19, |x| ≤ 581130733 ≈ 2^29.1, x² ≤ 2^58.2.
+ *   Σ over n=2560: Σx² ≤ 2^69.5 — overflows int64 (max ≈ 2^63).
+ *
+ *   Fix: right-shift each x by SOS_SHIFT before squaring.
+ *     |x>>4| ≤ 2^25.1, (x>>4)² ≤ 2^50.2, Σ ≤ 2^61.5 — fits int64.
+ *   Loses 4 bits/cell of precision in the mean. Acceptable for a
+ *   normalization step (the rsqrt result divides through anyway).
+ *
+ * Shift compensation:
+ *   mean_shifted = (Σ (x>>SHIFT)²) / n + ε
+ *                ≈ mean_real / 2^(2·SHIFT)     (modulo ε scaling)
+ *   rsqrt(mean_shifted) ≈ 2^SHIFT · rsqrt_real(mean_real)
+ *   m4t_int32_rsqrt returns 2^30 / sqrt(input).
+ *   Want: inv_at_30 = 2^30 · rsqrt_real(mean_real)
+ *                   = m4t_int32_rsqrt(mean_shifted) / 2^SHIFT
+ *
+ *   Note: ε is interpreted in shifted units to keep the caller's
+ *   numerical intent (ε prevents div-by-zero at the operating scale).
+ *   For BitNet's typical activation magnitudes, eps_mantissa=1 is the
+ *   minimal positive guard.
+ *
+ * 3-way product γ × x × inv:
+ *   |γ|, |x| ≤ 2^29.1; |inv| ≤ 2^30. Product ≤ 2^88 — exceeds int64.
+ *   Use __int128 per cell, then >>30 to recover y in MTFP19 mantissa
+ *   units. NEON int lane width tops out at 64 bits, so the per-cell
+ *   loop stays scalar (per the cross-exp accum's degenerate-case
+ *   precedent of "scalar with documented reasoning"). */
+#define SOS_SHIFT 4
+
+void m4t_mtfp_rmsnorm(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x, const m4t_mtfp_t* gamma,
+    m4t_mtfp_t eps_mantissa, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(y && x && gamma);
+    assert(eps_mantissa >= 0);
+
+    /* Σ (x>>SHIFT)² in int64 — fits per the analysis above. */
+    int64_t sum_sq = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t xs = (int64_t)x[i] >> SOS_SHIFT;
+        sum_sq += xs * xs;
+    }
+    int64_t mean_shifted = sum_sq / (int64_t)n + (int64_t)eps_mantissa;
+    if (mean_shifted < 1) mean_shifted = 1;
+
+    /* mean_shifted can still exceed int31 (rsqrt's input cap = 0x7FFFFFFF):
+     * with SOS_SHIFT=4, |x>>4| ≤ 2^25.1, sum_sq ≤ 2^61.5, mean_shifted
+     * ≤ 2^50.2. Pre-shift right by 2k bits to bring it under int31. The
+     * compensation: rsqrt of a 4×-smaller input is 2× larger, so we owe
+     * the per-cell scale 2^(SOS_SHIFT + extra_k) extra "downscaling" on
+     * top of the rsqrt's inherent 2^30 scale.
+     *
+     * y[i] = γ × x × inv_real
+     *      = γ × x × m4t_int32_rsqrt(mean_passed) / 2^(30 + SOS_SHIFT + extra_k)
+     *
+     * Keeping `inv` at full rsqrt precision (≤ 2^30) and shifting only
+     * at the per-cell end preserves precision for small inv_real. */
+    int extra_k = 0;
+    int64_t mean_passed = mean_shifted;
+    while (mean_passed > (int64_t)0x7FFFFFFF) {
+        mean_passed >>= 2;
+        extra_k++;
+    }
+    if (mean_passed < 1) mean_passed = 1;
+
+    m4t_mtfp_t inv = m4t_int32_rsqrt((m4t_mtfp_t)mean_passed);
+    int total_shift = 30 + SOS_SHIFT + extra_k;
+
+    /* Per-cell: y[i] = saturating_clamp((γ × x × inv) >> total_shift).
+     * __int128 accommodates the 3-way product (max ≤ 2^88.2; fits 128b). */
+    if (total_shift >= 127) {
+        for (int i = 0; i < n; i++) y[i] = 0;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)gamma[i] * (__int128)x[i] * (__int128)inv;
+        int64_t scaled = (int64_t)(prod >> total_shift);
+        y[i] = m4t_mtfp_clamp64(scaled);
+    }
+}
+
+void m4t_mtfp_rmsnorm_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x, const m4t_mtfp_t* gamma,
+    m4t_mtfp_t eps_mantissa, int n)
+{
+    /* FP test oracle. Mirrors production's shift accounting so the
+     * caller-supplied eps_mantissa carries the same numerical meaning
+     * across both paths. */
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(y && x && gamma);
+    assert(eps_mantissa >= 0);
+
+    int64_t sum_sq = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t xs = (int64_t)x[i] >> SOS_SHIFT;
+        sum_sq += xs * xs;
+    }
+    int64_t mean_shifted = sum_sq / (int64_t)n + (int64_t)eps_mantissa;
+    if (mean_shifted < 1) mean_shifted = 1;
+
+    /* Real rsqrt of mean_real:
+     *   mean_real ≈ mean_shifted × 2^(2·SHIFT)     (modulo ε)
+     *   rsqrt_real = 1 / sqrt(mean_shifted) / 2^SHIFT
+     * Multiply by 2^30 to express at the same scale as production's inv. */
+    double inv_shifted_fp = 1073741824.0 / sqrt((double)mean_shifted);
+    double inv_at_30_fp = inv_shifted_fp / (double)((int64_t)1 << SOS_SHIFT);
+
+    for (int i = 0; i < n; i++) {
+        double prod = (double)gamma[i] * (double)x[i] * inv_at_30_fp;
+        double v = prod / 1073741824.0;  /* >>30 */
+        if (v >  (double)M4T_MTFP_MAX_VAL) v =  (double)M4T_MTFP_MAX_VAL;
+        if (v < -(double)M4T_MTFP_MAX_VAL) v = -(double)M4T_MTFP_MAX_VAL;
+        y[i] = (m4t_mtfp_t)(v < 0 ? v - 0.5 : v + 0.5);
+    }
+}

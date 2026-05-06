@@ -27,30 +27,8 @@ static inline int32_t clamp_to_mtfp19(int64_t v) {
 }
 
 /* ── RMSNorm ─────────────────────────────────────────────────────── */
-
-void bitnet_stub_rmsnorm(
-    m4t_mtfp_t* y, const m4t_mtfp_t* x, const m4t_mtfp_t* gamma,
-    m4t_mtfp_t eps_mtfp19, int n)
-{
-    /* Per RC-1 (red-team 2026-05-06): use double accumulator to avoid
-     * int64 overflow at MTFP19_MAX-magnitude inputs. n=2560 squares of
-     * MTFP19_MAX produces ~8.7e20 — overflows int64 (max 9.2e18). FP
-     * accumulator is fine in stubs (stubs ARE scaffolding, not
-     * production paths). Production path (work-unit 2) will use a
-     * scaled-sum or Welford accumulator instead. */
-    double sum_sq = 0.0;
-    for (int i = 0; i < n; i++) {
-        double xi = (double)x[i];
-        sum_sq += xi * xi;
-    }
-    double mean_sq = sum_sq / (double)n + (double)eps_mtfp19;
-    double inv_rms = 1.0 / sqrt(mean_sq);
-    /* y[i] = γ[i] · x[i] · inv_rms */
-    for (int i = 0; i < n; i++) {
-        double v = (double)gamma[i] * (double)x[i] * inv_rms;
-        y[i] = clamp_to_mtfp19((int64_t)v);
-    }
-}
+/* Removed: replaced by m4t_mtfp_rmsnorm (substrate primitive) at the
+ * close of work-unit 2 of bitnet_phase1. */
 
 /* ── RoPE ────────────────────────────────────────────────────────── */
 

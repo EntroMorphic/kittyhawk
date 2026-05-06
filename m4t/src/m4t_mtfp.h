@@ -344,6 +344,60 @@ m4t_mtfp_t m4t_int32_rsqrt(m4t_mtfp_t src);
  * exists for the verification gate. Production code MUST NOT call this. */
 m4t_mtfp_t m4t_int32_rsqrt_scalar_ref(m4t_mtfp_t src);
 
+/* ── RMSNorm (BitNet's normalization, Llama-family standard) ────────────
+ *
+ * y[i] = γ[i] · x[i] · rsqrt(mean(x²) + ε)
+ *
+ * All buffers are MTFP19 mantissas (int32). γ length n, x length n,
+ * y length n. eps_mantissa is added to the (shifted-down) mean of
+ * squares — caller manages units.
+ *
+ * Implementation: int64 sum-of-squares with right-shift to avoid
+ * overflow at large MTFP19 inputs (n=2560 cells × MTFP19_MAX² ~ 2^70
+ * exceeds int64 max). Shift compensated when applying rsqrt.
+ *
+ * Per-cell γ × x × rsqrt uses __int128 intermediate (the 3-way product
+ * can exceed int64 for adversarial inputs). This is a per-cell scalar
+ * loop — full NEON SIMD vectorization is deferred because int128
+ * exceeds NEON int lane width. Per the cross-exp accum's degenerate-case
+ * precedent, scalar-with-documented-reasoning is acceptable here.
+ *
+ * Saturating clamp on output (Case S; mantissa fits MTFP19).
+ *
+ * Aliasing: y == x and y == γ are both supported (read-modify on each
+ * cell does not depend on later cells).
+ *
+ * Constraint: n ≤ 7100 with full-MTFP19_MAX-magnitude cells (sum_sq
+ * overflows int64 above that). BitNet's max n is 6912 (FFN
+ * intermediate), within bounds. Larger n requires a shifted-fold
+ * accumulator — out of scope for Phase 1.
+ *
+ * Sign bias: `x >> SOS_SHIFT` is arithmetic shift, biased toward -∞ for
+ * negative `x`. For symmetric random inputs the bias is bounded by
+ * tolerance; for adversarial all-negative inputs the SoS sum is
+ * inflated by ≤ 2× per cell. Acceptable for normalization; not
+ * acceptable if the caller needs bit-exact symmetric behavior.
+ *
+ * Per journal/rsqrt_design_lmm.md (work-unit 2 of bitnet_phase1). */
+void m4t_mtfp_rmsnorm(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    m4t_mtfp_t eps_mantissa,
+    int n
+);
+
+/* Scalar reference using libm sqrt for the rsqrt step. FP allowed in
+ * scaffolding. Not bit-exact vs production (NR vs FP rounding); used
+ * as a precision gate via tolerance comparison. */
+void m4t_mtfp_rmsnorm_scalar_ref(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    m4t_mtfp_t eps_mantissa,
+    int n
+);
+
 #ifdef __cplusplus
 }
 #endif

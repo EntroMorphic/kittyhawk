@@ -27,21 +27,10 @@
 extern "C" {
 #endif
 
-/* RMSNorm: y[i] = γ[i] · x[i] · rsqrt(mean(x²) + ε)
- * The x and y buffers are MTFP19 mantissas. γ is also MTFP19. ε is
- * passed as MTFP19 (caller pre-converts the float epsilon).
- *
- * Note (RC-3 from 2026-05-06 red-team): the canonical eps = 1e-5 from
- * BitNet's config doesn't have a clean MTFP19 mantissa-only
- * representation (substrate uses int mantissa × 3^exp). Work-unit 2
- * resolves the eps representation question. For now: stubs accept
- * eps as MTFP19 directly and callers pass small-but-nonzero values.
- *
- * n is the per-token vector length (= hidden_size or intermediate_size). */
-void bitnet_stub_rmsnorm(
-    m4t_mtfp_t* y, const m4t_mtfp_t* x, const m4t_mtfp_t* gamma,
-    m4t_mtfp_t eps_mtfp19, int n
-);
+/* RMSNorm: replaced by m4t_mtfp_rmsnorm in m4t_mtfp.h (work-unit 2).
+ * The stub remains in bitnet_stubs.c temporarily; it will be removed
+ * after the full bring-up converges. New callers MUST use the substrate
+ * primitive. */
 
 /* RoPE: applies rotary position embedding to (q, k) in-place.
  * q: [num_q_heads × head_dim]
