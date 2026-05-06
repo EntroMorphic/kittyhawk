@@ -4,6 +4,23 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Added — TD-8 closure: F-G5 (held-out routing accuracy) for R1 (2026-05-05)
+Closes the 5th axis of the R1 falsification matrix that the original 4-axis closeout deferred for "external equivalence ground truth requires substantial engineering."
+
+Method: K_TOTAL = 8000 random arity-1 expressions; behavioral fingerprint via int64 evaluation on N_FP = 32 fixed inputs; group by fingerprint into equivalence classes; filter to ≥ 4 members per class; per class use first member as bank anchor and rest as held-out test set; build sign-only and dual signature banks (one tile per class); route held-out exprs and tally accuracy.
+
+Pre-committed gate: |dual − sign-only| ≥ 2 pp triggers verdict.
+
+**Red-team RC-1 caught BEFORE finalizing.** First run used the wide {−30..30} input band and showed dual beating sign-only by +8.23 pp — apparent verdict shift. RC-1 identified that depth-4 random expressions on wide inputs overflow int64 (max |x|^16 ≈ 10^23, vs int64 ceiling ≈ 10^19), fragmenting equivalent expressions into spurious distinct classes and biasing the test set toward "trivial" classes where dual happens to win. Remediation: rerun with tight {−3..3} band (max |x|^16 ≈ 43 M, well within int64). Bench now runs both bands; tight is the canonical verdict, wide is reported as a sanity-check.
+
+Result on canonical (tight, no-overflow) configuration:
+- sign-only routing accuracy: 23.68% (1448 / 6116)
+- R1 dual routing accuracy:   21.09% (1290 / 6116)
+- gap: −2.58 pp (dual underperforms by > 2 pp)
+- per-class breakdown: 18 classes dual-better, 20 classes dual-worse out of 195 — essentially symmetric, no systematic dual advantage
+
+**R1 status: methodically falsified across 5 substantive axes (was 4).** Per `journal/r1_falsify_f_g5.md` and updated `journal/r1_falsify_closeout.md`. README updated to reflect 5-axis verdict.
+
 ### Added — TD-7 closure: §20 X-packed sibling `m4t_ternary_5in8_matmul_xpacked_bt` (2026-05-05)
 Symmetric to §20 (5-in-8 W) but with X also packed at 5-in-8 (1.6 bits/cell). Per i, decodes `X_packed[i, :]` into the same 5 stride-aligned int8 arrays via the split-LUT pattern (1× div-by-9 magic-multiply + 5× vqtbl1q/vqtbl2q lookups per 16-byte chunk; scalar geometric tail for trailing Kp%16 bytes). Tile body identical to §20: 5 SDOTs × 4 j cells per 80-trit chunk. Same arbitrary-(K, N) shape support as §20 (K%80 + N%4 tail handling per TD-1).
 

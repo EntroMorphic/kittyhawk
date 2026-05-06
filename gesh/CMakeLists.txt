@@ -236,3 +236,9 @@ target_link_libraries(gesh_expr_routing_r1_remediation PRIVATE gesh m)
 # docs/PLAN_R1_FORK.md and journal/r1_path_forward_synthesize.md.
 add_executable(gesh_expr_routing_r1_fork bench/expr_routing_r1_fork.c)
 target_link_libraries(gesh_expr_routing_r1_fork PRIVATE gesh)
+
+# F-G5: held-out routing accuracy for R1 (TD-8). Equivalence ground truth
+# constructed via int64 evaluation on a separate input fingerprint set.
+# Per journal/r1_falsify_closeout.md F-G5 + journal/r1_falsify_f_g5_*.md.
+add_executable(gesh_expr_routing_r1_f_g5 bench/expr_routing_r1_f_g5.c)
+target_link_libraries(gesh_expr_routing_r1_f_g5 PRIVATE gesh)

@@ -97,7 +97,7 @@ ctest --test-dir build
 | [`journal/cross_exp_accum_routing_*.md`](journal/cross_exp_accum_routing_synthesize.md) | Cross-exp accum NEON productionization (vmlal_s32 routing) + red-team + 100/100 remediation. |
 | [`journal/ternary_mac_routing_*.md`](journal/ternary_mac_routing_synthesize.md) | Ternary MAC NEON productionization (vmlal_s32 pipeline). |
 | [`journal/shift3_*.md`](journal/shift3_neon_synthesize.md) | shift3 NEON productionization (magic-multiply table). |
-| [`journal/r1_falsify_*.md`](journal/r1_falsify_closeout.md) | R1 dual-threshold signature rule methodically falsified across 4 axes. |
+| [`journal/r1_falsify_*.md`](journal/r1_falsify_closeout.md) | R1 dual-threshold signature rule methodically falsified across 5 axes (4 original + F-G5 held-out routing per TD-8). |
 | [`journal/tristate_op_*.md`](journal/tristate_op_closeout.md) | Tri-state utilization audit (L1-L6 third-state load-bearing analysis) + red-team R-G1 (L4 collapse design fix). |
 | [`journal/tristate_strong_*.md`](journal/tristate_strong_closeout.md) | Strong-claim cycle on L1: base-3 vs B2-B comparison; multi-round red-team. |
 | [`journal/tristate_strong_5in8_addendum.md`](journal/tristate_strong_5in8_addendum.md) | Sub-2-bit base-3 packing (5-in-8) addendum: density-ceiling structural advantage. |

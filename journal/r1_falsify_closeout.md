@@ -125,7 +125,9 @@ Per the fork experiment, R-track was already closed; pivoted to P1-1 (exp/log pr
 
 CLOSED — R1 methodically falsified across 4 substantive axes. The one axis weakly consistent (F-G1 class count) is a non-quality metric and doesn't redeem the claim. The dual-threshold rule's specific implementation is documented as not delivering better signatures than sign-only on any axis that measures discrimination quality. R1 stays archived; vision claim 2 stays paused; vision claim 3's broader status remains untested directly.
 
+**UPDATE 2026-05-05 — F-G5 closed.** Per `journal/r1_falsify_f_g5.md` (TD-8 closeout): F-G5 implemented with int64-evaluation behavioral-equivalence ground truth. On the canonical (tight-input, no-overflow) configuration, dual UNDERPERFORMS sign-only by 2.58 pp on held-out routing accuracy. R1 status now **methodically falsified across 5 substantive axes** (was 4). Apparent +8.23 pp dual win at wide input range was an int64 overflow artifact (caught by RC-1 red-team and remediated).
+
 Followups (deferred):
-- F-G5 construction with external equivalence ground truth (would round out to 5-axis verdict).
+- (none — F-G5 closed)
 - A direct claim-3 falsification cycle that's NOT rule-specific (tests the third-state-as-load-bearing claim independent of any signature rule).
 - A new signature rule attempt that addresses what dual missed (different consumer pattern, different test-input strategy).

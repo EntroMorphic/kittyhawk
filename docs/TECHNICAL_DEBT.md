@@ -62,13 +62,6 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 **Unblocks:** verdict generalization across all packing-relevant layers.
 **Priority hint:** low. Symmetry argument is strong; explicit measurement would harden the claim but isn't required.
 
-### TD-8 — R1 falsification F-G5 "held-out routing accuracy"
-
-**Source:** `journal/r1_falsify_closeout.md` F-G5.
-**State:** R1 methodically falsified across 4 substantive axes; F-G5 (held-out routing accuracy) was the 5th axis but not implemented (would require external equivalence ground truth via expression evaluation).
-**Unblocks:** 5-axis falsification verdict (currently 4-axis; R1 already methodically falsified).
-**Priority hint:** very low. R1's verdict is settled; F-G5 would be additional rigor but doesn't change the conclusion.
-
 ### TD-9 — DRAM-bound regime test (push beyond L2)
 
 **Source:** `journal/tristate_strong_membw_addendum.md`; `journal/tristate_strong_membw_redteam.md` C3.
