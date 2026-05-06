@@ -19,21 +19,47 @@ extern "C" {
 #endif
 
 /* Pack `n` trits from a flat m4t_trit_t buffer into 2-bit codes.
- * `dst` must have at least M4T_TRIT_PACKED_BYTES(n) bytes. */
+ *
+ * `dst` must have at least M4T_TRIT_PACKED_BYTES(n) = (n+3)/4 bytes.
+ * Encoding (load-bearing — see `m4t_popcount_dist` warning below):
+ *   +1 → 0b01, 0 → 0b00, -1 → 0b10. Reserved 0b11 unused.
+ *
+ * Implementation: NEON-only production path; processes 16 trits → 4 bytes
+ * per iter via `vqtbl1q_u8` (trit→code map) + per-lane place-multiply +
+ * two pairwise-add reductions. Geometric scalar tail for n%16. Per the
+ * no-scalar audit (`journal/no_scalar_audit_2026_05_06.md`) the inner
+ * loop runs ~50× faster than the equivalent scalar at DRAM-bound N.
+ *
+ * Test oracle: `m4t_pack_trits_1d_scalar_ref` (declared below). */
 void m4t_pack_trits_1d(uint8_t* dst, const m4t_trit_t* src, int n);
 
-/* Unpack `n` trits back to a flat m4t_trit_t buffer. */
+/* Unpack `n` 2-bit codes back to a flat m4t_trit_t buffer.
+ *
+ * Inverse of `m4t_pack_trits_1d`. Reserved code 0b11 decodes to 0
+ * (defensive — `trit_to_code` never emits 0b11).
+ *
+ * Implementation: NEON-only; 4 bytes → 16 trits per iter via
+ * byte-replicate (`vqtbl1q_u8`) + per-lane right-shift + 2-bit mask +
+ * TBL decode. Geometric scalar tail for n%16. ~8.7× scalar at large N.
+ *
+ * Test oracle: `m4t_unpack_trits_1d_scalar_ref`. */
 void m4t_unpack_trits_1d(m4t_trit_t* dst, const uint8_t* src, int n);
 
 /* Pack an [M, K] row-major ternary weight matrix. Output stride is
- * Kp = M4T_TRIT_PACKED_BYTES(K) bytes per row. */
+ * Kp = M4T_TRIT_PACKED_BYTES(K) bytes per row.
+ *
+ * Implementation: row-by-row wrapper around `m4t_pack_trits_1d` (NEON
+ * inherited). No cross-row dependencies. */
 void m4t_pack_trits_rowmajor(
     uint8_t* dst,
     const m4t_trit_t* src,
     int M, int K
 );
 
-/* Unpack an [M, K] row-major packed ternary matrix. */
+/* Unpack an [M, K] row-major packed ternary matrix.
+ *
+ * Inverse of `m4t_pack_trits_rowmajor`. Wrapper around
+ * `m4t_unpack_trits_1d` per row. */
 void m4t_unpack_trits_rowmajor(
     m4t_trit_t* dst,
     const uint8_t* src,
@@ -108,15 +134,38 @@ extern const int8_t M4T_TRIT_DECODE_LUT[16];
 #define M4T_TRIT_PACKED5_BYTES(n) (((n) + 4) / 5)
 
 /* Pack `n` trits into 5-in-8 format. dst must have at least
- * M4T_TRIT_PACKED5_BYTES(n) bytes. */
+ * M4T_TRIT_PACKED5_BYTES(n) = (n+4)/5 bytes.
+ *
+ * Implementation: NEON-only; 80 trits → 16 bytes per iter. NEON has
+ * no LD5/ST5 instruction (verified by absence in `arm_neon.h`), so
+ * stride-5 deinterleave is synthesized via `vqtbl4q_s8` (4-vector
+ * lookup over src[0..63]) + `vqtbl1q_s8` (1-vector for src[64..79]) +
+ * `vorrq_s8` combine. Pre-computed 5×16 deinterleave index tables.
+ * Geometric scalar tail for n%80. ~55× scalar at DRAM-bound N — the
+ * largest win in the no-scalar audit because scalar's per-element
+ * `dst[byte] += u * POW3[digit]` was particularly hostile to autovec.
+ *
+ * Test oracle: `m4t_pack_trits_5in8_1d_scalar_ref`. */
 void m4t_pack_trits_5in8_1d(uint8_t* dst, const m4t_trit_t* src, int n);
 
-/* Unpack `n` trits from 5-in-8 format. Companion to m4t_pack_trits_5in8_1d. */
+/* Unpack `n` trits from 5-in-8 format.
+ *
+ * Implementation: NEON-only; 16 packed bytes → 80 trits per iter via
+ * split-LUT decode (1× div-by-9 magic-multiply + 5× `vqtbl1q`/`vqtbl2q`
+ * lookups per byte; LUT contents output trit values directly), then
+ * stride-5 interleave via the same `vqtbl4q + vqtbl1q + vorrq` pattern.
+ * ~30× scalar at DRAM-bound N.
+ *
+ * Test oracle: `m4t_unpack_trits_5in8_1d_scalar_ref`. */
 void m4t_unpack_trits_5in8_1d(m4t_trit_t* dst, const uint8_t* src, int n);
 
 /* Scalar-only references for pack/unpack. Same semantics as the public
- * dispatchers; never dispatch to NEON. Test-only oracles for bit-exact
- * verification. Production code MUST NOT call these. */
+ * dispatchers above; never dispatch to NEON. Exposed strictly as
+ * test-only oracles for bit-exact NEON-vs-scalar verification gates
+ * (~6,000 + ~2,600 random-sample comparisons in `test_m4t_trit_pack`).
+ * Production code MUST NOT call these. Per project rule
+ * `feedback_function_over_speed_no_scalar` and the no-scalar audit
+ * (2026-05-06, `journal/no_scalar_audit_2026_05_06.md`). */
 void m4t_pack_trits_1d_scalar_ref      (uint8_t* dst, const m4t_trit_t* src, int n);
 void m4t_unpack_trits_1d_scalar_ref    (m4t_trit_t* dst, const uint8_t* src, int n);
 void m4t_pack_trits_5in8_1d_scalar_ref (uint8_t* dst, const m4t_trit_t* src, int n);

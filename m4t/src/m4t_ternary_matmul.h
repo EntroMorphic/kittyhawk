@@ -199,7 +199,21 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
  * trits handled by per-trit scalar geometric tail; N%4 trailing j cells
  * handled by single-acc NEON inner loop.
  *
- * Preconditions identical to §20 (modulo the X type difference). */
+ * Preconditions identical to §20 (modulo the X type difference).
+ *
+ * **Production guidance (per `journal/td7_xpacked_bench.md`):**
+ * §20-xp BEATS §20 at every tested (M, K) — wall-clock ratio xp/§20 in
+ * [0.74, 0.86] across M ∈ [1, 4096], K ∈ [1280, 12800]. The mechanism
+ * (post-bench analysis): §20-xp's NEON-vectorized X permutation is
+ * faster than §20's scalar X-permute. Recommend §20-xp as the default
+ * packed kernel; §20 (W-only-packed) is dominated and kept for
+ * backwards compatibility only.
+ *
+ * Vs unpacked dot (`m4t_ternary_dot_matmul_bt`): regime-dependent.
+ *   M=1 (single-token inference), K ≥ 4480: §20-xp WINS (xp/dot 0.47-0.86).
+ *   M ≥ 8 (batched): unpacked dot wins (xp/dot 1.05-1.5).
+ *   Storage / bandwidth bound: §20-xp (5× X savings × 5× W savings
+ *     = 25× total bandwidth reduction). */
 void m4t_ternary_5in8_matmul_xpacked_bt(
     m4t_mtfp_t* Y,
     const uint8_t* X_packed,

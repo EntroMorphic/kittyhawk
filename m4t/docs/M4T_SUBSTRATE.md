@@ -385,7 +385,7 @@ Aliasing: `running` and `addend` must not alias. Add/sub wrappers allow `dst == 
 
 Storage granularity: per-tensor exponent for the MVP (one int8 exponent per call). Per-block exponent storage (§7's stated intent) is a separate kernel when a consumer asks.
 
-Implementation: scalar (no NEON path; ARM has no integer divide). Vectorization is gated on profile evidence from a real consumer.
+Implementation: **NEON-routed** via `vmlal_s32` magic-multiply for the divide step, plus per-cell saturation comparison + flag emit. ARM has no integer-divide instruction, but base-3 round-to-nearest divide-by-3^Δ is a magic-multiply candidate per `m4t_pow3_magic.h`. Three live paths: same-exp (NEON `vec_add_inplace` / NEON same-exp + flags), cross-exp non-degenerate (NEON `accum_aligning_neon_block`), cross-exp degenerate |Δ|≥20 (scalar memcpy/no-op with per-cell flag annotation — degenerate edge case where per-cell conditional flag work doesn't NEON-ize cleanly). Per the LMM cycle in `journal/cross_exp_accum_routing_*.md` (R-G1 remediation 2026-05-04: scalar same-exp-with-flags path replaced with NEON `accum_same_exp_with_flags_neon`). Test oracle `m4t_mtfp_vec_accum_aligning_scalar_ref` retained for verification.
 
 Property-tested at **14 properties** with a bit-exact `int64` reference — covering correctness, invariant maintenance, determinism, per-block flag bits, trailing-partial-block bits stay zero, long-sequence stress (K=256), curated boundary cases, n=0 no-op, wrapper correctness/roundtrip/dst-aliasing/NULL-out-e, and sub-via-negation/sub-self for the subtract wrapper. No fp in the test path.
 
