@@ -250,6 +250,7 @@ target_link_libraries(gesh_expr_routing_r1_f_g5 PRIVATE gesh)
 add_executable(bitnet_harness
     bitnet/bitnet_harness.c
     bitnet/bitnet_stubs.c
+    bitnet/bitnet_weights.c
 )
 target_include_directories(bitnet_harness PRIVATE bitnet)
 target_link_libraries(bitnet_harness PRIVATE m4t m)
