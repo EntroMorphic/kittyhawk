@@ -242,3 +242,14 @@ target_link_libraries(gesh_expr_routing_r1_fork PRIVATE gesh)
 # Per journal/r1_falsify_closeout.md F-G5 + journal/r1_falsify_f_g5_*.md.
 add_executable(gesh_expr_routing_r1_f_g5 bench/expr_routing_r1_f_g5.c)
 target_link_libraries(gesh_expr_routing_r1_f_g5 PRIVATE gesh)
+
+# BitNet b1.58-2B-4T inference harness (Phase 1 of the ternary-ML arc).
+# Per LMM cycle journal/bitnet_phase1_*. Single-block forward-pass
+# scaffolding; substrate-side validation that kernels compose into a
+# real LLM. Not in ctest — manual invocation via the harness CLI.
+add_executable(bitnet_harness
+    bitnet/bitnet_harness.c
+    bitnet/bitnet_stubs.c
+)
+target_include_directories(bitnet_harness PRIVATE bitnet)
+target_link_libraries(bitnet_harness PRIVATE m4t m)
