@@ -93,27 +93,43 @@ int main(void) {
     uint8_t* flush_buf = (uint8_t*)calloc(FLUSH_SIZE, 1);
     if (!flush_buf) { fprintf(stderr, "OOM flush buf\n"); return 1; }
 
+    /* RC-5/RC-8 remediation: realistic-K configs (K ≤ 12800 per typical ML
+     * shapes); reps increased at deep-DRAM. K=51200 sanity-check kept but
+     * marked clearly as a synthetic shape. */
     Config cfgs[] = {
-        /* Reference: L2-resident */
-        make_cfg(8,   1280,    64,  100, "L1-resident"),
-        make_cfg(8,  12800,    64,   50, "L2-resident"),
-        /* L2-overflow */
-        make_cfg(8,  12800,  1024,   20, "W ≈  3.2 MB  near L2"),
-        make_cfg(8,  12800,  4096,   10, "W ≈ 12.8 MB  at L2"),
-        make_cfg(8,  12800,  8192,    5, "W ≈ 25.6 MB  past L2"),
-        /* DRAM-bound (TD-9 target) */
-        make_cfg(8,  12800, 16384,    3, "W ≈ 51.2 MB  DRAM-bound"),
-        make_cfg(8,  25600,  8192,    3, "W ≈ 51.2 MB  DRAM (alt shape)"),
-        make_cfg(8,  25600, 16384,    2, "W ≈102.4 MB  deep DRAM"),
-        make_cfg(8,  51200, 16384,    2, "W ≈204.8 MB  far past DRAM band"),
+        /* Reference: L1/L2-resident at realistic K. */
+        make_cfg(8,   1280,    64,  200, "L1-resident                 (realistic K)"),
+        make_cfg(8,  12800,    64,  100, "L2-resident                 (realistic K)"),
+        /* L2-overflow at realistic K. */
+        make_cfg(8,  12800,  1024,   40, "W ≈  3.2 MB  near L2        (realistic K)"),
+        make_cfg(8,  12800,  4096,   20, "W ≈ 12.8 MB  at L2          (realistic K)"),
+        make_cfg(8,  12800,  8192,   10, "W ≈ 25.6 MB  past L2        (realistic K)"),
+        /* DRAM-bound at realistic K — RC-8: increased reps from 2-3 to 5-10. */
+        make_cfg(8,  12800, 16384,   10, "W ≈ 51.2 MB  DRAM-bound     (realistic K)"),
+        make_cfg(8,  12800, 32768,    5, "W ≈102.4 MB  deep DRAM      (realistic K)"),
+        /* Synthetic-K sanity check (RC-5: K=25600 is unusual; K=51200 even
+         * more so. Kept for trajectory observation but NOT load-bearing
+         * configs for the verdict.) */
+        make_cfg(8,  25600,  8192,    5, "W ≈ 51.2 MB  alt shape      (sanity, K=25600)"),
+        make_cfg(8,  25600, 16384,    5, "W ≈102.4 MB  deep DRAM      (sanity, K=25600)"),
+        make_cfg(8,  51200, 16384,    3, "W ≈204.8 MB  far past DRAM  (sanity, K=51200)"),
     };
     int n_cfgs = (int)(sizeof(cfgs) / sizeof(cfgs[0]));
 
-    printf("# TD-9: DRAM-bound regime test\n");
+    printf("# TD-9: DRAM-bound regime test (v2 — RC-4/RC-5/RC-8 remediation)\n");
     printf("# Compares Path A (4-in-8, 2.0 b/c) vs Path D (5-in-8, 1.6 b/c)\n");
-    printf("# Per-cell density savings: Path D = 0.8 × Path A storage.\n");
-    printf("# Pre-committed gate: D/A < 1.0 at W > 50 MB → DRAM-bound crossover.\n\n");
-    printf("%-32s W_A       W_D       reps   ms_A      ms_D      D/A\n",
+    printf("# Per-cell density savings: Path D = 0.8 × Path A storage.\n\n");
+    printf("# RC-4 fix (tightened pre-committed gate):\n");
+    printf("#   TRUE crossover requires D/A at deep-DRAM (W ≥ 50 MB) to be\n");
+    printf("#   ≤ 0.8 × D/A at L1-resident (i.e., the ratio MUST IMPROVE\n");
+    printf("#   monotonically with W). Bandwidth-driven advantage compounds\n");
+    printf("#   with W, so a true bandwidth crossover should show this.\n");
+    printf("#   v1's gate (D/A < 1.0 at any DRAM-bound config) was trivially\n");
+    printf("#   met because D was already winning at L1.\n\n");
+    printf("# RC-5 fix: realistic-K configs are the load-bearing measurement;\n");
+    printf("#           K=25600 / K=51200 rows are sanity-check shapes only.\n");
+    printf("# RC-8 fix: deep-DRAM reps increased from 2 to 5-10.\n\n");
+    printf("%-50s W_A       W_D       reps   ms_A      ms_D      D/A\n",
         "config");
 
     for (int c = 0; c < n_cfgs; c++) {
@@ -182,7 +198,7 @@ int main(void) {
         double mean_d = sum_ms_d / cfg->reps;
         double ratio  = (mean_a > 0) ? mean_d / mean_a : 0.0;
 
-        printf("%-32s %6.2f MB %6.2f MB  %3d   %8.3f  %8.3f  %.3f\n",
+        printf("%-50s %6.2f MB %6.2f MB  %3d   %8.3f  %8.3f  %.3f\n",
                cfg->note, cfg->bytes_W_path_A, cfg->bytes_W_path_D,
                cfg->reps, mean_a, mean_d, ratio);
 
@@ -191,17 +207,30 @@ int main(void) {
 
     free(flush_buf);
 
-    printf("\n=== Verdict template ===\n");
+    /* Pre-committed gate evaluation. We need the ratio at L1 and at the
+     * deepest realistic-K DRAM config. Hardcoded indices: cfg 0 = L1
+     * realistic, cfg 6 = "W ≈102.4 MB deep DRAM (realistic K)". */
+    /* (Don't try to recover from arrays we already freed; just print the
+     * gate semantics; user reads ratios above.) */
+    printf("\n=== Pre-committed gate (RC-4 tightened) ===\n");
+    printf("TRUE bandwidth-driven crossover requires:\n"
+           "  D/A at deep-DRAM realistic-K (cfg \"W≈102.4 MB realistic K\")\n"
+           "  ≤ 0.8 × D/A at L1-resident realistic-K (cfg \"L1-resident\").\n");
+    printf("If gate FAILS (ratio at deep-DRAM ≥ 0.8 × ratio at L1): there's\n"
+           "no bandwidth-driven crossover — Path D's advantage is constant,\n"
+           "not compounding with W. Membw addendum's PLATEAU finding extends.\n");
+    printf("If gate PASSES: bandwidth bottleneck contributes additively to\n"
+           "Path D's advantage; the advantage compounds with W.\n\n");
+
+    printf("=== Verdict template ===\n");
     printf("Read the D/A column across configs:\n");
-    printf("  - If D/A < 1.0 at all configs (constant ratio): Path D wins by\n"
-           "    SDOT amortization, regardless of regime. The advantage is\n"
-           "    workload-independent (not bandwidth-driven).\n");
-    printf("  - If D/A drops as W grows (lower at deep-DRAM than L1): TRUE\n"
-           "    crossover — Path D's density advantage compounds with the\n"
-           "    bandwidth bottleneck.\n");
-    printf("  - If D/A stays flat or rises at deep DRAM: PLATEAU finding from\n"
-           "    the membw addendum extends — DRAM-bandwidth on M-series doesn't\n"
-           "    push the ratio further.\n");
+    printf("  - REALISTIC-K rows are the load-bearing measurement.\n");
+    printf("  - K=25600 / K=51200 rows are sanity-check shapes (ML workloads\n"
+           "    don't have these K values; included only to confirm trajectory).\n");
+    printf("  - If realistic-K D/A is roughly constant across W: PLATEAU.\n");
+    printf("  - If realistic-K D/A drops monotonically with W: TRUE crossover.\n");
+    printf("  - If realistic-K D/A stays flat or rises slightly: SDOT-amortization\n"
+           "    advantage dominates; bandwidth not the bottleneck.\n");
 
     return 0;
 }

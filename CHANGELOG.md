@@ -4,6 +4,30 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Changed — Large-cycle (TD-4/5/6/9) red-team + 100/100 remediation (2026-05-06)
+Per user-requested red-team after the four-cycle batch landed. RC-1 through RC-15 documented in `journal/large_cycles_redteam_2026_05_06.md`; all benches, closeouts, and verdicts updated to v2.
+
+**Critical findings remediated:**
+- **RC-1 (TD-5):** v1 bench did NOT invoke `m4t_mtfp_vec_accum_aligning` despite the cycle being named for cross-exp accum (used plain int32 addition). v2 calls the cross-exp primitive with explicit Δexp ∈ {0, 1, 3}. Critical new finding: cross-exp alignment ERASES the cancel-90% load-bearingness (Δ=0 cos 0.844 LOAD → Δ=1 cos 0.949 MIXED). L5 strong-claim is much narrower than v1 reported.
+- **RC-2 (TD-6):** v1 verified base-3 ↔ B2-B round-trip preservation and overclaimed it as R-G1 generalization. v2 replaces with real kernel-output equivalence test (Path A vs Path C at L6 inputs); 60/60 byte-identical.
+- **RC-3 (TD-4):** v1's "cohort-size confound" framing misrepresented the audit. v2 reframes honestly: the audit's Y1==0 cohort IS the deliberate L4 definition.
+- **RC-4 (TD-9):** v1's pre-committed gate ("D/A < 1.0 at any DRAM-bound config") was trivially met because Path D was already winning at L1. v2 tightens to require monotone improvement (deep-DRAM D/A ≤ 0.8 × L1 D/A). New gate FAILS — confirms PLATEAU verdict.
+- **RC-5 (TD-9):** K=51200 isn't a real ML workload. v2 marks K=25600 / K=51200 rows as sanity-check shapes; verdict based on realistic-K (K ≤ 12800).
+
+**Important findings remediated:**
+- **RC-6:** per-cell impact metric flagged SUGGESTIVE only (non-linear); applied across TD-4/5/6 closeouts.
+- **RC-8 (TD-9):** deep-DRAM reps doubled from 2-3 to 5-10.
+- **RC-9/RC-10 (TD-4):** A.2 and A.3 implemented as cohort-selection rules (no substrate extension needed — v1 deferred too aggressively). A.2 shows STRUCTURAL per-cell 5.06 vs DECAY 1.67 (3×, SUGGESTIVE); A.3 negligible.
+- **RC-11 (TD-6):** Q1 strengthened with per-cohort cos breakdown (ALL/STRUCTURAL/DECAY).
+- **RC-12 (TD-5):** new SKIP_CONN regime (independent matmul as residual, no anti-correlation). Result: SINK at all Δ.
+
+**Process lift:**
+1. Read cycle name back to implementation at synthesize-time (TD-5 RC-1 caught here).
+2. Pre-committed gates must require directional shift, not just threshold crossing.
+3. Per-cell impact metrics need explicit "suggestive only" tagging.
+4. "Substrate extension required" is a convenient deferral — check if reframing within existing infra works first.
+5. Red-team between cycles, not just at the end of a batch.
+
 ### Added — TD-9 closure: DRAM-bound regime test (Path D wins consistently across full W range) (2026-05-05)
 Extends `tristate_strong_membw_addendum.md`'s sweep from W = 25.6 MB up to W = 200 MB. Compares Path A (4-in-8 packed W) vs Path D (5-in-8 packed W) at 9 configs spanning L1-resident to far-past-DRAM, with cache-flush + warmup discipline mirrored from the existing strong-claim bench.
 
