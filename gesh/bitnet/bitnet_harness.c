@@ -41,7 +41,13 @@
  * SQUARED magnitudes (relu²(gate) × up). For gate_real ≤ 6 typical, the
  * squared product reaches ~200; bx=14 saturates at 35. We use a smaller
  * FFN_BX that gives wider range (real max 3^(29-FFN_BX) at MTFP19_MAX). */
-#define BITNET_ACT_BX 14
+#define BITNET_ACT_BX 10      /* MTFP19_MAX/3^10 ≈ 9836 — empirically the
+                               * sweet spot for end-to-end multi-token
+                               * accuracy. Sweep over [10..14] showed
+                               * Pearson peaks at 10/11 (0.62) then drops
+                               * to 0.36-0.42 for higher bx. Wider range
+                               * absorbs accumulated residual quantization
+                               * better than tighter precision can compensate. */
 #define BITNET_FFN_BX 8       /* MTFP19_MAX/3^8 ≈ 88500 — gate, up */
 #define BITNET_GATE_ACT_BX 2  /* MTFP19_MAX/3^2 ≈ 64.5M headroom for
                                * gate²×up products. Empirically: Pearson
