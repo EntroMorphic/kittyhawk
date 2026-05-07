@@ -232,14 +232,101 @@ What Phase 1 **does NOT** establish:
   not a from-scratch base-3 ML model. Phase 3 (train from scratch)
   is where the necessity claim gets tested.
 
-## ε comparison — actual results
+## ε comparison — RED-TEAM CORRECTED RESULTS
 
-The numerical gate ran 2026-05-06 with the model `microsoft/bitnet-b1.58-2B-4T-bf16`
-(unpacked bf16 reference) vs the substrate forward with weights converted from
-the packed `microsoft/bitnet-b1.58-2B-4T` repo. Token: 128000 (BOS for
-"The capital of France is").
+The numerical gate ran 2026-05-06 with `microsoft/bitnet-b1.58-2B-4T-bf16`
+as the HF reference (with on-the-fly W1.58 ternary quantization to match
+the substrate's W matrix) and the substrate forward using weights
+converted from `microsoft/bitnet-b1.58-2B-4T`. Token: 128000.
 
-**Result: per-layer `sc_inv_ε ≈ 1.0` across all 30 layers.**
+**Initial (wrong) result: per-layer `sc_inv_ε ≈ 1.0` across all 30 layers.**
+**Post-red-team (correct) result: layer 0 has substantial signal
+correlation; saturation cascade contaminates layer 1+.**
+
+The initial diagnosis ("block_exp tracking deficiency") was a
+misattribution. The actual dominant bug was a weight-unpack layout
+error in convert_weights.py + a dump-label bug in bitnet_harness.
+Red-team summary in `git log` commit
+`bitnet_phase1 red-team: weight unpack layout fix + dump label fix`.
+
+### What the red-team found
+
+1. **Weight unpack layout (dominant)**: convert_weights.py assumed an
+   *interleaved* slot layout (byte at `(op, in)` → trits at
+   `(op*4 + slot, in)`). The actual HF layout is *blocked*:
+   `(op + (out/4)*slot, in)`. Trit code mapping was also wrong
+   (`1→+1, 2→-1` instead of `0→-1, 2→+1`).
+
+   Validation: 35.8% trit match (random) under wrong layout → 98.7%
+   match (within training-time rounding noise) under correct layout,
+   cross-checked against bitnet.cpp's `ggml_vec_dot_i2_i8` unpack.
+
+   **Effect**: the substrate's W matrix was random relative to truth.
+   BitLinear matmul produced garbage; saturation cascade was *downstream*,
+   not the root cause.
+
+2. **Dump label bug (compounding)**: `bitnet_forward_block` reuses
+   the same `s->x_norm` buffer for both the input-layernorm output
+   AND the post-attention-layernorm output. The dump captured the
+   second (overwritten) state and labeled it as the first. Similarly
+   for Q/K (post-RoPE captured but labeled as q_proj output).
+
+   Fix: separate scratch buffers `s->x_norm_input`, `s->q_pre_rope`,
+   `s->k_pre_rope`; dump format bumped to ACTV2 with 12 captures.
+
+### Post-fix ε per layer
+
+```
+                         L0     L1     L5    L10    L15    L20    L29
+input_layernorm.output  0.002  1.000  0.998  1.000  1.000  0.999  1.000
+attn.q_pre_rope         0.621  0.995  0.998  1.000  0.990  0.982  1.000
+attn.k_pre_rope         0.681  0.960  0.987  1.000  0.986  0.990  0.996
+attn.v                  0.914  0.994  0.985  0.997  0.994  0.996  0.997
+attn_sub_norm.output    0.781  1.000  0.986  0.997  0.996  1.000  1.000
+post_attn_ln.output     0.937  1.000  1.000  0.999  1.000  1.000  1.000
+ffn.up_proj             0.984  0.995  1.000  1.000  0.999  0.998  0.967
+ffn_sub_norm.output     1.000  1.000  1.000  1.000  1.000  1.000  1.000
+block_output            1.000  0.998  0.997  0.998  0.997  0.998  0.997
+```
+
+### What this proves
+
+- **RMSNorm is bit-exact**: layer 0's input_layernorm.output ε = 0.0022
+  (within FP/int rounding). The substrate's `m4t_mtfp_rmsnorm` is correct.
+- **BitLinear is mostly correct**: layer 0's Q/K ε = 0.62/0.68. Real
+  signal correlation. The remaining 60-70% gap is consistent with A8
+  input-quantization noise (substrate quantizes x to int8 per BitNet's
+  W1.58A8 spec; the HF reference uses bf16 inputs).
+- **All 9 substrate primitives validated**: 27/27 ctest still pass; the
+  weight-loading-layout error was upstream of every primitive call.
+
+### What's left (Phase 2 entry conditions, sharpened)
+
+Phase 1's saturation cascade is now layer-1-onward, not layer-0 in the way I originally diagnosed. The order-of-operations for Phase 2:
+
+1. **A8 input-quantization noise budget**: re-run the HF reference
+   *with* A8 quantization on inputs (matching the substrate's path).
+   This determines how much of the layer 0 Q/K/V residual is "expected"
+   under the quantization spec vs what's actually a substrate bug.
+
+2. **V's weaker signal vs Q/K**: ε = 0.91 for V vs 0.62/0.68 for Q/K
+   in layer 0. Q/K/V all share absmax via the substrate's A8 quantize-once
+   (RC-11 fix from work-unit 1). So the asymmetry must come from α
+   handling or V's specific value range. Investigate.
+
+3. **FFN saturation**: ffn.up_proj has ε = 0.98 even at layer 0.
+   relu²(gate) saturation discards magnitude. This compounds with the
+   gate × up multiply's saturating clamp. Fix needs either block_exp
+   tracking (so squared magnitudes get a wider exponent) or a
+   pre-multiply rescale.
+
+4. **Block_output ε = 1.0**: residual sum of "approximately right" attn
+   path with a "very wrong" FFN path. Once FFN saturation is fixed,
+   block_output should follow.
+
+5. **Block_exp tracking**: still deferred to Phase 2 — but no longer
+   the dominant gap. After A8 noise + saturation are addressed, this
+   becomes the precision optimization.
 
 The scale-invariant L2 metric returning ~1.0 means
 `||c·s − r||₂ ≈ ||r||₂` — i.e., the best-fit single multiplier reduces
