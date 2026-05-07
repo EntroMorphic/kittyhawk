@@ -300,33 +300,97 @@ block_output            1.000  0.998  0.997  0.998  0.997  0.998  0.997
 - **All 9 substrate primitives validated**: 27/27 ctest still pass; the
   weight-loading-layout error was upstream of every primitive call.
 
-### What's left (Phase 2 entry conditions, sharpened)
+### Second-round red-team (eight concerns surfaced and remediated)
 
-Phase 1's saturation cascade is now layer-1-onward, not layer-0 in the way I originally diagnosed. The order-of-operations for Phase 2:
+After committing the layout-fix corrections, I red-teamed the closeout
+itself. Eight concerns were tested, and the findings collectively
+revise the diagnosis again:
 
-1. **A8 input-quantization noise budget**: re-run the HF reference
-   *with* A8 quantization on inputs (matching the substrate's path).
-   This determines how much of the layer 0 Q/K/V residual is "expected"
-   under the quantization spec vs what's actually a substrate bug.
+**#1 — A8 noise budget**: re-ran HF reference *with* W1.58A8 (A8 input
+quantization on every BitLinear). ε changes by ≤ 0.0001 across all
+Layer 0 sites. **A8 noise is NOT the substrate's gap — the gap is
+entirely substrate-side.** This invalidates the "consistent with A8
+noise" hand-wave from the post-layout-fix closeout.
 
-2. **V's weaker signal vs Q/K**: ε = 0.91 for V vs 0.62/0.68 for Q/K
-   in layer 0. Q/K/V all share absmax via the substrate's A8 quantize-once
-   (RC-11 fix from work-unit 1). So the asymmetry must come from α
-   handling or V's specific value range. Investigate.
+**#2 — V vs Q/K asymmetry**: replayed each BitLinear in numpy with
+substrate weights and substrate's actual `x_int8` input. **Pre-α-scale
+y_raw cosines vs HF: Q=0.997, K=1.000, V=1.000**. The matmul itself
+is essentially bit-exact. The asymmetry is V's wider natural value
+range (`|y_raw|` up to 22K vs Q's 4.6K) — V saturates harder under
+the BitLinear scale apply. Block_exp tracking would directly fix this.
 
-3. **FFN saturation**: ffn.up_proj has ε = 0.98 even at layer 0.
-   relu²(gate) saturation discards magnitude. This compounds with the
-   gate × up multiply's saturating clamp. Fix needs either block_exp
-   tracking (so squared magnitudes get a wider exponent) or a
-   pre-multiply rescale.
+**#3 — `attn_sub_norm.output` ε = 0.78 vs `input_layernorm.output`
+ε = 0.0022**: traced through; the second RMSNorm call is correct.
+attn_sub_norm.output cosine (0.62) is *better* than its input V
+(0.40) — RMSNorm normalizes saturation noise away. The bug is fully
+upstream in V's BitLinear scale path.
 
-4. **Block_output ε = 1.0**: residual sum of "approximately right" attn
-   path with a "very wrong" FFN path. Once FFN saturation is fixed,
-   block_output should follow.
+**#4 — Post-fix saturation rates**: re-measured. **Saturation is NOT
+a "layer 1+ phenomenon" — it's already 78–84% in Layer 0's Q/K/V.**
+The post-layout-fix closeout was too generous. Saturation drives the
+ε from layer 0 onward.
 
-5. **Block_exp tracking**: still deferred to Phase 2 — but no longer
-   the dominant gap. After A8 noise + saturation are addressed, this
-   becomes the precision optimization.
+**#5 — Residual block_exp alignment**: traced bx through one block.
+`s->residual` is at bx_emb=15 (saved before any RMSNorm); `s->x` after
+attn_sub_norm is at γ_attn_sub_norm bx=21. **The residual sum is
+adding mantissas at incompatible scales** — a ~3⁶ ≈ 729× factor
+mismatch. Even ignoring saturation, this is a correctness bug, not
+just a precision issue.
+
+**#6 — LM head argmax**: substrate predicts token 95717 ("{l"); HF
+predicts 279 (" the"). **Pearson correlation between full logit
+vectors: −0.06.** Top-100 overlap: 0/100. The substrate is producing
+zero functional inference output at the LM head.
+
+**#7 — 1.3% trit mismatch with bf16 master weights**: 100% of
+mismatches are in `|W/α| ∈ [0.50, 0.55)` — pure rounding boundary
+noise. Encoding is correct; the 98.7% match was the right
+verification.
+
+**#8 — Multi-position attention**: ran substrate with
+`--prompt-tokens 128000,791,6864,315,9822,374` (full prompt). After
+the prompt, **HF predicts " Paris" and substrate predicts
+" generally" — Pearson correlation jumps to 0.40 (vs −0.06
+single-token).** The KV cache + softmax DO help, but full accuracy
+remains lost.
+
+### Phase 1 final verdict (third revision)
+
+The substrate is mostly correct at the primitive level (matmul cos ≥
+0.997 vs HF) but produces **saturated, dimensionally-inconsistent
+output** through the residual stream. The block_exp tracking
+deficiency is back to load-bearing — it's the dominant fix, not an
+optimization. Specifically:
+
+1. **BitLinear scale apply produces magnitudes that exceed
+   MTFP19_MAX** for V especially (V's natural y_raw range is 5×
+   wider than Q's). 78–84% saturation at Layer 0.
+2. **Residual sum adds mantissas at different bx** (a real
+   correctness bug).
+3. RMSNorm and matmul primitives are bit-exact / cos-near-1.
+
+### Phase 2 entry conditions (final, after second red-team)
+
+1. **Implement explicit per-activation block_exp tracking.** Each
+   tensor in the forward pass carries its bx; operations compute the
+   output bx from input bxes. Residual sums rescale to a common bx
+   first.
+
+2. **Pick an "activation flow" bx that prevents saturation.** Probably
+   bx ≈ 12–14 globally for activations, much lower than γ tensors'
+   bx=17–21. γ values would then need to be re-quantized to that bx
+   (sacrificing precision) OR the BitLinear scale apply must convert
+   the γ-derived output to the activation flow's bx via a
+   mantissa-rescale step.
+
+3. **Remove the score-rescale heuristic in attention.** With explicit
+   bx tracking, the QKᵀ score's bx is derivable; the softmax input
+   contract becomes well-defined.
+
+4. **Re-run the ε comparison.** With saturation gone and dimension
+   alignment correct, ε should drop materially. Phase 1 succeeds in
+   producing the wiring + the diagnostic; Phase 2 succeeds when
+   substrate predicts " Paris" too.
 
 The scale-invariant L2 metric returning ~1.0 means
 `||c·s − r||₂ ≈ ||r||₂` — i.e., the best-fit single multiplier reduces

@@ -573,6 +573,8 @@ int main(int argc, char** argv) {
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
     int n_positions = 1;       /* number of positions to forward (work-unit 7 cache) */
+    int prompt_tokens[256] = {0};
+    int n_prompt_tokens = 0;   /* if >0, overrides --token + --positions */
     int n_generate = 0;        /* generation steps after the prompt (work-unit 8) */
     const char* weights_arg = NULL;
     const char* dump_path = NULL;
@@ -605,6 +607,17 @@ int main(int argc, char** argv) {
         if      (strcmp(argv[i], "--token")     == 0) token_id    = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--layers")    == 0) n_layers    = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--positions") == 0) n_positions = atoi(argv[i+1]);
+        else if (strcmp(argv[i], "--prompt-tokens") == 0) {
+            /* Parse comma-separated token ids. */
+            const char* p = argv[i+1];
+            n_prompt_tokens = 0;
+            while (*p && n_prompt_tokens < 256) {
+                prompt_tokens[n_prompt_tokens++] = atoi(p);
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            n_positions = n_prompt_tokens;
+        }
         else if (strcmp(argv[i], "--gen")       == 0) n_generate  = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--dump")      == 0) dump_path   = argv[i+1];
         else { fprintf(stderr, "[harness] unknown flag: %s\n", argv[i]); return 1; }
@@ -687,11 +700,43 @@ int main(int argc, char** argv) {
     m4t_mtfp_t x_init[BITNET_HIDDEN_SIZE];
     memcpy(x_init, x, sizeof(x_init));
 
-    /* Phase 1: prompt-position forward (--positions, default 1). */
+    /* Phase 1: prompt-position forward.
+     * If --prompt-tokens is given, embed each prompt token in turn.
+     * Otherwise re-feed the same --token at each --positions step. */
     int last_dump_pos = (n_generate > 0) ? -1 : (n_positions - 1);
     for (int pos = 0; pos < n_positions; pos++) {
-        if (pos > 0) memcpy(x, x_init, sizeof(x_init));
-        FORWARD_ONE(pos, pos == last_dump_pos);
+        if (n_prompt_tokens > 0) {
+            int tok = prompt_tokens[pos];
+            if (loaded_ok && weights.embedding != NULL) {
+                bitnet_embed(x, weights.embedding, tok);
+            } else {
+                for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) x[i] = (i % 7) - 3;
+            }
+        } else if (pos > 0) {
+            memcpy(x, x_init, sizeof(x_init));
+        }
+        /* Per-position dump if --prompt-tokens used (each position gets its own
+         * dump file). For single-token mode, only the last position dumps. */
+        int dump_this = (n_prompt_tokens > 0)
+                        ? (dump_path != NULL)
+                        : (pos == last_dump_pos);
+        /* Inline FORWARD_ONE with a per-position dump suffix. */
+        for (int l = 0; l < layers_to_run; l++) {
+            const bitnet_layer_weights_t* w_l;
+            if (loaded_ok && weights.layers[l].w_q != NULL) w_l = &weights.layers[l];
+            else                                            w_l = &w_dummy;
+            bitnet_forward_block(x, w_l, &s, &cache, l, pos);
+            if (dump_this) {
+                char path[1024];
+                if (n_prompt_tokens > 0) {
+                    snprintf(path, sizeof(path), "%s.pos%d.layer%d.bin", dump_path, pos, l);
+                } else {
+                    snprintf(path, sizeof(path), "%s.layer%d.bin", dump_path, l);
+                }
+                dump_activations_to_file(path, &s, l);
+            }
+        }
+        cache.current_pos = pos + 1;
     }
 
     /* Generated tokens accumulator. */
@@ -747,6 +792,33 @@ int main(int argc, char** argv) {
     m4t_mtfp_t logits[16];
     if (loaded_ok && weights.lm_head != NULL) {
         bitnet_lm_head(logits, x, weights.lm_head, top_n);
+        /* Also compute argmax over full vocab + dump raw int64 logits
+         * (red-team #6: cross-check substrate's predicted next-token
+         * against HF reference). */
+        int argmax_tok = bitnet_argmax_full_vocab(x, weights.lm_head);
+        fprintf(stderr, "     argmax over full vocab        = %d\n", argmax_tok);
+        if (dump_path) {
+            char logits_path[1024];
+            snprintf(logits_path, sizeof(logits_path), "%s.logits.bin", dump_path);
+            FILE* lf = fopen(logits_path, "wb");
+            if (lf) {
+                int32_t vocab = BITNET_VOCAB_SIZE;
+                fwrite(&vocab, sizeof(int32_t), 1, lf);
+                int64_t* full_logits = (int64_t*)malloc((size_t)vocab * sizeof(int64_t));
+                for (int v = 0; v < vocab; v++) {
+                    const m4t_mtfp_t* row = weights.lm_head + (size_t)v * BITNET_HIDDEN_SIZE;
+                    int64_t acc = 0;
+                    for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
+                        acc += (int64_t)x[i] * (int64_t)row[i];
+                    }
+                    full_logits[v] = acc;
+                }
+                fwrite(full_logits, sizeof(int64_t), (size_t)vocab, lf);
+                free(full_logits);
+                fclose(lf);
+                fprintf(stderr, "     dumped full logits → %s\n", logits_path);
+            }
+        }
     } else {
         memset(logits, 0, sizeof(logits));
     }
