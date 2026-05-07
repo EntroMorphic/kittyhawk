@@ -1,0 +1,93 @@
+loaded 542 tensor descriptors from data/bitnet_b158_2b4t.bin
+sample size: 2000 pairs, 2000 groups of 4
+
+══ q_proj  K=2560  N=2560 ══
+  overall sparsity:    49.62%
+  nnz per column:      min=3  p10=484  p50=1474  p90=1871  max=2117  (of 2560)
+  nnz per K-position:  min=1074  p10=1230  p50=1285  p90=1351  max=1798  (of 2560)
+    (expected random:  mean≈1290  sd≈25.3;  observed sd=55.8)
+  pairwise jaccard:    mean=0.3105  sd=0.1588  (random baseline ≈ 0.3367)
+  pairwise P(both nz): mean=0.2535  sd=0.1561  (random baseline ≈ 0.2538)
+  32-trit window all-zero (single col): 1.9790%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 1.098919e-37%)
+  4-col group lanes covered per window: mean=30.00  (random baseline ≈ 30.06)
+  4-col group total nnz per window: mean=64.39  (random baseline ≈ 64.49)
+  → structure ratios:  jaccard/random=0.922  row-sd/random=2.204
+
+══ k_proj  K=2560  N=640 ══
+  overall sparsity:    46.47%
+  nnz per column:      min=4  p10=557  p50=1552  p90=2018  max=2147  (of 2560)
+  nnz per K-position:  min=245  p10=315  p50=342  p90=371  max=521  (of 640)
+    (expected random:  mean≈343  sd≈12.6;  observed sd=24.3)
+  pairwise jaccard:    mean=0.3418  sd=0.1668  (random baseline ≈ 0.3654)
+  pairwise P(both nz): mean=0.2870  sd=0.1696  (random baseline ≈ 0.2865)
+  32-trit window all-zero (single col): 1.0312%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 2.525659e-41%)
+  4-col group lanes covered per window: mean=30.48  (random baseline ≈ 30.51)
+  4-col group total nnz per window: mean=67.87  (random baseline ≈ 68.51)
+  → structure ratios:  jaccard/random=0.935  row-sd/random=1.926
+
+══ v_proj  K=2560  N=640 ══
+  overall sparsity:    42.98%
+  nnz per column:      min=353  p10=1175  p50=1492  p90=1790  max=2538  (of 2560)
+  nnz per K-position:  min=82  p10=299  p50=370  p90=429  max=535  (of 640)
+    (expected random:  mean≈365  sd≈12.5;  observed sd=57.2)
+  pairwise jaccard:    mean=0.4055  sd=0.0966  (random baseline ≈ 0.3988)
+  pairwise P(both nz): mean=0.3337  sd=0.0994  (random baseline ≈ 0.3251)
+  32-trit window all-zero (single col): 0.0020%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 1.152255e-45%)
+  4-col group lanes covered per window: mean=30.56  (random baseline ≈ 30.91)
+  4-col group total nnz per window: mean=72.61  (random baseline ≈ 72.98)
+  → structure ratios:  jaccard/random=1.017  row-sd/random=4.568
+
+══ o_proj  K=2560  N=2560 ══
+  overall sparsity:    47.49%
+  nnz per column:      min=992  p10=1281  p50=1329  p90=1413  max=1945  (of 2560)
+  nnz per K-position:  min=0  p10=0  p50=1572  p90=1870  max=2084  (of 2560)
+    (expected random:  mean≈1344  sd≈25.3;  observed sd=640.0)
+  pairwise jaccard:    mean=0.4748  sd=0.0247  (random baseline ≈ 0.3560)
+  pairwise P(both nz): mean=0.3386  sd=0.0260  (random baseline ≈ 0.2757)
+  32-trit window all-zero (single col): 1.2866%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.006875%  max=1.250000%  (random baseline ≈ 4.067235e-40%)
+  4-col group lanes covered per window: mean=25.95  (random baseline ≈ 30.37)
+  4-col group total nnz per window: mean=67.26  (random baseline ≈ 67.21)
+  → structure ratios:  jaccard/random=1.334  row-sd/random=25.330
+
+══ gate_proj  K=2560  N=6912 ══
+  overall sparsity:    39.13%
+  nnz per column:      min=0  p10=1567  p50=1623  p90=1683  max=2536  (of 2560)
+  nnz per K-position:  min=3850  p10=4120  p50=4198  p90=4298  max=5323  (of 6912)
+    (expected random:  mean≈4207  sd≈40.6;  observed sd=93.2)
+  pairwise jaccard:    mean=0.4235  sd=0.1410  (random baseline ≈ 0.4375)
+  pairwise P(both nz): mean=0.3677  sd=0.1248  (random baseline ≈ 0.3705)
+  32-trit window all-zero (single col): 4.7743%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 6.953836e-51%)
+  4-col group lanes covered per window: mean=31.24  (random baseline ≈ 31.25)
+  4-col group total nnz per window: mean=77.76  (random baseline ≈ 77.91)
+  → structure ratios:  jaccard/random=0.968  row-sd/random=2.296
+
+══ up_proj  K=2560  N=6912 ══
+  overall sparsity:    38.03%
+  nnz per column:      min=0  p10=1531  p50=1668  p90=1734  max=2527  (of 2560)
+  nnz per K-position:  min=2370  p10=4204  p50=4296  p90=4365  max=4839  (of 6912)
+    (expected random:  mean≈4284  sd≈40.4;  observed sd=114.7)
+  pairwise jaccard:    mean=0.4349  sd=0.1457  (random baseline ≈ 0.4490)
+  pairwise P(both nz): mean=0.3812  sd=0.1306  (random baseline ≈ 0.3841)
+  32-trit window all-zero (single col): 4.7743%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 1.781049e-52%)
+  4-col group lanes covered per window: mean=31.31  (random baseline ≈ 31.33)
+  4-col group total nnz per window: mean=79.23  (random baseline ≈ 79.33)
+  → structure ratios:  jaccard/random=0.969  row-sd/random=2.843
+
+══ down_proj  K=6912  N=2560 ══
+  overall sparsity:    38.21%
+  nnz per column:      min=3885  p10=4089  p50=4216  p90=4462  max=6503  (of 6912)
+  nnz per K-position:  min=0  p10=1568  p50=1666  p90=1739  max=1930  (of 2560)
+    (expected random:  mean≈1582  sd≈24.6;  observed sd=367.8)
+  pairwise jaccard:    mean=0.4828  sd=0.0286  (random baseline ≈ 0.4470)
+  pairwise P(both nz): mean=0.4030  sd=0.0342  (random baseline ≈ 0.3818)
+  32-trit window all-zero (single col): 0.0000%  (random baseline ≈ 0.000000%)
+  32-trit window all-zero (4-col group): mean=0.000000%  max=0.000000%  (random baseline ≈ 3.341449e-52%)
+  4-col group lanes covered per window: mean=29.95  (random baseline ≈ 31.32)
+  4-col group total nnz per window: mean=79.11  (random baseline ≈ 79.09)
+  → structure ratios:  jaccard/random=1.080  row-sd/random=14.961
