@@ -53,6 +53,7 @@ set(M4T_CORE_SRCS
     src/m4t_route.c
     src/m4t_ternary_matmul.c
     src/m4t_ternary_routed16.c
+    src/m4t_ternary_rowskip.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -189,6 +190,12 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_ternary_routed16 PRIVATE m4t_test m)
     gesh_test_undebug(test_m4t_ternary_routed16)
     add_test(NAME m4t_ternary_routed16 COMMAND test_m4t_ternary_routed16)
+
+    # rowskip: dense kernel over compressed K (skips W's empty K-rows).
+    add_executable(test_m4t_ternary_rowskip tests/test_m4t_ternary_rowskip.c)
+    target_link_libraries(test_m4t_ternary_rowskip PRIVATE m4t_test m)
+    gesh_test_undebug(test_m4t_ternary_rowskip)
+    add_test(NAME m4t_ternary_rowskip COMMAND test_m4t_ternary_rowskip)
 
     # Ternary MAC NEON path test. Bit-exact verification of production
     # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
