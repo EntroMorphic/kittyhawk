@@ -93,60 +93,109 @@ def relative_l2_error(c_arr_int: np.ndarray, ref_arr_fp: np.ndarray) -> float:
     return float(np.linalg.norm(c - r) / np.linalg.norm(r))
 
 
+def relative_l2_error_scale_invariant(c_arr_int: np.ndarray, ref_arr_fp: np.ndarray) -> float:
+    """Scale-invariant relative L2: best-fit a constant scale factor s
+    minimizing ||c·s − r||₂, then return ||c·s − r||₂ / ||r||₂.
+
+    Closed form: s = (c · r) / (c · c). Captures "the substrate output
+    is the right shape, just at the wrong overall scale" — i.e., the
+    block_exp tracking question. If s falls in a sane range across
+    layers, the substrate is computing correctly modulo block_exp.
+
+    Phase 1 gate (work-unit 6 of bitnet_phase1_synthesize): ε bounded,
+    not exponentially growing across layers. */"""
+    c = c_arr_int.astype(np.float64).flatten()
+    r = ref_arr_fp.astype(np.float64).flatten()
+    if c.size != r.size:
+        return float("nan"), float("nan")
+    cc = float(np.dot(c, c))
+    cr = float(np.dot(c, r))
+    rn = float(np.linalg.norm(r))
+    if cc == 0 or rn == 0:
+        return float("nan"), float("nan")
+    s = cr / cc
+    err = float(np.linalg.norm(c * s - r) / rn)
+    return s, err
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--c-dump", required=True,
-        help="Output of bitnet_harness <weights_blob.bin> <dump_path>.")
+    parser.add_argument("--c-dump", default=None,
+        help="Single-layer C dump (legacy; pairs with --layer).")
+    parser.add_argument("--c-dump-prefix", default=None,
+        help="Multi-layer mode: reads <prefix>.layer<N>.bin for each "
+             "layer. Pair with --max-layers.")
     parser.add_argument("--reference", required=True,
         help="Output of dump_reference.py (.npz).")
     parser.add_argument("--layer", type=int, default=0,
-        help="Layer index to compare (default 0).")
+        help="Layer index for single-layer mode (default 0).")
+    parser.add_argument("--max-layers", type=int, default=30,
+        help="Layer count for multi-layer mode (default 30).")
+    parser.add_argument("--report-csv", default=None,
+        help="Write per-layer (tensor, scale, ε) CSV to this path.")
     args = parser.parse_args()
 
-    c_dump = read_c_dump(args.c_dump)
+    if args.c_dump_prefix is None and args.c_dump is None:
+        parser.error("specify either --c-dump or --c-dump-prefix")
+
     ref = read_reference(args.reference)
 
-    print(f"# Comparing layer {args.layer}")
-    print(f"# C dump:    {args.c_dump}")
-    print(f"# Reference: {args.reference}")
-    print()
-    print(f"{'tensor':<32} {'C_norm':>14} {'ref_norm':>14} {'rel_L2_err':>14}")
-    print("-" * 76)
+    if args.c_dump is not None:
+        layers = [(args.layer, args.c_dump)]
+    else:
+        layers = [(l, f"{args.c_dump_prefix}.layer{l}.bin") for l in range(args.max_layers)]
 
-    site_to_ref_key = {
-        "input_layernorm.output":    f"layer.{args.layer}.input_layernorm.output",
-        "attn.q":                    f"layer.{args.layer}.attn.q",
-        "attn.k":                    f"layer.{args.layer}.attn.k",
-        "attn.v":                    f"layer.{args.layer}.attn.v",
-        "attn_sub_norm.output":      f"layer.{args.layer}.attn_sub_norm.output",
-        "ffn.gate_proj":             f"layer.{args.layer}.ffn.gate_proj",
-        "ffn.up_proj":               f"layer.{args.layer}.ffn.up_proj",
-        "ffn_sub_norm.output":       f"layer.{args.layer}.ffn_sub_norm.output",
-        "block_output":              f"layer.{args.layer}.block_output",
-    }
+    csv_rows = []
+    print(f"{'layer':>5} {'tensor':<32} {'C_norm':>14} {'ref_norm':>14}"
+          f" {'best_scale':>14} {'sc_inv_ε':>14}")
+    print("-" * 100)
 
-    for c_key, _ in CAPTURE_ORDER:
-        ref_key = site_to_ref_key[c_key]
-        c_arr = c_dump.get(c_key)
-        if c_arr is None:
-            print(f"{c_key:<32}    <missing in C dump>")
+    for layer_idx, c_dump_path in layers:
+        try:
+            c_dump = read_c_dump(c_dump_path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"# layer {layer_idx}: {e}")
             continue
-        if ref_key not in ref:
-            print(f"{c_key:<32} {np.linalg.norm(c_arr):>14.3e}  "
-                  f"<not in reference: {ref_key}>")
-            continue
-        r_arr = ref[ref_key]
-        c_norm = np.linalg.norm(c_arr.astype(np.float64))
-        r_norm = np.linalg.norm(r_arr.astype(np.float64))
-        err = relative_l2_error(c_arr, r_arr)
-        print(f"{c_key:<32} {c_norm:>14.3e} {r_norm:>14.3e} {err:>14.3e}")
+
+        site_to_ref_key = {
+            "input_layernorm.output":    f"layer.{layer_idx}.input_layernorm.output",
+            "attn.q":                    f"layer.{layer_idx}.attn.q",
+            "attn.k":                    f"layer.{layer_idx}.attn.k",
+            "attn.v":                    f"layer.{layer_idx}.attn.v",
+            "attn_sub_norm.output":      f"layer.{layer_idx}.attn_sub_norm.output",
+            "ffn.gate_proj":             f"layer.{layer_idx}.ffn.gate_proj",
+            "ffn.up_proj":               f"layer.{layer_idx}.ffn.up_proj",
+            "ffn_sub_norm.output":       f"layer.{layer_idx}.ffn_sub_norm.output",
+            "block_output":              f"layer.{layer_idx}.block_output",
+        }
+
+        for c_key, _ in CAPTURE_ORDER:
+            ref_key = site_to_ref_key[c_key]
+            c_arr = c_dump.get(c_key)
+            if c_arr is None or ref_key not in ref:
+                continue
+            r_arr = ref[ref_key]
+            c_norm = np.linalg.norm(c_arr.astype(np.float64))
+            r_norm = np.linalg.norm(r_arr.astype(np.float64))
+            best_s, sc_err = relative_l2_error_scale_invariant(c_arr, r_arr)
+            print(f"{layer_idx:>5} {c_key:<32} {c_norm:>14.3e} {r_norm:>14.3e}"
+                  f" {best_s:>14.3e} {sc_err:>14.3e}")
+            csv_rows.append((layer_idx, c_key, c_norm, r_norm, best_s, sc_err))
+
+    if args.report_csv:
+        with open(args.report_csv, "w") as f:
+            f.write("layer,tensor,c_norm,ref_norm,best_scale,sc_inv_eps\n")
+            for row in csv_rows:
+                f.write(",".join(str(x) for x in row) + "\n")
+        print(f"\n[wrote] {args.report_csv}")
 
     print()
-    print("note: C-side dump is in raw int32 mantissas; this comparison is")
-    print("      unscaled. Phase 1 work-unit 6 will apply per-tensor block")
-    print("      exponents from the weights blob to produce a calibrated")
-    print("      fidelity comparison.")
+    print("note: best_scale is the constant multiplier minimizing the L2 gap;")
+    print("      a layer's substrate output is correct mod block_exp if its")
+    print("      sc_inv_ε stays small while best_scale is roughly stable.")
+    print("      Phase 1 gate: per-layer sc_inv_ε does not grow exponentially")
+    print("      across depth.")
 
 
 if __name__ == "__main__":

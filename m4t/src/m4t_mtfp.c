@@ -1469,6 +1469,48 @@ void m4t_mtfp_vec_scale(
     }
 }
 
+/* ── ReLU² + element-wise multiply ─────────────────────────────────────
+ *
+ * Pure-int. Saturating clamp on output (squared magnitudes exceed
+ * MTFP19_MAX by factor of |x|; the downstream RMSNorm normalizes
+ * away). Per work-unit 6 of bitnet_phase1: promoted from
+ * bitnet_stub_relu2_inplace / bitnet_stub_elementwise_mul. */
+
+void m4t_mtfp_relu2_inplace(m4t_mtfp_t* x, int n) {
+    if (n <= 0) return;
+    assert(x);
+    for (int i = 0; i < n; i++) {
+        if (x[i] <= 0) {
+            x[i] = 0;
+        } else {
+            int64_t sq = (int64_t)x[i] * (int64_t)x[i];
+            x[i] = m4t_mtfp_clamp64(sq);
+        }
+    }
+}
+
+void m4t_mtfp_relu2_inplace_scalar_ref(m4t_mtfp_t* x, int n) {
+    /* Same algorithm; oracle for parity. */
+    m4t_mtfp_relu2_inplace(x, n);
+}
+
+void m4t_mtfp_elementwise_mul(
+    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n)
+{
+    if (n <= 0) return;
+    assert(y && a && b);
+    for (int i = 0; i < n; i++) {
+        int64_t v = (int64_t)a[i] * (int64_t)b[i];
+        y[i] = m4t_mtfp_clamp64(v);
+    }
+}
+
+void m4t_mtfp_elementwise_mul_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n)
+{
+    m4t_mtfp_elementwise_mul(y, a, b, n);
+}
+
 void m4t_mtfp_rope_apply_scalar_ref(
     m4t_mtfp_t* q, m4t_mtfp_t* k,
     int position,

@@ -537,6 +537,28 @@ void m4t_mtfp_vec_scale_scalar_ref(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     int64_t num, int64_t den, int n);
 
+/* ── ReLU² ──────────────────────────────────────────────────────────────
+ *
+ * In-place: x[i] = (max(0, x[i]))². Used by BitNet's FFN gated path.
+ * Saturating clamp (squaring large MTFP19 mantissas exceeds MTFP19_MAX
+ * by a factor of |x|; the clamp pins the result at MAX_VAL). This loses
+ * dynamic range, but the downstream RMSNorm normalizes magnitude away.
+ *
+ * Per-cell scalar — 64-bit multiply doesn't naturally vectorize beyond
+ * the existing block ops; documented per the cross-exp accum precedent. */
+void m4t_mtfp_relu2_inplace(m4t_mtfp_t* x, int n);
+void m4t_mtfp_relu2_inplace_scalar_ref(m4t_mtfp_t* x, int n);
+
+/* ── Element-wise multiply ─────────────────────────────────────────────
+ *
+ * y[i] = a[i] · b[i] with saturating clamp. Used by BitNet's FFN gated
+ * path: gate_act × up. Same precision concern as relu² (squared-magnitude
+ * range exceeds MTFP19); same mitigation (followed by RMSNorm). */
+void m4t_mtfp_elementwise_mul(
+    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n);
+void m4t_mtfp_elementwise_mul_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n);
+
 #ifdef __cplusplus
 }
 #endif

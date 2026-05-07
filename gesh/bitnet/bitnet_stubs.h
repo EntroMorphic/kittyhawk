@@ -61,18 +61,8 @@ void bitnet_stub_a8_dequantize(
 );
 #endif  /* removed A8 stubs */
 
-/* ReLU² activation in-place. y[i] = (max(0, x[i]))²
- * MTFP19 throughout. Saturating clamp on result if it exceeds MTFP19_MAX. */
-void bitnet_stub_relu2_inplace(m4t_mtfp_t* x, int n);
-
-/* Element-wise multiply: y[i] = a[i] * b[i] (MTFP19 × MTFP19 → MTFP19,
- * with saturating clamp on overflow). Used by FFN's gate*up.
- * Substrate has m4t_mtfp_block_add but no block_mul as of this writing —
- * if work-unit 1 confirms this primitive is needed, work-unit 5+ adds it
- * to libm4t alongside the A8 family. */
-void bitnet_stub_elementwise_mul(
-    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n
-);
+/* relu² and elementwise_mul: promoted at work-unit 6 to
+ * m4t_mtfp_relu2_inplace and m4t_mtfp_elementwise_mul in m4t_mtfp.h. */
 
 #ifdef __cplusplus
 }

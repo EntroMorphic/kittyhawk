@@ -52,9 +52,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prompt", default="The capital of France is",
         help="Input prompt.")
-    parser.add_argument("--max-layers", type=int, default=1,
-        help="Capture activations for layers [0, max_layers). Default: 1 "
-             "(work-unit 1 single-block scope).")
+    parser.add_argument("--max-layers", type=int, default=30,
+        help="Capture activations for layers [0, max_layers). Default: 30 "
+             "(all layers; work-unit 6 ε-vs-layer comparison).")
     parser.add_argument("--output", default="bitnet_reference_activations.npz",
         help="Output .npz path.")
     parser.add_argument("--device", default="cpu",

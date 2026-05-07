@@ -103,23 +103,6 @@ void bitnet_stub_a8_dequantize(
 #endif  /* removed A8 stubs */
 
 /* ── Element-wise ops ────────────────────────────────────────────── */
-
-void bitnet_stub_relu2_inplace(m4t_mtfp_t* x, int n) {
-    for (int i = 0; i < n; i++) {
-        if (x[i] <= 0) {
-            x[i] = 0;
-        } else {
-            int64_t sq = (int64_t)x[i] * (int64_t)x[i];
-            x[i] = clamp_to_mtfp19(sq);
-        }
-    }
-}
-
-void bitnet_stub_elementwise_mul(
-    m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n)
-{
-    for (int i = 0; i < n; i++) {
-        int64_t v = (int64_t)a[i] * (int64_t)b[i];
-        y[i] = clamp_to_mtfp19(v);
-    }
-}
+/* Removed work-unit 6: promoted to m4t_mtfp_relu2_inplace and
+ * m4t_mtfp_elementwise_mul in m4t_mtfp.h. The stubs were already
+ * pure-int (no FP); promotion was a naming change + library move. */
