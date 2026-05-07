@@ -324,12 +324,10 @@ void bitnet_forward_block(
                 }
 
                 /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
-                 * Per the math: score_real = Σ_d Q_m × K_m / 3^(2·ACT_BX) / sqrt(d).
-                 * For ACT_BX=8 and d=128: divide by 3^16 × 11.3 ≈ 4.86e8 ≈ 2^28.86.
-                 * Heuristic: pick shift so max_abs ≤ 30, with NO extra fudge.
-                 * The earlier "+4 fudge" was over-shifting by ~3.5 bits, making
-                 * substrate's softmax distribution too flat — attention couldn't
-                 * focus on specific past positions, losing fact-recall ability. */
+                 * Adaptive: shift so max_abs maps to ≤ 30 nats. Pre-shift
+                 * preserves attention sharpness (vs. fixed-shift, which
+                 * over-flattens for prompts where attention should focus
+                 * on a specific past position). */
                 int score_shift = 0;
                 while ((max_abs >> score_shift) > 30) score_shift++;
 
