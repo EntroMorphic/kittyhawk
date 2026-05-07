@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-inspect.py — list tensor names, shapes, dtypes from BitNet's model.safetensors.
+inspect_blob.py — list tensor names, shapes, dtypes from BitNet's model.safetensors.
+
+(Renamed from inspect.py to avoid shadowing stdlib `inspect` when
+scripts/ is on sys.path — broke huggingface_hub.)
 
 Per the LMM cycle in journal/bitnet_phase1_*. Used at the start of
 work-unit 1 to ground the conversion script against actual storage

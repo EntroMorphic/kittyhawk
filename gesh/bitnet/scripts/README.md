@@ -12,13 +12,15 @@ Approximate model download size: 1.18 GB. Cached under `~/.cache/huggingface/hub
 
 ## Scripts
 
-### `inspect.py`
+### `inspect_blob.py`
 
 Lists tensor names, shapes, and dtypes from `model.safetensors`. Use this first to verify the file structure matches what `convert_weights.py` expects.
 
 ```bash
-python scripts/inspect.py
+python scripts/inspect_blob.py
 ```
+
+(Originally `inspect.py`; renamed to avoid shadowing stdlib `inspect`.)
 
 Output: human-readable table to stdout, JSON manifest to `inspect_manifest.json`.
 

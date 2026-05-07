@@ -131,6 +131,24 @@ def repack_4in8_to_5in8(packed_4in8: np.ndarray, n_trits: int) -> np.ndarray:
     return pack_5in8_ternary(trits)
 
 
+def unpack_hf_4in8_weight(packed: np.ndarray, out_features: int, in_features: int) -> np.ndarray:
+    """HF's BitNet packing: shape (out_features/4, in_features), uint8.
+    Each byte stores 4 trits along the OUT axis: byte[op, i] → trits at
+    out positions op*4 + slot for slot ∈ {0,1,2,3}.
+    Trit codes: 00→0, 01→+1, 10→−1.
+    Returns the unpacked (out_features, in_features) int8 matrix."""
+    op = out_features // 4
+    if packed.shape != (op, in_features):
+        raise ValueError(f"expected packed shape ({op}, {in_features}), got {packed.shape}")
+    out = np.empty((out_features, in_features), dtype=np.int8)
+    for slot in range(4):
+        codes = (packed >> (2 * slot)) & 0x3
+        decoded = np.where(codes == 1, 1,
+                           np.where(codes == 2, -1, 0)).astype(np.int8)
+        out[slot::4, :] = decoded
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -194,15 +212,11 @@ def main():
                 ("mlp.down_proj",     INTERMEDIATE_SIZE,  HIDDEN_SIZE),
             ]:
                 w_4in8 = sf.get_tensor(f"{base}.{proj_name}.weight").numpy()
-                # Each row has n_in trits; HF stores n_in/4 bytes per row.
-                rows_5in8 = []
-                for r in range(n_out):
-                    if w_4in8.ndim == 2:
-                        row = w_4in8[r]
-                    else:
-                        bpr = (n_in + 3) // 4
-                        row = w_4in8[r * bpr:(r + 1) * bpr]
-                    rows_5in8.append(repack_4in8_to_5in8(row, n_in))
+                # HF packing: shape (out/4, in) with 4 trits-per-byte along
+                # the OUT axis. Unpack to logical (out, in), then re-pack
+                # 5-in-8 along the IN axis (substrate's expected layout).
+                w_logical = unpack_hf_4in8_weight(w_4in8, n_out, n_in)
+                rows_5in8 = [pack_5in8_ternary(w_logical[r]) for r in range(n_out)]
                 w_5in8 = np.concatenate(rows_5in8).astype(np.uint8)
                 tensor_records.append(
                     (f"layer{layer}.{proj_name}.weight", w_5in8.tobytes(), 0))
