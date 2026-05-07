@@ -1,13 +1,17 @@
 /*
- * test_m4t_ternary_routed.c — verify sparse-routed ternary matmul.
+ * test_m4t_ternary_routed.c — verify sparse-routed reference oracle.
  *
- * Per the "math as signatures via routing" foundation. The routed
- * variant treats each trit as a route decision (absent/positive/negative)
+ * Per the "math as signatures via routing" foundation. The routed_ref
+ * oracle treats each trit as a route decision (absent/positive/negative)
  * rather than a numeric coefficient. Math is identical to the dense
  * version (multiply by 0 is no-op); bit-exact match is required.
  *
+ * This is a test of the ORACLE. The oracle is scalar-only by design
+ * (production sparse-routed compute will need a different representation;
+ * the oracle exists so that future NEON primitive has a bit-exact gate).
+ *
  * Tests:
- *   1. Bit-exact vs dense (m4t_ternary_5in8_matmul_bt) and scalar_ref.
+ *   1. Bit-exact vs scalar_ref dense.
  *   2. Sparsity measurement on random ternary weights.
  *   3. Boundary shapes (small K, small N, K%5 != 0).
  */
@@ -101,7 +105,7 @@ static void test_bit_exact(int M, int K, int N, double zero_prob, const char* la
     m4t_ternary_5in8_matmul_bt_scalar_ref(Y_dense, X, W_packed, M, K, N);
 
     int64_t skipped = 0;
-    m4t_ternary_5in8_matmul_bt_routed(Y_routed, X, W_packed, M, K, N, &skipped);
+    m4t_ternary_5in8_matmul_bt_routed_ref(Y_routed, X, W_packed, M, K, N, &skipped);
 
     int per_output_trits = K * (M * N);
     fprintf(stderr, "  [%s shape M=%d K=%d N=%d zp=%.0f%%] skipped=%lld of %d trits = %.1f%%\n",

@@ -181,30 +181,30 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
     int M, int K, int N
 );
 
-/* Sparse-routed variant — first explicitly-routed compute primitive in
- * the substrate. Same math as m4t_ternary_5in8_matmul_bt; same bit-exact
- * output. The difference: this walks the 5-in-8 byte stream and treats
- * each trit as a *route decision* rather than a numeric coefficient:
+/* Scalar-only routed reference. Test/measurement oracle that walks the
+ * 5-in-8 byte stream treating each trit as a route decision (0 → skip
+ * X[i, k]; +1 → add X[i, k]; -1 → subtract X[i, k]). Bit-exact vs the
+ * dense kernel.
  *
- *   trit = 0   → connection is absent; skip X[i, k] load entirely.
- *   trit = +1  → forward X[i, k] to accumulator with positive sign.
- *   trit = -1  → forward X[i, k] to accumulator with negated sign.
+ * Production code MUST NOT call this — intentionally scalar. Use
+ * m4t_ternary_5in8_matmul_bt for production. Two purposes:
+ *   1. Test oracle for a future NEON sparse-routed primitive.
+ *   2. Sparsity measurement (counts zero trits actually encountered).
  *
- * No multiplications are performed. The substrate's existing primitives
- * already encoded routing structure in their data (the W matrix); this
- * primitive recognizes and uses that structure rather than computing
- * through it densely.
- *
- * For BitNet's weight distribution (~40% zero trits), this skips ~40%
- * of the work — fewer X loads, fewer adds, zero multiplies. Bit-exact
- * vs dense because integer addition of zeros is a no-op.
+ * On the existing 5-in-8 packed layout there is no NEON-friendly way
+ * to skip per-trit work that beats SDOT, because in vectorized
+ * arithmetic multiply-by-zero is free (one lane out of 16 contributes
+ * 0 to the dot, no cycle saved). Realizing routing as a *speed* win
+ * requires a different representation (sparse index list per output
+ * column, or aligned nonzero chunks) — that primitive is the next
+ * step, not this one. This routed_ref exists so that future NEON
+ * primitive has a stable bit-exact gate.
  *
  * Optional output: if `skipped_zeros` != NULL, writes the count of
- * zero trits encountered (across all M × N output cells). Useful for
- * sparsity measurement.
+ * zero trits encountered (across all M × N output cells).
  *
  * Per the project memory's "math as signatures via routing" foundation. */
-void m4t_ternary_5in8_matmul_bt_routed(
+void m4t_ternary_5in8_matmul_bt_routed_ref(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,
     const uint8_t* W_packed,

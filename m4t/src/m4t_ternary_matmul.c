@@ -686,25 +686,26 @@ no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
 /* §20 scalar reference oracle. Per-cell decoded via the spec formula
  * (u_i = (byte / 3^i) mod 3); never dispatches to NEON.
  * Test-only; production code MUST NOT call this. */
-/* Sparse-routed variant. See m4t_ternary_matmul.h for semantics.
+/* Sparse-routed reference oracle. See m4t_ternary_matmul.h for semantics.
  *
- * Implementation: walk packed bytes; for each byte, decode 5 trits;
- * for trits != 0, conditionally add ±X[i, k] to the accumulator. Zero
- * trits skip the X load entirely.
+ * Walk packed bytes; for each byte, decode 5 trits; for trits != 0,
+ * conditionally add ±X[i, k] to the accumulator. Zero trits skip the
+ * X load entirely. Bit-exact vs the dense scalar_ref.
  *
- * Two-level skip:
- *   1. If the entire byte == 0 (all 5 trits zero), skip the whole byte
- *      (~1% of bytes for BitNet's distribution: 0.4^5 ≈ 1.0%).
- *   2. Otherwise per-trit skip on u==0 (~40% of trits).
+ * **Test/measurement oracle only — production code MUST NOT call this.**
  *
- * The math is identical to the dense scalar_ref since x*0 = 0 and
- * adding 0 is a no-op. Bit-exact match guaranteed.
+ * On the existing 5-in-8 packed layout, "routing" cannot beat NEON SDOT
+ * on this representation: in vectorized arithmetic multiply-by-zero is
+ * free (one int8 lane in 16 contributes 0 to the dot — no cycle saved
+ * by skipping it). To realize routing as a *speed* primitive requires
+ * a different representation (e.g. per-output sparse index list with
+ * NEON-friendly chunking). This oracle exists so that future NEON
+ * sparse-routed primitive has a stable bit-exact gate, and so we can
+ * measure actual zero-trit density in real weight matrices.
  *
- * No NEON path: the routing structure is fundamentally a per-cell
- * conditional, not a SIMD-friendly operation. Per the project rule,
- * scalar with documented reasoning is acceptable for primitives whose
- * structure resists vectorization (cross-exp accum precedent). */
-void m4t_ternary_5in8_matmul_bt_routed(
+ * Per project no-scalar-in-production rule + the
+ * "math as signatures via routing" foundation. */
+void m4t_ternary_5in8_matmul_bt_routed_ref(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,
     const uint8_t* W_packed,
