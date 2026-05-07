@@ -537,6 +537,65 @@ void m4t_mtfp_vec_scale_scalar_ref(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     int64_t num, int64_t den, int n);
 
+/* ── bx-aware variants (Phase 2 work-unit 1) ────────────────────────────
+ *
+ * These variants accept explicit per-tensor block_exp parameters and
+ * produce output at a caller-chosen target bx. They exist alongside the
+ * implicit-bx variants above so existing tests keep working.
+ *
+ * Convention: real_value = mantissa × 3^(-block_exp). All bxes are
+ * non-negative ints in [0, 35] (above 35 the 3^bx multiplier overflows
+ * int64 in some intermediate computations).
+ */
+
+/* Rescale a vector between two block_exps:
+ *   y_real = x_real, but represented at to_bx instead of from_bx
+ *   y_m = x_m × 3^(from_bx - to_bx)   (if from > to, magnify mantissa;
+ *                                     if from < to, divide)
+ * Saturating clamp on overflow to ±M4T_MTFP_MAX_VAL. */
+void m4t_mtfp_rescale_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int from_bx, int to_bx, int n);
+
+/* RMSNorm with explicit bx for input, γ, and target output:
+ *   y_real[i] = γ_real[i] · x_real[i] · rsqrt(mean(x_real²) + ε_real)
+ * Output mantissas are at target_bx (not γ_bx as in the implicit variant).
+ *
+ * eps_mantissa is interpreted at the SAME scale as the SoS-shifted mean
+ * (same contract as the existing m4t_mtfp_rmsnorm) — caller picks a
+ * small positive value. */
+void m4t_mtfp_rmsnorm_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    int x_bx, int gamma_bx, int target_bx,
+    m4t_mtfp_t eps_mantissa, int n);
+
+/* relu² with explicit input bx → target bx rescale. Squaring doubles
+ * the bx; the rescale brings it back. y_real[i] = max(0, x_real[i])²
+ * preserved; mantissas land at target_bx. */
+void m4t_mtfp_relu2_inplace_bx(
+    m4t_mtfp_t* x, int x_bx, int target_bx, int n);
+
+/* Elementwise multiply with bx tracking. y_m_target = a_m × b_m / 3^(a_bx+b_bx-target_bx). */
+void m4t_mtfp_elementwise_mul_bx(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n);
+
+/* BitLinear scale apply with explicit input bx and target output bx:
+ *   y_real[i] = y_raw[i] · α_real · absmax_real / 127
+ * Output at target_bx, computed as:
+ *   y_m_target = y_raw[i] × α_m × absmax_m / (127 × 3^(α_bx + x_bx - target_bx))
+ *
+ * Constraint: α_bx + x_bx - target_bx ≤ 35 to keep den in int64.
+ * For BitNet (α_bx ≤ 18, x_bx ≤ 21, target_bx = 14): max shift = 25. */
+void m4t_mtfp_bitlinear_scale_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    m4t_mtfp_t absmax_m, int x_bx, int target_bx,
+    int n);
+
 /* ── ReLU² ──────────────────────────────────────────────────────────────
  *
  * In-place: x[i] = (max(0, x[i]))². Used by BitNet's FFN gated path.

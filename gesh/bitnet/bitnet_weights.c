@@ -128,6 +128,7 @@ int bitnet_weights_load(
 
     /* Embedding. */
     weights->embedding = TENSOR_PTR(idx_embedding(), m4t_mtfp_t);
+    weights->embedding_block_exp = handle->block_exps[idx_embedding()];
 
     /* Per-layer pointers. Layers beyond `layers_present` stay NULL. */
     static const int proj_to_field_offset_w[7] = { 0, 1, 2, 3, 4, 5, 6 };
@@ -158,19 +159,26 @@ int bitnet_weights_load(
         lw->alpha_down_block_exp = handle->block_exps[idx_layer_alpha(l, 6)];
         /* γ vectors (slots 14..17). */
         lw->gamma_input_norm     = TENSOR_PTR(idx_layer_gamma(l, 0), m4t_mtfp_t);
+        lw->gamma_input_norm_block_exp     = handle->block_exps[idx_layer_gamma(l, 0)];
         lw->gamma_post_attn_norm = TENSOR_PTR(idx_layer_gamma(l, 1), m4t_mtfp_t);
+        lw->gamma_post_attn_norm_block_exp = handle->block_exps[idx_layer_gamma(l, 1)];
         lw->gamma_attn_sub_norm  = TENSOR_PTR(idx_layer_gamma(l, 2), m4t_mtfp_t);
+        lw->gamma_attn_sub_norm_block_exp  = handle->block_exps[idx_layer_gamma(l, 2)];
         lw->gamma_ffn_sub_norm   = TENSOR_PTR(idx_layer_gamma(l, 3), m4t_mtfp_t);
+        lw->gamma_ffn_sub_norm_block_exp   = handle->block_exps[idx_layer_gamma(l, 3)];
     }
 
     /* Final norm. */
     weights->gamma_final_norm = TENSOR_PTR(idx_final_norm(layers_present), m4t_mtfp_t);
+    weights->gamma_final_norm_block_exp = handle->block_exps[idx_final_norm(layers_present)];
 
     /* LM head: tied means reuse embedding. Else point to the loaded buffer. */
     if (lm_head_tied) {
         weights->lm_head = weights->embedding;
+        weights->lm_head_block_exp = weights->embedding_block_exp;
     } else {
         weights->lm_head = TENSOR_PTR(idx_lm_head(layers_present), m4t_mtfp_t);
+        weights->lm_head_block_exp = handle->block_exps[idx_lm_head(layers_present)];
     }
 
     /* Sanity: spot-check the first tensor's offset vs header_end. */

@@ -1469,6 +1469,156 @@ void m4t_mtfp_vec_scale(
     }
 }
 
+/* ── bx-aware variants (Phase 2 work-unit 1) ────────────────────────────
+ *
+ * Per the closeout's red-team: implicit-bx output kills the activation
+ * flow at saturation. These variants take explicit bxes and produce
+ * output at a caller-chosen target bx. Same algorithms internally —
+ * just an extra rescale step at the end.
+ */
+
+/* Compute 3^k as int64, asserts k in [0, 39]. */
+static int64_t pow3_i64(int k) {
+    assert(k >= 0 && k <= 39);
+    int64_t r = 1;
+    for (int i = 0; i < k; i++) r *= 3;
+    return r;
+}
+
+void m4t_mtfp_rescale_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int from_bx, int to_bx, int n)
+{
+    if (n <= 0) return;
+    assert(y && x);
+    if (from_bx == to_bx) {
+        if (y != x) memcpy(y, x, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+    if (from_bx > to_bx) {
+        /* x_m_at_to_bx = x_m_at_from_bx / 3^(from-to). Loses precision (divides). */
+        int k = from_bx - to_bx;
+        int64_t den = pow3_i64(k);
+        int64_t half = den / 2;
+        for (int i = 0; i < n; i++) {
+            int64_t v = (int64_t)x[i];
+            int64_t r = (v >= 0) ? (v + half) / den : (v - half) / den;
+            y[i] = m4t_mtfp_clamp64(r);
+        }
+    } else {
+        /* x_m_at_to_bx = x_m_at_from_bx × 3^(to-from). Magnifies. */
+        int k = to_bx - from_bx;
+        int64_t mul = pow3_i64(k);
+        for (int i = 0; i < n; i++) {
+            int64_t r = (int64_t)x[i] * mul;
+            y[i] = m4t_mtfp_clamp64(r);
+        }
+    }
+}
+
+void m4t_mtfp_rmsnorm_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    int x_bx, int gamma_bx, int target_bx,
+    m4t_mtfp_t eps_mantissa, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(y && x && gamma);
+
+    /* Internally use the existing rmsnorm path which produces output at
+     * gamma_bx. Then rescale to target_bx if needed.
+     *
+     * Use y as scratch for the gamma_bx output. Then rescale in place. */
+    m4t_mtfp_rmsnorm(y, x, gamma, eps_mantissa, n);
+    /* y is at scale (gamma_bx + (x_bx - x_bx)) = gamma_bx + offset
+     * actually let me re-derive. The implicit-bx rmsnorm output ends up
+     * at gamma_bx if x's bx = the "implicit" bx assumed. But actually
+     * it's at (gamma_bx + 0) — independent of x_bx (RMSNorm normalizes
+     * away the input scale).
+     *
+     * Per the math earlier: y_m = γ_m × x_m / sqrt(mean(x_m²)) — where
+     * the x_bx terms cancel. So y_m is at gamma_bx scale REGARDLESS of
+     * x_bx. Rescale gamma_bx → target_bx. */
+    (void)x_bx;  /* informational only; doesn't affect output bx */
+    if (gamma_bx != target_bx) {
+        m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
+    }
+}
+
+void m4t_mtfp_relu2_inplace_bx(m4t_mtfp_t* x, int x_bx, int target_bx, int n) {
+    if (n <= 0) return;
+    assert(x);
+    int shift_exp = 2 * x_bx - target_bx;
+    assert(shift_exp >= 0 && shift_exp <= 39);
+    int64_t den = pow3_i64(shift_exp);
+    int64_t half = den / 2;
+    for (int i = 0; i < n; i++) {
+        if (x[i] <= 0) { x[i] = 0; continue; }
+        int64_t sq = (int64_t)x[i] * (int64_t)x[i];
+        int64_t r = (sq + half) / den;
+        x[i] = m4t_mtfp_clamp64(r);
+    }
+}
+
+void m4t_mtfp_elementwise_mul_bx(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n)
+{
+    if (n <= 0) return;
+    assert(y && a && b);
+    int shift_exp = a_bx + b_bx - target_bx;
+    assert(shift_exp >= 0 && shift_exp <= 39);
+    int64_t den = pow3_i64(shift_exp);
+    int64_t half = den / 2;
+    for (int i = 0; i < n; i++) {
+        int64_t prod = (int64_t)a[i] * (int64_t)b[i];
+        int64_t r = (prod >= 0) ? (prod + half) / den : (prod - half) / den;
+        y[i] = m4t_mtfp_clamp64(r);
+    }
+}
+
+void m4t_mtfp_bitlinear_scale_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    m4t_mtfp_t absmax_m, int x_bx, int target_bx,
+    int n)
+{
+    if (n <= 0) return;
+    assert(y && y_raw && alpha_ptr);
+    assert(alpha_bx + x_bx - target_bx >= 0);
+    assert(alpha_bx + x_bx - target_bx <= 35);
+
+    int64_t alpha_m = (int64_t)(*alpha_ptr);
+    if (alpha_m == 0) {
+        /* No-α sentinel (skeleton mode); preserve raw values, rescale to target_bx. */
+        m4t_mtfp_rescale_bx(y, y_raw, x_bx, target_bx, n);
+        return;
+    }
+    /* y_m_target = y_raw × α_m × absmax_m / (127 × 3^(α_bx + x_bx - target_bx))
+     * num = α_m × absmax_m  (≤ 2^58, fits int64).
+     * den = 127 × 3^shift_exp (≤ ~10^14 for our ranges, fits int64).
+     * Per-cell prod = y_raw × num: __int128 (y_raw is small but × num × x[i]
+     * can reach 2^88). */
+    int shift_exp = alpha_bx + x_bx - target_bx;
+    int64_t num = alpha_m * (int64_t)absmax_m;
+    int64_t den = 127 * pow3_i64(shift_exp);
+    __int128 half = (__int128)den / 2;
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)y_raw[i] * (__int128)num;
+        __int128 r;
+        if (prod >= 0) r = (prod + half) / den;
+        else           r = (prod - half) / den;
+        int64_t r64;
+        if (r >  (__int128)0x7FFFFFFFFFFFFFFFLL) r64 =  0x7FFFFFFFFFFFFFFFLL;
+        else if (r < -(__int128)0x7FFFFFFFFFFFFFFFLL) r64 = -0x7FFFFFFFFFFFFFFFLL;
+        else r64 = (int64_t)r;
+        y[i] = m4t_mtfp_clamp64(r64);
+    }
+}
+
 /* ── ReLU² + element-wise multiply ─────────────────────────────────────
  *
  * Pure-int. Saturating clamp on output (squared magnitudes exceed

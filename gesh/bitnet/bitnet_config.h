@@ -118,6 +118,11 @@ typedef struct {
     const m4t_mtfp_t* gamma_post_attn_norm;   /* [HIDDEN] */
     const m4t_mtfp_t* gamma_attn_sub_norm;    /* [HIDDEN] */
     const m4t_mtfp_t* gamma_ffn_sub_norm;     /* [INTERMEDIATE] */
+    /* γ block_exps (Phase 2 work-unit 1: bx-aware activation flow). */
+    int gamma_input_norm_block_exp;
+    int gamma_post_attn_norm_block_exp;
+    int gamma_attn_sub_norm_block_exp;
+    int gamma_ffn_sub_norm_block_exp;
 } bitnet_layer_weights_t;
 
 /* ── Whole-model weight set ─────────────────────────────────────────── */
@@ -125,9 +130,12 @@ typedef struct {
 typedef struct {
     /* Embedding + LM head (likely tied; same buffer, different access). */
     const m4t_mtfp_t* embedding;        /* [VOCAB × HIDDEN] MTFP19 mantissas */
+    int embedding_block_exp;
     const m4t_mtfp_t* lm_head;          /* [VOCAB × HIDDEN] MTFP19 mantissas (may alias embedding) */
+    int lm_head_block_exp;
     /* Final pre-LM-head norm. */
     const m4t_mtfp_t* gamma_final_norm; /* [HIDDEN] */
+    int gamma_final_norm_block_exp;
     /* Per-layer weight sets. */
     bitnet_layer_weights_t layers[BITNET_NUM_LAYERS];
 } bitnet_weights_t;

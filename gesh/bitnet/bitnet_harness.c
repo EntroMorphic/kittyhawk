@@ -32,6 +32,18 @@
 #include <stdint.h>
 #include <assert.h>
 
+/* ── Phase 2 work-unit 1: bx-aware activation flow constants. ────────────
+ * Target bx for normal (linear-magnitude) activations through the
+ * network. Picked to give MTFP19_MAX/3^14 ≈ 35 of headroom — comfortable
+ * for BitNet's value range (0.5–10 typical, 30–100 worst-case).
+ *
+ * The FFN intermediate path (between gate_proj and ffn_sub_norm) carries
+ * SQUARED magnitudes (relu²(gate) × up). For gate_real ≤ 6 typical, the
+ * squared product reaches ~200; bx=14 saturates at 35. We use a smaller
+ * FFN_BX that gives wider range (real max 3^(29-FFN_BX) at MTFP19_MAX). */
+#define BITNET_ACT_BX 14
+#define BITNET_FFN_BX 8   /* MTFP19_MAX/3^8 ≈ 88500 real units headroom */
+
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
  *
  * BitLinear forward:  y = (matmul_int_out) × α × absmax / 127
@@ -54,31 +66,20 @@
  * available"), the apply is a no-op (skip vec_scale; output remains
  * raw matmul, useful for skeleton-mode debugging). */
 
-static int64_t pow3_int(int k) {
-    /* Bound: caller computes den = 127 × 3^k, which must fit int64.
-     * 127 × 3^35 = 6.35e18 < INT64_MAX (9.22e18); 3^36 already overflows
-     * after the × 127. For BitNet α (range ~1e-3 to 1), block_exp ≤ ~22
-     * — comfortable. Tighter bound here trades catching overflow vs
-     * supporting smaller α down to ~3^-35 ≈ 2e-17. */
-    assert(k >= 0 && k <= 35);
-    int64_t r = 1;
-    for (int i = 0; i < k; i++) r *= 3;
-    return r;
-}
+/* pow3_int: replaced by m4t_mtfp_*'s internal pow3_i64 since work-unit-1
+ * Phase 2 (bx-aware primitives consume the bx-shift inline). */
 
 static void bitnet_apply_bitlinear_scale(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     const m4t_mtfp_t* alpha_ptr, int alpha_block_exp,
     m4t_mtfp_t absmax, int n)
 {
-    int64_t alpha_m = (int64_t)(*alpha_ptr);
-    if (alpha_m == 0) {
-        if (y != x) memcpy(y, x, (size_t)n * sizeof(m4t_mtfp_t));
-        return;
-    }
-    int64_t num = alpha_m * (int64_t)absmax;
-    int64_t den = (int64_t)127 * pow3_int(alpha_block_exp);
-    m4t_mtfp_vec_scale(y, x, num, den, n);
+    /* bx-aware path (Phase 2 work-unit 1): produce output at
+     * BITNET_ACT_BX assuming the input x_norm was at BITNET_ACT_BX. */
+    m4t_mtfp_bitlinear_scale_bx(y, x, alpha_ptr, alpha_block_exp,
+                                 absmax,
+                                 /*x_bx=*/BITNET_ACT_BX,
+                                 /*target_bx=*/BITNET_ACT_BX, n);
 }
 
 /* ── Scratch alloc / free ────────────────────────────────────────── */
@@ -154,9 +155,13 @@ void bitnet_forward_block(
     /* residual = x */
     memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
-    /* x_norm = input_layernorm(x) */
-    m4t_mtfp_rmsnorm(s->x_norm, s->x, w->gamma_input_norm,
-                        /* eps_mtfp19 */ 1, BITNET_HIDDEN_SIZE);
+    /* x_norm = input_layernorm(x). bx-aware: x at BITNET_ACT_BX,
+     * γ at its loaded bx, output at BITNET_ACT_BX. */
+    m4t_mtfp_rmsnorm_bx(s->x_norm, s->x, w->gamma_input_norm,
+                        /*x_bx=*/BITNET_ACT_BX,
+                        /*gamma_bx=*/w->gamma_input_norm_block_exp,
+                        /*target_bx=*/BITNET_ACT_BX,
+                        /*eps_mantissa=*/1, BITNET_HIDDEN_SIZE);
     /* Snapshot for the dump — s->x_norm gets overwritten by
      * post_attention_layernorm later in the block. */
     memcpy(s->x_norm_input, s->x_norm,
@@ -348,8 +353,10 @@ void bitnet_forward_block(
     }
 
     /* attn_sub_norm: y = γ · y · rsqrt(mean(y²) + ε) */
-    m4t_mtfp_rmsnorm(s->attn_sub_norm, s->attn_output,
-                        w->gamma_attn_sub_norm, 1, BITNET_HIDDEN_SIZE);
+    m4t_mtfp_rmsnorm_bx(s->attn_sub_norm, s->attn_output,
+                        w->gamma_attn_sub_norm,
+                        BITNET_ACT_BX, w->gamma_attn_sub_norm_block_exp,
+                        BITNET_ACT_BX, /*eps=*/1, BITNET_HIDDEN_SIZE);
 
     /* O projection: y = attn_sub_norm @ W_o^T (BitLinear, A8-quantized).
      * Per-projection input — own A8 quantize. */
@@ -378,41 +385,57 @@ void bitnet_forward_block(
     memcpy(s->residual, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
 
     /* x_norm = post_attention_layernorm(x) */
-    m4t_mtfp_rmsnorm(s->x_norm, s->x, w->gamma_post_attn_norm,
-                        1, BITNET_HIDDEN_SIZE);
+    m4t_mtfp_rmsnorm_bx(s->x_norm, s->x, w->gamma_post_attn_norm,
+                        BITNET_ACT_BX, w->gamma_post_attn_norm_block_exp,
+                        BITNET_ACT_BX, /*eps=*/1, BITNET_HIDDEN_SIZE);
 
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
      * input — A8-quantize ONCE and reuse (RC-11 fix). */
     if (w->w_gate != NULL && w->w_up != NULL) {
         s->q_absmax = m4t_a8_quantize(s->q_int8, s->x_norm,
                                        BITNET_HIDDEN_SIZE);
+        /* gate, up are FFN intermediate signals — typical real values
+         * ~80 (per HF trace), well above ACT_BX's max ~35. Output at
+         * FFN_BX (wider headroom). */
         m4t_ternary_5in8_matmul_bt(s->gate, (const m4t_trit_t*)s->q_int8, w->w_gate,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
-        bitnet_apply_bitlinear_scale(s->gate, s->gate,
-                                      w->alpha_gate, w->alpha_gate_block_exp,
-                                      s->q_absmax, BITNET_INTERMEDIATE_SIZE);
+        m4t_mtfp_bitlinear_scale_bx(s->gate, s->gate,
+                                     w->alpha_gate, w->alpha_gate_block_exp,
+                                     s->q_absmax,
+                                     BITNET_ACT_BX, BITNET_FFN_BX,
+                                     BITNET_INTERMEDIATE_SIZE);
         m4t_ternary_5in8_matmul_bt(s->up,   (const m4t_trit_t*)s->q_int8, w->w_up,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
-        bitnet_apply_bitlinear_scale(s->up, s->up,
-                                      w->alpha_up, w->alpha_up_block_exp,
-                                      s->q_absmax, BITNET_INTERMEDIATE_SIZE);
+        m4t_mtfp_bitlinear_scale_bx(s->up, s->up,
+                                     w->alpha_up, w->alpha_up_block_exp,
+                                     s->q_absmax,
+                                     BITNET_ACT_BX, BITNET_FFN_BX,
+                                     BITNET_INTERMEDIATE_SIZE);
     } else {
         memset(s->gate, 0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
         memset(s->up,   0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
     }
 
-    /* gate_act = relu²(gate). */
-    m4t_mtfp_relu2_inplace(s->gate, BITNET_INTERMEDIATE_SIZE);
-    /* gate_act = gate * up. */
-    m4t_mtfp_elementwise_mul(s->gate_act, s->gate, s->up,
-                             BITNET_INTERMEDIATE_SIZE);
+    /* gate_act = relu²(gate) × up. gate and up are at FFN_BX; relu²
+     * doubles the bx (gate already at FFN_BX, squared at 2×FFN_BX, then
+     * rescaled back to FFN_BX). The mul: both operands at FFN_BX, output
+     * at FFN_BX. */
+    m4t_mtfp_relu2_inplace_bx(s->gate, BITNET_FFN_BX, BITNET_FFN_BX,
+                              BITNET_INTERMEDIATE_SIZE);
+    m4t_mtfp_elementwise_mul_bx(s->gate_act,
+                                s->gate, BITNET_FFN_BX,
+                                s->up,   BITNET_FFN_BX,
+                                BITNET_FFN_BX, BITNET_INTERMEDIATE_SIZE);
 
-    /* ffn_sub_norm(gate_act). */
-    m4t_mtfp_rmsnorm(s->ffn_sub_norm, s->gate_act,
-                        w->gamma_ffn_sub_norm, 1, BITNET_INTERMEDIATE_SIZE);
+    /* ffn_sub_norm(gate_act). gate_act is at FFN_BX. Output at ACT_BX
+     * (resumes the linear-magnitude flow for down_proj). */
+    m4t_mtfp_rmsnorm_bx(s->ffn_sub_norm, s->gate_act,
+                        w->gamma_ffn_sub_norm,
+                        BITNET_FFN_BX, w->gamma_ffn_sub_norm_block_exp,
+                        BITNET_ACT_BX, /*eps=*/1, BITNET_INTERMEDIATE_SIZE);
 
     /* down = ffn_sub_norm @ W_down^T (BitLinear, A8). Different input than
-     * gate/up — own A8 quantize. */
+     * gate/up — own A8 quantize. ffn_sub_norm output is at ACT_BX. */
     if (w->w_down != NULL) {
         s->q_absmax = m4t_a8_quantize(s->q_int8, s->ffn_sub_norm,
                                        BITNET_INTERMEDIATE_SIZE);
@@ -512,6 +535,7 @@ static int dump_activations_to_file(
 static void bitnet_embed(
     m4t_mtfp_t* x_out,
     const m4t_mtfp_t* embedding,
+    int embedding_bx,
     int token_id)
 {
     if (embedding == NULL) {
@@ -519,7 +543,10 @@ static void bitnet_embed(
         return;
     }
     const m4t_mtfp_t* row = embedding + (size_t)token_id * BITNET_HIDDEN_SIZE;
-    memcpy(x_out, row, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
+    /* Phase 2 work-unit 1: rescale embedding row from its stored bx
+     * into the activation flow's BITNET_ACT_BX. */
+    m4t_mtfp_rescale_bx(x_out, row, embedding_bx, BITNET_ACT_BX,
+                        BITNET_HIDDEN_SIZE);
 }
 
 /* LM head: logits = x @ lm_head^T. lm_head is [VOCAB × HIDDEN] MTFP19
@@ -646,7 +673,7 @@ int main(int argc, char** argv) {
     /* Input: embed token_id (or fallback pattern in skeleton mode). */
     m4t_mtfp_t x[BITNET_HIDDEN_SIZE];
     if (loaded_ok && weights.embedding != NULL) {
-        bitnet_embed(x, weights.embedding, token_id);
+        bitnet_embed(x, weights.embedding, weights.embedding_block_exp, token_id);
     } else {
         for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) x[i] = (i % 7) - 3;
     }
@@ -708,7 +735,7 @@ int main(int argc, char** argv) {
         if (n_prompt_tokens > 0) {
             int tok = prompt_tokens[pos];
             if (loaded_ok && weights.embedding != NULL) {
-                bitnet_embed(x, weights.embedding, tok);
+                bitnet_embed(x, weights.embedding, weights.embedding_block_exp, tok);
             } else {
                 for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) x[i] = (i % 7) - 3;
             }
@@ -754,8 +781,9 @@ int main(int argc, char** argv) {
          * prompt/gen forward). */
         m4t_mtfp_t x_finalnorm[BITNET_HIDDEN_SIZE];
         if (loaded_ok && weights.gamma_final_norm != NULL) {
-            m4t_mtfp_rmsnorm(x_finalnorm, x, weights.gamma_final_norm,
-                             /*eps=*/1, BITNET_HIDDEN_SIZE);
+            m4t_mtfp_rmsnorm_bx(x_finalnorm, x, weights.gamma_final_norm,
+                                BITNET_ACT_BX, weights.gamma_final_norm_block_exp,
+                                BITNET_ACT_BX, /*eps=*/1, BITNET_HIDDEN_SIZE);
         } else {
             memcpy(x_finalnorm, x, sizeof(x_finalnorm));
         }
@@ -770,7 +798,7 @@ int main(int argc, char** argv) {
 
         /* Embed the new token; forward at pos. */
         if (loaded_ok && weights.embedding != NULL) {
-            bitnet_embed(x, weights.embedding, next_tok);
+            bitnet_embed(x, weights.embedding, weights.embedding_block_exp, next_tok);
         } else {
             for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) x[i] = (i % 7) - 3;
         }
@@ -783,8 +811,9 @@ int main(int argc, char** argv) {
     /* Final norm + LM head on the last x (post all forwards). */
     if (loaded_ok && weights.gamma_final_norm != NULL) {
         m4t_mtfp_t x_norm[BITNET_HIDDEN_SIZE];
-        m4t_mtfp_rmsnorm(x_norm, x, weights.gamma_final_norm,
-                         /*eps=*/1, BITNET_HIDDEN_SIZE);
+        m4t_mtfp_rmsnorm_bx(x_norm, x, weights.gamma_final_norm,
+                            BITNET_ACT_BX, weights.gamma_final_norm_block_exp,
+                            BITNET_ACT_BX, /*eps=*/1, BITNET_HIDDEN_SIZE);
         memcpy(x, x_norm, sizeof(x));
     }
 
