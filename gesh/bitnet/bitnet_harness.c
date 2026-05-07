@@ -42,7 +42,13 @@
  * squared product reaches ~200; bx=14 saturates at 35. We use a smaller
  * FFN_BX that gives wider range (real max 3^(29-FFN_BX) at MTFP19_MAX). */
 #define BITNET_ACT_BX 14
-#define BITNET_FFN_BX 8   /* MTFP19_MAX/3^8 ≈ 88500 real units headroom */
+#define BITNET_FFN_BX 8       /* MTFP19_MAX/3^8 ≈ 88500 — gate, up */
+#define BITNET_GATE_ACT_BX 2  /* MTFP19_MAX/3^2 ≈ 64.5M headroom for
+                               * gate²×up products. Empirically: Pearson
+                               * is invariant for GATE_ACT_BX ∈ [1, 6];
+                               * picking 2 to preserve ~17 fractional
+                               * bits below 1.0 while covering the 6M+
+                               * outlier range cleanly. */
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
  *
@@ -416,22 +422,23 @@ void bitnet_forward_block(
         memset(s->up,   0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
     }
 
-    /* gate_act = relu²(gate) × up. gate and up are at FFN_BX; relu²
-     * doubles the bx (gate already at FFN_BX, squared at 2×FFN_BX, then
-     * rescaled back to FFN_BX). The mul: both operands at FFN_BX, output
-     * at FFN_BX. */
+    /* gate_act = relu²(gate) × up. gate at FFN_BX, relu² stays at FFN_BX
+     * (gate²_real ≤ ~10K fits MTFP19_MAX/3^8 ≈ 88K). Mul with up (FFN_BX)
+     * produces products up to gate²×up ≈ 6M for outliers — needs the wider
+     * GATE_ACT_BX. */
     m4t_mtfp_relu2_inplace_bx(s->gate, BITNET_FFN_BX, BITNET_FFN_BX,
                               BITNET_INTERMEDIATE_SIZE);
     m4t_mtfp_elementwise_mul_bx(s->gate_act,
                                 s->gate, BITNET_FFN_BX,
                                 s->up,   BITNET_FFN_BX,
-                                BITNET_FFN_BX, BITNET_INTERMEDIATE_SIZE);
+                                BITNET_GATE_ACT_BX,
+                                BITNET_INTERMEDIATE_SIZE);
 
-    /* ffn_sub_norm(gate_act). gate_act is at FFN_BX. Output at ACT_BX
-     * (resumes the linear-magnitude flow for down_proj). */
+    /* ffn_sub_norm(gate_act). gate_act is at GATE_ACT_BX. Output at
+     * ACT_BX (resumes linear-magnitude flow for down_proj). */
     m4t_mtfp_rmsnorm_bx(s->ffn_sub_norm, s->gate_act,
                         w->gamma_ffn_sub_norm,
-                        BITNET_FFN_BX, w->gamma_ffn_sub_norm_block_exp,
+                        BITNET_GATE_ACT_BX, w->gamma_ffn_sub_norm_block_exp,
                         BITNET_ACT_BX, /*eps=*/1, BITNET_INTERMEDIATE_SIZE);
 
     /* down = ffn_sub_norm @ W_down^T (BitLinear, A8). Different input than
