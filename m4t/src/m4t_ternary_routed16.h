@@ -35,6 +35,28 @@
  * crossovers. routed16 is the right kernel only when sparsity exceeds
  * the relevant crossover for the target shape.
  *
+ * ── BitNet activation-sparsity measurement (2026-05-07) ─────────────
+ *
+ * To check whether ANY BitLinear in BitNet inference reads sufficiently
+ * sparse input to make routed16 viable, we measured every BitLinear's
+ * input across 8 prompts × 9 positions × 30 layers = 1680 (layer,
+ * position) samples. (See journal/routed16_activation_sparsity_finding.md
+ * + scripts/measure_activation_sparsity.py.) Result:
+ *
+ *   BitLinear      input          max sparsity    crossover    viable?
+ *   q/k/v/gate/up  x_norm           0.23%           96-97%       no
+ *   o_proj         attn_sub_norm   24.14%           96-97%       no
+ *   down_proj      ffn_sub_norm    87.49%           92-94%       no (5% short)
+ *
+ * 0 / 1680 samples reach any crossover. routed16 has NO current win
+ * condition in the BitNet forward pass. The closest case (down_proj
+ * at FFN peak sparsity ~87%) still loses to dense by ~14%.
+ *
+ * routed16 stays in libm4t as infrastructure for operations whose
+ * sparsity exceeds 92% — e.g. structured top-k attention, MoE
+ * routing patterns, retrieval-sparse queries. BitNet's training
+ * recipe does not produce such sparsity.
+ *
  * Production callers should select the kernel based on measured
  * sparsity for the target weight tensor. This header exposes both the
  * encoder and the kernel so that callers can pre-pack offline.
