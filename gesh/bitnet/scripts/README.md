@@ -65,9 +65,37 @@ For Phase 1: **option (a)**. `convert_weights.py` chooses a per-tensor power-of-
 
 Both gaps documented in CHANGELOG via the next commit.
 
+## End-to-end ε comparison (Phase 1 gate)
+
+The substrate's per-layer fidelity vs HF reference is measured by:
+
+```
+# 1. Convert HF weights → substrate blob (one-time, ~1 GB):
+python convert_weights.py --output bitnet_b158_2b4t.bin
+
+# 2. Dump HF reference activations (one-time, ~hundreds of MB):
+python dump_reference.py --max-layers 30 --output bitnet_ref.npz
+
+# 3. Run substrate harness with --dump:
+./build/gesh/bitnet_harness bitnet_b158_2b4t.bin \
+    --layers 30 --dump my_dump
+
+# 4. Compute scale-invariant per-layer ε:
+python compare_activations.py \
+    --c-dump-prefix my_dump \
+    --reference bitnet_ref.npz \
+    --max-layers 30 \
+    --report-csv eps_per_layer.csv
+```
+
+Phase 1 success: `sc_inv_eps` is bounded (not exponentially growing
+across layer index). See `journal/bitnet_phase1_closeout.md` for
+the full criteria.
+
 ## Cross-references
 
-- LMM cycle: `journal/bitnet_phase1_*`
+- LMM cycle: `journal/bitnet_phase1_{raw,nodes,reflect,synthesize,closeout}.md`
+- Per-primitive design: `journal/{rsqrt,rope,softmax,a8_vec_scale}_design_lmm.md`
 - Architecture source: `huggingface.co/microsoft/bitnet-b1.58-2B-4T`
 - C harness: `gesh/bitnet/bitnet_harness.c`
 - Substrate config: `gesh/bitnet/bitnet_config.h`
