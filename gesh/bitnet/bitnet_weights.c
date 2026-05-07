@@ -41,9 +41,6 @@
 static int idx_embedding(void) { return 0; }
 static int idx_layer_base(int layer) { return 1 + layer * TENSORS_PER_LAYER; }
 static int idx_layer_w(int layer, int slot)   { return idx_layer_base(layer) + slot; }      /* slot 0..6 */
-/* idx_layer_alpha kept for future use when α scales are wired into the
- * forward pass (work-unit 5). Currently unreferenced. */
-__attribute__((unused))
 static int idx_layer_alpha(int layer, int slot) { return idx_layer_base(layer) + 7 + slot; } /* slot 0..6 */
 static int idx_layer_gamma(int layer, int slot) { return idx_layer_base(layer) + 14 + slot; } /* slot 0..3 */
 static int idx_final_norm(int layer_count) { return 1 + layer_count * TENSORS_PER_LAYER; }
@@ -144,10 +141,21 @@ int bitnet_weights_load(
         lw->w_gate  = TENSOR_PTR(idx_layer_w(l, 4), uint8_t);
         lw->w_up    = TENSOR_PTR(idx_layer_w(l, 5), uint8_t);
         lw->w_down  = TENSOR_PTR(idx_layer_w(l, 6), uint8_t);
-        /* α scales (slots 7..13) — not stored on bitnet_layer_weights_t in
-         * its current shape; the harness fetches them via block_exps and
-         * tensor index when applying scale-vector multiply. Future
-         * cleanup: extend bitnet_layer_weights_t with α pointers. */
+        /* α scales (slots 7..13) — work-unit 5 wires these in. */
+        lw->alpha_q     = TENSOR_PTR(idx_layer_alpha(l, 0), m4t_mtfp_t);
+        lw->alpha_q_block_exp = handle->block_exps[idx_layer_alpha(l, 0)];
+        lw->alpha_k     = TENSOR_PTR(idx_layer_alpha(l, 1), m4t_mtfp_t);
+        lw->alpha_k_block_exp = handle->block_exps[idx_layer_alpha(l, 1)];
+        lw->alpha_v     = TENSOR_PTR(idx_layer_alpha(l, 2), m4t_mtfp_t);
+        lw->alpha_v_block_exp = handle->block_exps[idx_layer_alpha(l, 2)];
+        lw->alpha_o     = TENSOR_PTR(idx_layer_alpha(l, 3), m4t_mtfp_t);
+        lw->alpha_o_block_exp = handle->block_exps[idx_layer_alpha(l, 3)];
+        lw->alpha_gate  = TENSOR_PTR(idx_layer_alpha(l, 4), m4t_mtfp_t);
+        lw->alpha_gate_block_exp = handle->block_exps[idx_layer_alpha(l, 4)];
+        lw->alpha_up    = TENSOR_PTR(idx_layer_alpha(l, 5), m4t_mtfp_t);
+        lw->alpha_up_block_exp = handle->block_exps[idx_layer_alpha(l, 5)];
+        lw->alpha_down  = TENSOR_PTR(idx_layer_alpha(l, 6), m4t_mtfp_t);
+        lw->alpha_down_block_exp = handle->block_exps[idx_layer_alpha(l, 6)];
         /* γ vectors (slots 14..17). */
         lw->gamma_input_norm     = TENSOR_PTR(idx_layer_gamma(l, 0), m4t_mtfp_t);
         lw->gamma_post_attn_norm = TENSOR_PTR(idx_layer_gamma(l, 1), m4t_mtfp_t);

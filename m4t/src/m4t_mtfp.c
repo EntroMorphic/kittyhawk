@@ -1335,6 +1335,140 @@ void m4t_mtfp_softmax_scalar_ref(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
     free(e);
 }
 
+/* ── A8 quantize / dequantize ──────────────────────────────────────────
+ *
+ * Pure-int implementation. The integer divide (int64) and the
+ * round-half-away-from-zero step happen per cell.
+ *
+ * Quantize:
+ *   absmax = max |x|
+ *   y[i] = round(x[i] · 127 / absmax), clamped to [-127, 127]
+ *
+ * Dequantize:
+ *   y[i] = round(x_int8[i] · absmax / 127), MTFP19-clamped */
+
+m4t_mtfp_t m4t_a8_quantize_scalar_ref(int8_t* y, const m4t_mtfp_t* x, int n) {
+    /* FP test oracle. */
+    if (n <= 0) return 0;
+    assert(y && x);
+    m4t_mtfp_t absmax = 0;
+    for (int i = 0; i < n; i++) {
+        m4t_mtfp_t a = x[i] < 0 ? -x[i] : x[i];
+        if (a > absmax) absmax = a;
+    }
+    if (absmax == 0) {
+        memset(y, 0, (size_t)n);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        double v = (double)x[i] * 127.0 / (double)absmax;
+        int32_t r = (int32_t)(v < 0 ? v - 0.5 : v + 0.5);
+        if (r >  127) r =  127;
+        if (r < -127) r = -127;
+        y[i] = (int8_t)r;
+    }
+    return absmax;
+}
+
+m4t_mtfp_t m4t_a8_quantize(int8_t* y, const m4t_mtfp_t* x, int n) {
+    if (n <= 0) return 0;
+    assert(y && x);
+    m4t_mtfp_t absmax = 0;
+    for (int i = 0; i < n; i++) {
+        m4t_mtfp_t a = x[i] < 0 ? -x[i] : x[i];
+        if (a > absmax) absmax = a;
+    }
+    if (absmax == 0) {
+        memset(y, 0, (size_t)n);
+        return 0;
+    }
+    int64_t denom = (int64_t)absmax;
+    int64_t half  = denom / 2;
+    for (int i = 0; i < n; i++) {
+        int64_t num = (int64_t)x[i] * 127;
+        /* Round half-away-from-zero. C's / truncates toward zero. */
+        int64_t q;
+        if (num >= 0) q = (num + half) / denom;
+        else          q = (num - half) / denom;
+        if (q >  127) q =  127;
+        if (q < -127) q = -127;
+        y[i] = (int8_t)q;
+    }
+    return absmax;
+}
+
+void m4t_a8_dequantize_scalar_ref(
+    m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax, int n)
+{
+    if (n <= 0) return;
+    assert(y && x);
+    for (int i = 0; i < n; i++) {
+        double v = (double)x[i] * (double)absmax / 127.0;
+        int64_t r = (int64_t)(v < 0 ? v - 0.5 : v + 0.5);
+        y[i] = m4t_mtfp_clamp64(r);
+    }
+}
+
+void m4t_a8_dequantize(
+    m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax, int n)
+{
+    if (n <= 0) return;
+    assert(y && x);
+    /* Round half-away-from-zero with int. */
+    for (int i = 0; i < n; i++) {
+        int64_t num = (int64_t)x[i] * (int64_t)absmax;
+        int64_t r;
+        if (num >= 0) r = (num + 63) / 127;  /* 63 = floor(127/2) */
+        else          r = (num - 63) / 127;
+        y[i] = m4t_mtfp_clamp64(r);
+    }
+}
+
+/* ── Vector scale by num/den ratio ─────────────────────────────────────
+ *
+ * y[i] = round(x[i] · num / den), saturating to ±M4T_MTFP_MAX_VAL.
+ * __int128 for the x·num product (can reach 2^92). */
+
+void m4t_mtfp_vec_scale_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int64_t num, int64_t den, int n)
+{
+    if (n <= 0) return;
+    assert(y && x);
+    assert(den > 0);
+    double dnum = (double)num;
+    double dden = (double)den;
+    for (int i = 0; i < n; i++) {
+        double v = (double)x[i] * dnum / dden;
+        if (v >  (double)M4T_MTFP_MAX_VAL) v =  (double)M4T_MTFP_MAX_VAL;
+        if (v < -(double)M4T_MTFP_MAX_VAL) v = -(double)M4T_MTFP_MAX_VAL;
+        int64_t r = (int64_t)(v < 0 ? v - 0.5 : v + 0.5);
+        y[i] = (m4t_mtfp_t)r;
+    }
+}
+
+void m4t_mtfp_vec_scale(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int64_t num, int64_t den, int n)
+{
+    if (n <= 0) return;
+    assert(y && x);
+    assert(den > 0);
+    __int128 half = (__int128)den / 2;
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)x[i] * (__int128)num;  /* max ~2^92 */
+        __int128 r;
+        if (prod >= 0) r = (prod + half) / den;
+        else           r = (prod - half) / den;
+        /* Clamp the __int128 to int64 first, then to MTFP19. */
+        int64_t r64;
+        if (r >  (__int128)0x7FFFFFFFFFFFFFFFLL) r64 =  0x7FFFFFFFFFFFFFFFLL;
+        else if (r < -(__int128)0x7FFFFFFFFFFFFFFFLL) r64 = -0x7FFFFFFFFFFFFFFFLL;
+        else r64 = (int64_t)r;
+        y[i] = m4t_mtfp_clamp64(r64);
+    }
+}
+
 void m4t_mtfp_rope_apply_scalar_ref(
     m4t_mtfp_t* q, m4t_mtfp_t* k,
     int position,

@@ -171,6 +171,12 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_softmax)
     add_test(NAME m4t_softmax COMMAND test_m4t_softmax)
 
+    # A8 quantize/dequantize + vec_scale — work-unit 5.
+    add_executable(test_m4t_a8_vec_scale tests/test_m4t_a8_vec_scale.c)
+    target_link_libraries(test_m4t_a8_vec_scale PRIVATE m4t_test m)
+    gesh_test_undebug(test_m4t_a8_vec_scale)
+    add_test(NAME m4t_a8_vec_scale COMMAND test_m4t_a8_vec_scale)
+
     # Ternary MAC NEON path test. Bit-exact verification of production
     # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
     # M4T_HAS_NEON) against m4t_mtfp_ternary_matmul_bt_scalar_ref

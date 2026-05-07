@@ -31,6 +31,55 @@
 #include <string.h>
 #include <assert.h>
 
+/* ── BitLinear scale composition (work-unit 5) ───────────────────────────
+ *
+ * BitLinear forward:  y = (matmul_int_out) × α × absmax / 127
+ * where:
+ *   - α is the BitLinear's per-tensor scale, stored as MTFP19
+ *     (mantissa × 3^(-block_exp)).
+ *   - absmax is the activation's per-token absmax (from A8 quantize).
+ *   - matmul_int_out is the raw int-mantissa output from
+ *     m4t_ternary_5in8_matmul_bt.
+ *
+ * Composing: y = raw × (α_m / 3^bx) × absmax / 127
+ *              = raw × (α_m × absmax) / (127 × 3^bx)
+ *
+ * num = α_m × absmax, den = 127 × 3^bx.
+ *
+ * Constraint: bx ≤ ~38 to keep den ≤ int64 max. For BitNet b1.58-2B-4T
+ * α magnitudes (range ~1e-3 to ~1), typical block_exp ≤ 25. Documented.
+ *
+ * If α_mantissa == 0 (convert_weights.py's sentinel for "no α
+ * available"), the apply is a no-op (skip vec_scale; output remains
+ * raw matmul, useful for skeleton-mode debugging). */
+
+static int64_t pow3_int(int k) {
+    /* Bound: caller computes den = 127 × 3^k, which must fit int64.
+     * 127 × 3^35 = 6.35e18 < INT64_MAX (9.22e18); 3^36 already overflows
+     * after the × 127. For BitNet α (range ~1e-3 to 1), block_exp ≤ ~22
+     * — comfortable. Tighter bound here trades catching overflow vs
+     * supporting smaller α down to ~3^-35 ≈ 2e-17. */
+    assert(k >= 0 && k <= 35);
+    int64_t r = 1;
+    for (int i = 0; i < k; i++) r *= 3;
+    return r;
+}
+
+static void bitnet_apply_bitlinear_scale(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    const m4t_mtfp_t* alpha_ptr, int alpha_block_exp,
+    m4t_mtfp_t absmax, int n)
+{
+    int64_t alpha_m = (int64_t)(*alpha_ptr);
+    if (alpha_m == 0) {
+        if (y != x) memcpy(y, x, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+    int64_t num = alpha_m * (int64_t)absmax;
+    int64_t den = (int64_t)127 * pow3_int(alpha_block_exp);
+    m4t_mtfp_vec_scale(y, x, num, den, n);
+}
+
 /* ── Scratch alloc / free ────────────────────────────────────────── */
 
 void bitnet_block_scratch_alloc(bitnet_block_scratch_t* s) {
@@ -130,20 +179,26 @@ static void bitnet_forward_block(
      * contract. */
     if (w->w_q != NULL) {
         /* A8-quantize x_norm ONCE → reused for Q, K, V. */
-        s->q_absmax = bitnet_stub_a8_quantize(s->q_int8, s->x_norm,
-                                               BITNET_HIDDEN_SIZE);
-        /* Q = x_int8 @ W_q^T (substrate matmul, output MTFP19 mantissa). */
+        s->q_absmax = m4t_a8_quantize(s->q_int8, s->x_norm,
+                                       BITNET_HIDDEN_SIZE);
+        /* Q = x_int8 @ W_q^T → raw mantissas → scale apply. */
         m4t_ternary_5in8_matmul_bt(s->q, (const m4t_trit_t*)s->q_int8, w->w_q,
                                     /*M=*/1, BITNET_HIDDEN_SIZE,
                                     /*N=*/BITNET_HIDDEN_SIZE);
-        /* TODO(work-unit 5, gap #5): apply α_q × s->q_absmax / 127 scale.
-         * Until then, the matmul output is in raw int-mantissa units —
-         * proportional to BitNet's reference output but not equal to it. */
+        bitnet_apply_bitlinear_scale(s->q, s->q,
+                                      w->alpha_q, w->alpha_q_block_exp,
+                                      s->q_absmax, BITNET_HIDDEN_SIZE);
         /* K, V projections (smaller output dim due to GQA). */
         m4t_ternary_5in8_matmul_bt(s->k, (const m4t_trit_t*)s->q_int8, w->w_k,
                                     1, BITNET_HIDDEN_SIZE, BITNET_KV_PROJ_DIM);
+        bitnet_apply_bitlinear_scale(s->k, s->k,
+                                      w->alpha_k, w->alpha_k_block_exp,
+                                      s->q_absmax, BITNET_KV_PROJ_DIM);
         m4t_ternary_5in8_matmul_bt(s->v, (const m4t_trit_t*)s->q_int8, w->w_v,
                                     1, BITNET_HIDDEN_SIZE, BITNET_KV_PROJ_DIM);
+        bitnet_apply_bitlinear_scale(s->v, s->v,
+                                      w->alpha_v, w->alpha_v_block_exp,
+                                      s->q_absmax, BITNET_KV_PROJ_DIM);
     } else {
         /* No weights loaded — skeleton mode. Zero outputs. */
         memset(s->q, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
@@ -174,11 +229,13 @@ static void bitnet_forward_block(
     /* O projection: y = attn_sub_norm @ W_o^T (BitLinear, A8-quantized).
      * Per-projection input — own A8 quantize. */
     if (w->w_o != NULL) {
-        s->q_absmax = bitnet_stub_a8_quantize(s->q_int8, s->attn_sub_norm,
-                                               BITNET_HIDDEN_SIZE);
+        s->q_absmax = m4t_a8_quantize(s->q_int8, s->attn_sub_norm,
+                                       BITNET_HIDDEN_SIZE);
         m4t_ternary_5in8_matmul_bt(s->x, (const m4t_trit_t*)s->q_int8, w->w_o,
                                     1, BITNET_HIDDEN_SIZE, BITNET_HIDDEN_SIZE);
-        /* TODO(work-unit 5, gap #5): apply α_o × s->q_absmax / 127 scale. */
+        bitnet_apply_bitlinear_scale(s->x, s->x,
+                                      w->alpha_o, w->alpha_o_block_exp,
+                                      s->q_absmax, BITNET_HIDDEN_SIZE);
     } else {
         memcpy(s->x, s->attn_sub_norm, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
@@ -202,12 +259,18 @@ static void bitnet_forward_block(
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
      * input — A8-quantize ONCE and reuse (RC-11 fix). */
     if (w->w_gate != NULL && w->w_up != NULL) {
-        s->q_absmax = bitnet_stub_a8_quantize(s->q_int8, s->x_norm,
-                                               BITNET_HIDDEN_SIZE);
+        s->q_absmax = m4t_a8_quantize(s->q_int8, s->x_norm,
+                                       BITNET_HIDDEN_SIZE);
         m4t_ternary_5in8_matmul_bt(s->gate, (const m4t_trit_t*)s->q_int8, w->w_gate,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
+        bitnet_apply_bitlinear_scale(s->gate, s->gate,
+                                      w->alpha_gate, w->alpha_gate_block_exp,
+                                      s->q_absmax, BITNET_INTERMEDIATE_SIZE);
         m4t_ternary_5in8_matmul_bt(s->up,   (const m4t_trit_t*)s->q_int8, w->w_up,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
+        bitnet_apply_bitlinear_scale(s->up, s->up,
+                                      w->alpha_up, w->alpha_up_block_exp,
+                                      s->q_absmax, BITNET_INTERMEDIATE_SIZE);
     } else {
         memset(s->gate, 0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
         memset(s->up,   0, BITNET_INTERMEDIATE_SIZE * sizeof(m4t_mtfp_t));
@@ -226,10 +289,13 @@ static void bitnet_forward_block(
     /* down = ffn_sub_norm @ W_down^T (BitLinear, A8). Different input than
      * gate/up — own A8 quantize. */
     if (w->w_down != NULL) {
-        s->q_absmax = bitnet_stub_a8_quantize(s->q_int8, s->ffn_sub_norm,
-                                               BITNET_INTERMEDIATE_SIZE);
+        s->q_absmax = m4t_a8_quantize(s->q_int8, s->ffn_sub_norm,
+                                       BITNET_INTERMEDIATE_SIZE);
         m4t_ternary_5in8_matmul_bt(s->x, (const m4t_trit_t*)s->q_int8, w->w_down,
                                     1, BITNET_INTERMEDIATE_SIZE, BITNET_HIDDEN_SIZE);
+        bitnet_apply_bitlinear_scale(s->x, s->x,
+                                      w->alpha_down, w->alpha_down_block_exp,
+                                      s->q_absmax, BITNET_HIDDEN_SIZE);
     } else {
         memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }

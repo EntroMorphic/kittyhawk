@@ -61,7 +61,9 @@ void bitnet_stub_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
 }
 
 /* ── A8 quantize / dequantize ────────────────────────────────────── */
-
+/* Removed work-unit 5: replaced by m4t_a8_quantize/m4t_a8_dequantize
+ * (substrate primitives in m4t_mtfp.h). */
+#if 0
 m4t_mtfp_t bitnet_stub_a8_quantize(int8_t* y, const m4t_mtfp_t* x, int n) {
     /* Per RC-3 (red-team 2026-05-06): the returned value is the
      * per-token absmax, NOT the scale (= absmax/127). Dequant applies
@@ -98,6 +100,7 @@ void bitnet_stub_a8_dequantize(
         y[i] = clamp_to_mtfp19((int64_t)v);
     }
 }
+#endif  /* removed A8 stubs */
 
 /* ── Element-wise ops ────────────────────────────────────────────── */
 

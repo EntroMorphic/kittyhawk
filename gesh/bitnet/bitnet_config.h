@@ -98,6 +98,19 @@ typedef struct {
     const uint8_t* w_gate;     /* [INTERMEDIATE × ⌈HIDDEN/5⌉] */
     const uint8_t* w_up;       /* [INTERMEDIATE × ⌈HIDDEN/5⌉] */
     const uint8_t* w_down;     /* [HIDDEN × ⌈INTERMEDIATE/5⌉] */
+
+    /* BitLinear α scales (work-unit 5). One scalar per projection.
+     * α stored as MTFP19 (mantissa + per-tensor block_exp).
+     * Real α = mantissa[0] × 3^block_exp. Used at the BitLinear scale
+     * apply step: y = matmul_out × α × absmax / 127. */
+    const m4t_mtfp_t* alpha_q;     int alpha_q_block_exp;
+    const m4t_mtfp_t* alpha_k;     int alpha_k_block_exp;
+    const m4t_mtfp_t* alpha_v;     int alpha_v_block_exp;
+    const m4t_mtfp_t* alpha_o;     int alpha_o_block_exp;
+    const m4t_mtfp_t* alpha_gate;  int alpha_gate_block_exp;
+    const m4t_mtfp_t* alpha_up;    int alpha_up_block_exp;
+    const m4t_mtfp_t* alpha_down;  int alpha_down_block_exp;
+
     /* RMSNorm γ scales (MTFP19 mantissas). RC-4: use m4t_mtfp_t to make
      * the substrate-native semantic explicit (typedef'd to int32_t but
      * the type carries the intent). */

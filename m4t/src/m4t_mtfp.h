@@ -493,6 +493,50 @@ void m4t_mtfp_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n);
  * shape as production. Tolerance comparison. */
 void m4t_mtfp_softmax_scalar_ref(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n);
 
+/* ── A8 quantize / dequantize ──────────────────────────────────────────
+ *
+ * Per-tensor absmax + int8 quantization, matching BitNet's W1.58A8 spec.
+ *
+ *   y_int8[i] = round(x[i] · 127 / absmax),  clamped to [-127, 127]
+ *   absmax    = max_i |x[i]|
+ *
+ * Quantize returns absmax (caller stores; needed for dequant or
+ * vec_scale). For all-zero input, returns 0 and zeros y.
+ *
+ * Round-half-away-from-zero (matches torch.round / HF reference).
+ * Per-cell scalar loop (no NEON int-divide intrinsic; documented per
+ * the cross-exp accum's degenerate-case precedent).
+ *
+ * Per journal/a8_vec_scale_design_lmm.md (work-unit 5 of bitnet_phase1). */
+m4t_mtfp_t m4t_a8_quantize(int8_t* y, const m4t_mtfp_t* x, int n);
+m4t_mtfp_t m4t_a8_quantize_scalar_ref(int8_t* y, const m4t_mtfp_t* x, int n);
+
+void m4t_a8_dequantize(
+    m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax, int n);
+void m4t_a8_dequantize_scalar_ref(
+    m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax, int n);
+
+/* ── Vector scale by num/den ratio ─────────────────────────────────────
+ *
+ * y[i] = round(x[i] · num / den), saturating to ±M4T_MTFP_MAX_VAL.
+ *
+ * For BitNet's BitLinear scale apply:
+ *   num = α_mantissa × activation_absmax × 3^α_block_exp
+ *   den = 127
+ * Caller composes num/den; the substrate doesn't reach into α's
+ * block_exp encoding.
+ *
+ * num and den are int64. Per-cell uses __int128 for x · num product
+ * (can reach 2^92 for max-magnitude inputs). Per-cell scalar.
+ *
+ * den must be > 0. Round-half-away-from-zero. */
+void m4t_mtfp_vec_scale(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int64_t num, int64_t den, int n);
+void m4t_mtfp_vec_scale_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    int64_t num, int64_t den, int n);
+
 #ifdef __cplusplus
 }
 #endif

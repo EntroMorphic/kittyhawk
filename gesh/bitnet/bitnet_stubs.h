@@ -42,6 +42,7 @@ extern "C" {
  * n: vector length (= seq_len for attention). */
 void bitnet_stub_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n);
 
+#if 0  /* Removed work-unit 5: replaced by m4t_a8_quantize/m4t_a8_dequantize. */
 /* A8 quantize: per-token absmax → int8.
  * Computes scale = max(|x|) / 127, then x_int8 = round(x · 127 / max(|x|)).
  *
@@ -58,6 +59,7 @@ m4t_mtfp_t bitnet_stub_a8_quantize(int8_t* y, const m4t_mtfp_t* x, int n);
 void bitnet_stub_a8_dequantize(
     m4t_mtfp_t* y, const int8_t* x, m4t_mtfp_t absmax_mtfp19, int n
 );
+#endif  /* removed A8 stubs */
 
 /* ReLU² activation in-place. y[i] = (max(0, x[i]))²
  * MTFP19 throughout. Saturating clamp on result if it exceeds MTFP19_MAX. */
