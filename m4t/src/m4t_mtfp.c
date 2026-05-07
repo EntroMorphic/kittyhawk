@@ -1525,22 +1525,51 @@ void m4t_mtfp_rmsnorm_bx(
     assert(n >= 0);
     if (n == 0) return;
     assert(y && x && gamma);
+    (void)x_bx;  /* informational only; output bx is gamma_bx mod the rescale */
 
-    /* Internally use the existing rmsnorm path which produces output at
-     * gamma_bx. Then rescale to target_bx if needed.
+    /* Phase 2 wu1.5: precision-preserving variant. The implicit
+     * m4t_mtfp_rmsnorm uses SOS_SHIFT=4 to keep the int64 SoS sum from
+     * overflowing — but for small-mantissa inputs (e.g., GATE_ACT_BX=2
+     * where typical |x_m| < 16), that shift wipes out most cells'
+     * contribution to mean(x²). The outlier-dominated mean produces a
+     * normalization factor wrong for the small cells.
      *
-     * Use y as scratch for the gamma_bx output. Then rescale in place. */
-    m4t_mtfp_rmsnorm(y, x, gamma, eps_mantissa, n);
-    /* y is at scale (gamma_bx + (x_bx - x_bx)) = gamma_bx + offset
-     * actually let me re-derive. The implicit-bx rmsnorm output ends up
-     * at gamma_bx if x's bx = the "implicit" bx assumed. But actually
-     * it's at (gamma_bx + 0) — independent of x_bx (RMSNorm normalizes
-     * away the input scale).
-     *
-     * Per the math earlier: y_m = γ_m × x_m / sqrt(mean(x_m²)) — where
-     * the x_bx terms cancel. So y_m is at gamma_bx scale REGARDLESS of
-     * x_bx. Rescale gamma_bx → target_bx. */
-    (void)x_bx;  /* informational only; doesn't affect output bx */
+     * Fix: use __int128 for the SoS sum (no shift needed). With
+     * |x_m| ≤ MTFP19_MAX < 2^29.1 and n ≤ 6912, Σx² ≤ n × 2^58 ≈ 2^71 —
+     * fits __int128 cleanly. */
+    __int128 sum_sq = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t xv = (int64_t)x[i];
+        sum_sq += (__int128)(xv * xv);
+    }
+    /* mean = sum_sq / n + eps. Reduce to int64-fitting for rsqrt. */
+    __int128 mean_full = sum_sq / (__int128)n + (__int128)eps_mantissa;
+    if (mean_full < 1) mean_full = 1;
+
+    /* Pre-shift to fit int31 for m4t_int32_rsqrt. */
+    int extra_k = 0;
+    __int128 mean_passed = mean_full;
+    while (mean_passed > (__int128)0x7FFFFFFF) {
+        mean_passed >>= 2;
+        extra_k++;
+    }
+    if (mean_passed < 1) mean_passed = 1;
+
+    m4t_mtfp_t inv = m4t_int32_rsqrt((m4t_mtfp_t)mean_passed);
+    /* y_real = γ_real × x_real × rsqrt(mean(x_real²)). All x_bx terms
+     * cancel in the rsqrt, so output bx = gamma_bx (mod the per-cell
+     * arithmetic). Total shift: 30 (rsqrt scale) + 2*extra_k (mean
+     * pre-shift). */
+    int total_shift = 30 + extra_k;
+
+    /* Per-cell: y_m_at_gamma_bx = γ × x × inv >> total_shift. */
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)gamma[i] * (__int128)x[i] * (__int128)inv;
+        int64_t scaled = (int64_t)(prod >> total_shift);
+        y[i] = m4t_mtfp_clamp64(scaled);
+    }
+
+    /* Rescale gamma_bx → target_bx. */
     if (gamma_bx != target_bx) {
         m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
     }
