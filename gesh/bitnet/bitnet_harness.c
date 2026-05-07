@@ -324,14 +324,14 @@ void bitnet_forward_block(
                 }
 
                 /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
-                 * Pick shift such that max_abs >> shift ≤ 30 — i.e.,
-                 * scores fit the LUT range without underflow at the top.
-                 * 1/sqrt(head_dim) factor folded into this shift (3.5 bits). */
+                 * Per the math: score_real = Σ_d Q_m × K_m / 3^(2·ACT_BX) / sqrt(d).
+                 * For ACT_BX=8 and d=128: divide by 3^16 × 11.3 ≈ 4.86e8 ≈ 2^28.86.
+                 * Heuristic: pick shift so max_abs ≤ 30, with NO extra fudge.
+                 * The earlier "+4 fudge" was over-shifting by ~3.5 bits, making
+                 * substrate's softmax distribution too flat — attention couldn't
+                 * focus on specific past positions, losing fact-recall ability. */
                 int score_shift = 0;
                 while ((max_abs >> score_shift) > 30) score_shift++;
-                /* Add an extra ~4 bits to absorb the 1/sqrt(d) factor and
-                 * keep the softmax distribution from being too peaked. */
-                score_shift += 4;
 
                 for (int t = 0; t < seq_k; t++) {
                     int64_t r;
