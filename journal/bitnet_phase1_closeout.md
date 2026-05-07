@@ -476,3 +476,134 @@ with explicit block_exp tracking. Substrate primitives validated
 in isolation (27/27); harness validated as compositional path; the
 numerical fidelity question is now well-posed and deferred to
 Phase 2.
+
+## Phase 2 work-unit 1 — bx-aware activation flow
+
+After Phase 1 closed, the user requested Phase 2. The fix:
+explicit per-activation block_exp tracking via new `_bx` primitives
+(`m4t_mtfp_rmsnorm_bx`, `m4t_mtfp_bitlinear_scale_bx`,
+`m4t_mtfp_relu2_inplace_bx`, `m4t_mtfp_elementwise_mul_bx`,
+`m4t_mtfp_rescale_bx`) added alongside the existing primitives.
+
+Three per-flow bx constants tuned by sweep:
+- `BITNET_ACT_BX = 10` (linear-magnitude residual stream)
+- `BITNET_FFN_BX = 6` (gate, up — pre-relu² FFN signals)
+- `BITNET_GATE_ACT_BX = 2` (relu²(gate)×up — squared magnitudes)
+
+### Single-token improvement
+
+Layer 0 real-value cosine vs HF (W1.58q):
+
+| Site | Pre-Phase-2 | Post-Phase-2 wu1 |
+|------|-------------|------------------|
+| input_layernorm.output | 1.0000 | 1.0000 |
+| attn.q_pre_rope | 0.78 | 0.998 |
+| attn.v | 0.41 | 1.000 |
+| attn_sub_norm.output | 0 | 0.988 |
+| up | 0 | 0.890 |
+| ffn_sub_norm.output | 0 | 0.778 |
+| block_output | 0 | 0.778 |
+
+Per-layer signal propagates ~20 layers with usable correlation
+(vs ~5 pre-Phase-2). Multi-token Pearson 0.69 (vs −0.06 pre-fix).
+
+## Phase 2 wu1 RED-TEAM (post-claims-of-success)
+
+The user pushed back: "let's red-team it." Five concrete tests
+exposed that my "substrate produces meaningful inference" framing
+was overstated.
+
+### 1. Multi-prompt validation (5 diverse prompts)
+
+| Prompt | HF argmax | Sub argmax | Pearson |
+|--------|-----------|------------|---------|
+| Capital of France | ' Paris' | ' the' | 0.69 |
+| 1+1 | ' ' | ' -' | 0.46 |
+| Once upon a time | ',' | ' to' | 0.57 |
+| Hello, my name is | ' John' | ' an' | 0.71 |
+| Largest planet | ' Jupiter' | ' the' | 0.67 |
+
+**0/5 prompts: substrate's argmax matches HF's argmax.**
+
+HF's argmax sits in substrate's top-50 in 4/5 cases — directional
+signal is real, but the functional output (argmax) differs in
+every case. The "Pearson 0.69" headline obscures that argmax is
+consistently wrong.
+
+### 2. Generation stability
+
+Greedy generation, 10 tokens after "The capital of France is":
+
+- HF: `' Paris, which is also the largest city in the'`
+- Sub: `' the same as the Declaration of the Declaration of the'`
+
+**Substrate locks into a 3-token degenerate loop** (' the
+Declaration of') by token 5. Single-step argmax may look "in HF's
+top 50" but multi-step generation cascades into gibberish.
+
+### 3. γ precision loss at rescale
+
+Up to 4.8% of γ cells become 0 after rescale γ_bx=20 → ACT_BX=10
+(divide by 3^10 ≈ 59000). For γ_ffn_sub_norm, 330 cells (4.8%)
+zero out. Most are HF γ values already at denormal ranges (~10^-35
+in bf16) so the impact is bounded, but real.
+
+### 4. Top-K overlap quality
+
+Of substrate's top-100 for "Capital of France":
+- 8 are HF top-10
+- 21 cumulative HF top-50
+- 31 cumulative HF top-100
+- **22 are HF tail (rank > 1000)** — junk that substrate
+  over-ranks
+
+So the "31/100 overlap" headline obscures that ~22% of substrate's
+top-100 are tokens HF considers garbage. Substrate has *signal*
+plus *bad noise*, not just *signal* with HF-aligned tail.
+
+### 5. A8 noise budget on current code
+
+vs HF (W1.58q, no A8): ε at ffn_sub_norm 0.78
+vs HF (W1.58A8):       ε at ffn_sub_norm 0.63
+
+A8 noise contributes ~0.15 ε at FFN sites. My earlier claim "A8
+contributes zero" was on the wrong-unpack baseline (everything was
+orthogonal already, so A8 couldn't move ε). Real A8 noise budget
+is meaningful (~15% of the FFN ε is "expected" spec noise).
+
+## Honest Phase 2 wu1 verdict
+
+**What works:**
+- Substrate runs end-to-end without crashing.
+- Layer 0 attention path: cos = 0.99+ vs HF (matmul + scale chain).
+- Substrate's top-K predictions overlap with HF's at 21–31% on
+  top-50/100 (above chance, meaningful signal).
+- HF's argmax sits in substrate's top-50 ~80% of the time.
+
+**What does NOT work:**
+- Substrate's argmax NEVER matches HF's argmax across 5 prompts.
+- Greedy generation degenerates within 5 tokens.
+- ~22% of substrate's top-100 are HF-tail noise (spurious).
+- Per-flow bx constants were sweep-fitted to one prompt; multi-prompt
+  Pearson varies 0.46–0.71.
+
+**What this means:**
+Phase 2 wu1 reduced the substrate from "orthogonal noise" to
+"directionally-correlated but functionally wrong inference."
+The *kind* of error changed: from random unicode to plausible
+English in degenerate loops. That's progress on the substrate
+plumbing, but it's not the same thing as a working LLM.
+
+**What would actually fix it:**
+- Per-tensor dynamic bx (vs the per-flow constants we use now).
+- γ kept at original bx, multiplied with proper bx tracking.
+- A8 quantize with the right recipe (verified vs HF's actual
+  training-time quantization, not my approximation).
+- Score temperature derived from explicit bx tracking (vs the
+  attention score-shift heuristic).
+
+These are Phase 2 wu2+ work-units. The honest Phase 2 wu1 status:
+plumbing is sound, integration math is consistent, but the
+accumulated quantization noise across 30 layers × 4 RMSNorms × 7
+BitLinears × softmax × residual sums is too high to produce
+correct argmax outputs.
