@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <assert.h>
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
@@ -519,10 +520,32 @@ static void bitnet_lm_head(
     }
 }
 
+/* Argmax over full vocabulary using raw int64 logits (no shift).
+ * Phase 1 greedy decoding: returns the token id with highest logit.
+ * Returns -1 if lm_head is NULL. */
+static int bitnet_argmax_full_vocab(
+    const m4t_mtfp_t* x,
+    const m4t_mtfp_t* lm_head)
+{
+    if (lm_head == NULL) return -1;
+    int64_t best_acc = INT64_MIN;
+    int     best_v   = 0;
+    for (int v = 0; v < BITNET_VOCAB_SIZE; v++) {
+        const m4t_mtfp_t* row = lm_head + (size_t)v * BITNET_HIDDEN_SIZE;
+        int64_t acc = 0;
+        for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
+            acc += (int64_t)x[i] * (int64_t)row[i];
+        }
+        if (acc > best_acc) { best_acc = acc; best_v = v; }
+    }
+    return best_v;
+}
+
 int main(int argc, char** argv) {
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
     int n_positions = 1;       /* number of positions to forward (work-unit 7 cache) */
+    int n_generate = 0;        /* generation steps after the prompt (work-unit 8) */
     const char* weights_arg = NULL;
     const char* dump_path = NULL;
 
@@ -539,8 +562,13 @@ int main(int argc, char** argv) {
             "  --positions <p>  — number of forward passes to run\n"
             "                     (positions 0..p-1; default 1). Exercises\n"
             "                     the KV cache across multiple decode steps.\n"
+            "  --gen <n>        — greedy-generate <n> tokens after the\n"
+            "                     prompt (work-unit 8). Default 0 (no\n"
+            "                     generation). Each step: forward, argmax\n"
+            "                     over LM head, embed, repeat.\n"
             "  --dump <path>    — write per-layer activation snapshots to\n"
-            "                     <path>.pos<P>.layer<N>.bin for ε comparison.\n",
+            "                     <path>.layer<N>.bin (last position) for\n"
+            "                     ε comparison.\n",
             argv[0]);
         return 1;
     }
@@ -549,10 +577,12 @@ int main(int argc, char** argv) {
         if      (strcmp(argv[i], "--token")     == 0) token_id    = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--layers")    == 0) n_layers    = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--positions") == 0) n_positions = atoi(argv[i+1]);
+        else if (strcmp(argv[i], "--gen")       == 0) n_generate  = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--dump")      == 0) dump_path   = argv[i+1];
         else { fprintf(stderr, "[harness] unknown flag: %s\n", argv[i]); return 1; }
     }
     if (n_positions < 1) n_positions = 1;
+    if (n_generate  < 0) n_generate  = 0;
 
     bitnet_weights_t weights = {0};
     bitnet_weights_loaded_t handle = {0};
@@ -596,42 +626,88 @@ int main(int argc, char** argv) {
     w_dummy.alpha_q = w_dummy.alpha_k = w_dummy.alpha_v = w_dummy.alpha_o
         = w_dummy.alpha_gate = w_dummy.alpha_up = w_dummy.alpha_down = &alpha_dummy;
 
-    /* KV cache (work-unit 7). max_seq_len ≥ n_positions. */
+    /* KV cache (work-unit 7). Sized for prompt-positions + generation. */
     bitnet_kv_cache_t cache = {0};
-    int max_seq = n_positions > 256 ? n_positions : 256;
+    int total_positions = n_positions + n_generate;
+    int max_seq = total_positions > 256 ? total_positions : 256;
     if (bitnet_kv_cache_alloc(&cache, max_seq, layers_to_run) != 0) {
         fprintf(stderr, "[harness] KV cache alloc failed\n");
         return 1;
     }
 
-    /* Multi-position forward. Each position re-embeds the same token
-     * (single-prompt-token mode) — work-unit 8's generation loop replaces
-     * this with a per-token feed pulling from the prior step's argmax. */
+    /* Inner forward pass for one position. Mutates x in place; assumes
+     * cache, scratch, weights, and x are set up by the caller. */
+    #define FORWARD_ONE(pos_, dump_this) do {                              \
+        for (int l = 0; l < layers_to_run; l++) {                          \
+            const bitnet_layer_weights_t* w_l;                             \
+            if (loaded_ok && weights.layers[l].w_q != NULL)                \
+                w_l = &weights.layers[l];                                  \
+            else                                                            \
+                w_l = &w_dummy;                                            \
+            bitnet_forward_block(x, w_l, &s, &cache, l, (pos_));           \
+            if (dump_path && (dump_this)) {                                \
+                char path[1024];                                           \
+                snprintf(path, sizeof(path), "%s.layer%d.bin", dump_path, l); \
+                dump_activations_to_file(path, &s, l);                     \
+            }                                                              \
+        }                                                                  \
+        cache.current_pos = (pos_) + 1;                                    \
+    } while (0)
+
+    /* Re-embed scratch — used to re-feed the same prompt token at each
+     * --positions step (skeleton mode without generation). */
     m4t_mtfp_t x_init[BITNET_HIDDEN_SIZE];
     memcpy(x_init, x, sizeof(x_init));
 
+    /* Phase 1: prompt-position forward (--positions, default 1). */
+    int last_dump_pos = (n_generate > 0) ? -1 : (n_positions - 1);
     for (int pos = 0; pos < n_positions; pos++) {
-        if (pos > 0) memcpy(x, x_init, sizeof(x_init));  /* re-embed for this pos */
-
-        for (int l = 0; l < layers_to_run; l++) {
-            const bitnet_layer_weights_t* w_l;
-            if (loaded_ok && weights.layers[l].w_q != NULL) {
-                w_l = &weights.layers[l];
-            } else {
-                w_l = &w_dummy;
-            }
-            bitnet_forward_block(x, w_l, &s, &cache, l, pos);
-
-            if (dump_path && pos == n_positions - 1) {
-                char path[1024];
-                snprintf(path, sizeof(path), "%s.layer%d.bin", dump_path, l);
-                dump_activations_to_file(path, &s, l);
-            }
-        }
-        cache.current_pos = pos + 1;
+        if (pos > 0) memcpy(x, x_init, sizeof(x_init));
+        FORWARD_ONE(pos, pos == last_dump_pos);
     }
 
-    /* Final norm + LM head. */
+    /* Generated tokens accumulator. */
+    int generated_tokens[256];
+    int n_generated = 0;
+
+    /* Phase 2: greedy generation (--gen N). After each forward, take
+     * argmax over LM head logits; that token id becomes the next input
+     * embedding. Stops at n_generate or when sequence_len fills the cache. */
+    for (int g = 0; g < n_generate; g++) {
+        int pos = n_positions + g;
+        if (pos >= max_seq) break;
+
+        /* Apply final norm + argmax to the current x (output of last
+         * prompt/gen forward). */
+        m4t_mtfp_t x_finalnorm[BITNET_HIDDEN_SIZE];
+        if (loaded_ok && weights.gamma_final_norm != NULL) {
+            m4t_mtfp_rmsnorm(x_finalnorm, x, weights.gamma_final_norm,
+                             /*eps=*/1, BITNET_HIDDEN_SIZE);
+        } else {
+            memcpy(x_finalnorm, x, sizeof(x_finalnorm));
+        }
+        int next_tok = bitnet_argmax_full_vocab(x_finalnorm, weights.lm_head);
+        if (next_tok < 0) {
+            /* Skeleton mode (no LM head): pick a fixed dummy token. */
+            next_tok = (token_id + g + 1) % BITNET_VOCAB_SIZE;
+        }
+        if (n_generated < (int)(sizeof(generated_tokens)/sizeof(int))) {
+            generated_tokens[n_generated++] = next_tok;
+        }
+
+        /* Embed the new token; forward at pos. */
+        if (loaded_ok && weights.embedding != NULL) {
+            bitnet_embed(x, weights.embedding, next_tok);
+        } else {
+            for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) x[i] = (i % 7) - 3;
+        }
+        int dump_this = (g == n_generate - 1) && dump_path != NULL;
+        FORWARD_ONE(pos, dump_this);
+    }
+
+    #undef FORWARD_ONE
+
+    /* Final norm + LM head on the last x (post all forwards). */
     if (loaded_ok && weights.gamma_final_norm != NULL) {
         m4t_mtfp_t x_norm[BITNET_HIDDEN_SIZE];
         m4t_mtfp_rmsnorm(x_norm, x, weights.gamma_final_norm,
@@ -648,12 +724,21 @@ int main(int argc, char** argv) {
     }
 
     fprintf(stderr,
-        "[ok] %d layer(s) forward pass completed (token_id=%d).\n"
+        "[ok] %d layer(s) forward pass completed (token_id=%d, "
+            "positions=%d, generated=%d).\n"
         "     post-final-norm x[0..3]      = %d %d %d %d\n"
         "     logits[0..3]                  = %d %d %d %d\n",
-        layers_to_run, token_id,
+        layers_to_run, token_id, n_positions, n_generated,
         x[0], x[1], x[2], x[3],
         logits[0], logits[1], logits[2], logits[3]);
+    if (n_generated > 0) {
+        fprintf(stderr, "     generated tokens             =");
+        for (int i = 0; i < n_generated && i < 16; i++) {
+            fprintf(stderr, " %d", generated_tokens[i]);
+        }
+        if (n_generated > 16) fprintf(stderr, " ...");
+        fprintf(stderr, "\n");
+    }
 
     bitnet_block_scratch_free(&s);
     bitnet_kv_cache_free(&cache);
