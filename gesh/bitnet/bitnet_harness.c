@@ -41,13 +41,16 @@
  * SQUARED magnitudes (relu²(gate) × up). For gate_real ≤ 6 typical, the
  * squared product reaches ~200; bx=14 saturates at 35. We use a smaller
  * FFN_BX that gives wider range (real max 3^(29-FFN_BX) at MTFP19_MAX). */
-#define BITNET_ACT_BX 10      /* MTFP19_MAX/3^10 ≈ 9836 — empirically the
-                               * sweet spot for end-to-end multi-token
-                               * accuracy. Sweep over [10..14] showed
-                               * Pearson peaks at 10/11 (0.62) then drops
-                               * to 0.36-0.42 for higher bx. Wider range
-                               * absorbs accumulated residual quantization
-                               * better than tighter precision can compensate. */
+#define BITNET_ACT_BX 8       /* MTFP19_MAX/3^8 ≈ 88573 — Phase 2 wu1.4
+                               * red-team revealed block_output saturation
+                               * at ACT_BX=10 (max real ~9836 was hit by
+                               * 0.5% of cells from L4 onward, capping
+                               * residual stream). Lowering to 8: zero
+                               * saturation across all 30 layers,
+                               * block_output cos jumps from 0.05 (L29)
+                               * to 0.95+, multi-prompt argmax accuracy
+                               * 2/5 (vs 0/5), generation produces
+                               * domain-coherent text. */
 #define BITNET_FFN_BX 6       /* MTFP19_MAX/3^6 ≈ 797K — gate, up.
                                * Sweep [4,6,8,10,12]: Pearson peaks at 6
                                * (0.6857). FFN_BX=8 ranks Paris higher
