@@ -48,7 +48,11 @@
                                * to 0.36-0.42 for higher bx. Wider range
                                * absorbs accumulated residual quantization
                                * better than tighter precision can compensate. */
-#define BITNET_FFN_BX 8       /* MTFP19_MAX/3^8 ≈ 88500 — gate, up */
+#define BITNET_FFN_BX 6       /* MTFP19_MAX/3^6 ≈ 797K — gate, up.
+                               * Sweep [4,6,8,10,12]: Pearson peaks at 6
+                               * (0.6857). FFN_BX=8 ranks Paris higher
+                               * (#8 vs #41) but loses overall correlation
+                               * — picking 6 favors broader signal. */
 #define BITNET_GATE_ACT_BX 2  /* MTFP19_MAX/3^2 ≈ 64.5M headroom for
                                * gate²×up products. Empirically: Pearson
                                * is invariant for GATE_ACT_BX ∈ [1, 6];
