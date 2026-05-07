@@ -183,6 +183,46 @@ done:
     return n_diff;
 }
 
+/* M>1 bit-exact test. Build random X[M, K]; run oracle (which loops i)
+ * and routed16 (which loops i) and compare every cell of Y[M, N]. */
+static void test_M_gt_1(int M, int K, int N, double zero_prob, const char* label) {
+    int Kp = M4T_TRIT_PACKED5_BYTES(K);
+    uint8_t* W_packed = (uint8_t*)calloc((size_t)N * Kp, 1);
+    int8_t*  X        = (int8_t*) calloc((size_t)M * K, 1);
+    int32_t* Y_ref    = (int32_t*)calloc((size_t)M * N, sizeof(int32_t));
+    int32_t* Y_neon   = (int32_t*)calloc((size_t)M * N, sizeof(int32_t));
+
+    rand_packed_weights_5in8(W_packed, K, N, zero_prob);
+    rand_x(X, M * K, 100);
+
+    /* Oracle: feed all M rows together (it iterates i internally). */
+    m4t_ternary_5in8_matmul_bt_routed_ref(Y_ref, X, W_packed, M, K, N, NULL);
+
+    m4t_routed16_packed_t* P = m4t_ternary_routed16_pack(W_packed, K, N);
+    if (!P) { fprintf(stderr, "  FAIL [%s] pack NULL\n", label); g_fails++; goto cleanup; }
+
+    m4t_ternary_routed16_matmul_bt(Y_neon, X, P, M, K, N);
+
+    int n_diff = 0;
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            if (Y_ref[i * N + j] != Y_neon[i * N + j]) {
+                if (n_diff < 5) {
+                    fprintf(stderr, "  FAIL[%s] i=%d j=%d ref=%d neon=%d\n",
+                            label, i, j, Y_ref[i*N+j], Y_neon[i*N+j]);
+                }
+                n_diff++;
+            }
+        }
+    }
+    fprintf(stderr, "  [%s M=%d K=%d N=%d zp=%.0f%%] diff=%d\n",
+            label, M, K, N, zero_prob * 100, n_diff);
+    g_fails += n_diff;
+    m4t_ternary_routed16_packed_free(P);
+cleanup:
+    free(W_packed); free(X); free(Y_ref); free(Y_neon);
+}
+
 /* Encoder round-trip: build a small W, encode, query columns via e_k. */
 static void test_roundtrip(int K, int N, double zero_prob, const char* label) {
     int Kp = M4T_TRIT_PACKED5_BYTES(K);
@@ -236,6 +276,18 @@ int main(void) {
 
     /* Single-trit edge. */
     test_one(1, 1, 0.0, "K=1 N=1 dense",              50);
+
+    /* M>1 bit-exact (regression for the silent-truncation bug fix). */
+    test_M_gt_1(1,    2560, 2560, 0.40, "M=1");
+    test_M_gt_1(2,     512,  256, 0.40, "M=2");
+    test_M_gt_1(8,     512,  256, 0.40, "M=8");
+    test_M_gt_1(32,    256,  128, 0.40, "M=32");
+    test_M_gt_1(4,    2560, 2560, 0.50, "M=4 BitNet shape");
+    test_M_gt_1(2,    2560, 6912, 0.40, "M=2 FFN-up");
+    test_M_gt_1(0,    2560, 2560, 0.40, "M=0 (empty)");
+    test_M_gt_1(3,      31,   17, 0.40, "M=3 K<WINDOW");
+    test_M_gt_1(2,      33,   17, 0.50, "M=2 K%5=3");
+    test_M_gt_1(2,    6912, 2560, 0.38, "M=2 FFN-down");
 
     if (g_fails > 0) {
         fprintf(stderr, "test_m4t_ternary_routed16: %d failures\n", g_fails);

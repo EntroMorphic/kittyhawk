@@ -175,62 +175,72 @@ void m4t_ternary_routed16_matmul_bt(
     const m4t_routed16_packed_t* W,
     int M, int K, int N)
 {
-    assert(M == 1);
+    assert(M >= 0);
     assert(W != NULL);
     assert(K == W->K);
     assert(N == W->N);
     assert(K <= M4T_SDOT_K_MAX_EXACT);
-    if (N == 0) return;
+    if (M == 0 || N == 0) return;
     assert(Y != NULL);
     if (K > 0) assert(X != NULL);
-    (void)M;
 
     /* The kernel reads 32 X bytes per tile via two vld1q_s8 at start_k.
      * The encoder guarantees start_k is a position of a nonzero trit
      * (start_k ∈ [0, K)), but start_k + 32 may exceed K-1. We handle
      * tail safely by detecting near-end tiles and using a small
-     * stack-buffered load. */
+     * stack-buffered load.
+     *
+     * Loop order: i outer, j inner, t inner-most. Tile metadata is
+     * walked once per row; for batched M>1, callers may prefer to
+     * pre-pack X or hoist the tile loop — that optimization is future
+     * work. The simple ordering keeps the kernel readable and exposes
+     * no correctness pitfalls. */
 
-    for (int j = 0; j < N; j++) {
-        int t_lo = W->col_offset[j];
-        int t_hi = W->col_offset[j + 1];
-        int32_t acc = 0;
+    for (int i = 0; i < M; i++) {
+        const m4t_trit_t* xi = X + (size_t)i * K;
+        m4t_mtfp_t*       yi = Y + (size_t)i * N;
 
-        for (int t = t_lo; t < t_hi; t++) {
-            const m4t_routed16_tile_t* tile = &W->tiles[t];
-            int sk = tile->start_k;
-            int avail = K - sk;  /* lanes valid in X starting at sk */
+        for (int j = 0; j < N; j++) {
+            int t_lo = W->col_offset[j];
+            int t_hi = W->col_offset[j + 1];
+            int32_t acc = 0;
 
-            int8x16_t xa, xb;
-            if (avail >= 32) {
-                xa = vld1q_s8((const int8_t*)X + sk);
-                xb = vld1q_s8((const int8_t*)X + sk + 16);
-            } else {
-                /* Tail: zero-pad into a 32-byte stack buffer. */
-                int8_t buf[32] = {0};
-                if (avail > 0) memcpy(buf, X + sk, (size_t)avail);
-                xa = vld1q_s8(buf);
-                xb = vld1q_s8(buf + 16);
+            for (int t = t_lo; t < t_hi; t++) {
+                const m4t_routed16_tile_t* tile = &W->tiles[t];
+                int sk = tile->start_k;
+                int avail = K - sk;  /* lanes valid in X starting at sk */
+
+                int8x16_t xa, xb;
+                if (avail >= 32) {
+                    xa = vld1q_s8((const int8_t*)xi + sk);
+                    xb = vld1q_s8((const int8_t*)xi + sk + 16);
+                } else {
+                    /* Tail: zero-pad into a 32-byte stack buffer. */
+                    int8_t buf[32] = {0};
+                    if (avail > 0) memcpy(buf, xi + sk, (size_t)avail);
+                    xa = vld1q_s8(buf);
+                    xb = vld1q_s8(buf + 16);
+                }
+
+                uint8x16x2_t xv;
+                xv.val[0] = vreinterpretq_u8_s8(xa);
+                xv.val[1] = vreinterpretq_u8_s8(xb);
+
+                uint8x16_t idx_pos = vld1q_u8(tile->idx_pos);
+                uint8x16_t idx_neg = vld1q_u8(tile->idx_neg);
+
+                /* vqtbl2q returns 0 for out-of-range indices (≥32). */
+                int8x16_t pos = vreinterpretq_s8_u8(vqtbl2q_u8(xv, idx_pos));
+                int8x16_t neg = vreinterpretq_s8_u8(vqtbl2q_u8(xv, idx_neg));
+
+                /* Reduce 16 int8 → int32. With |X[k]| ≤ 127 and 16 lanes,
+                 * sum fits int16 (max 16*127 = 2032). vaddlvq_s8 widens
+                 * to int16 and reduces; cast to int32. */
+                acc += (int32_t)vaddlvq_s8(pos);
+                acc -= (int32_t)vaddlvq_s8(neg);
             }
 
-            uint8x16x2_t xv;
-            xv.val[0] = vreinterpretq_u8_s8(xa);
-            xv.val[1] = vreinterpretq_u8_s8(xb);
-
-            uint8x16_t idx_pos = vld1q_u8(tile->idx_pos);
-            uint8x16_t idx_neg = vld1q_u8(tile->idx_neg);
-
-            /* vqtbl2q returns 0 for out-of-range indices (≥32). */
-            int8x16_t pos = vreinterpretq_s8_u8(vqtbl2q_u8(xv, idx_pos));
-            int8x16_t neg = vreinterpretq_s8_u8(vqtbl2q_u8(xv, idx_neg));
-
-            /* Reduce 16 int8 → int32. With |X[k]| ≤ 127 and 16 lanes,
-             * sum fits int16 (max 16*127 = 2032). vaddlvq_s8 widens to
-             * int16 and reduces; cast to int32. */
-            acc += (int32_t)vaddlvq_s8(pos);
-            acc -= (int32_t)vaddlvq_s8(neg);
+            yi[j] = (m4t_mtfp_t)acc;
         }
-
-        Y[j] = (m4t_mtfp_t)acc;
     }
 }

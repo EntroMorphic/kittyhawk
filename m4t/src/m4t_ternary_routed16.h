@@ -17,10 +17,23 @@
  *
  * ── When this primitive wins ─────────────────────────────────────────
  *
- * Empirical (see test_m4t_ternary_routed16_bench): the crossover with
- * m4t_ternary_5in8_matmul_bt depends on weight sparsity. At BitNet's
- * ~38–50% zero density the per-tile overhead may dominate; at higher
- * sparsity (and especially at structured zero clusters) routing wins.
+ * Empirical crossover vs m4t_ternary_5in8_matmul_bt (the only valid
+ * dense baseline for A8 / int8 activations — xpacked requires ternary
+ * X and is NOT a substitute for A8-input BitLinears):
+ *
+ *   shape               crossover  | win at 99% sparsity
+ *   ─────────────────────────────────────────────────────
+ *   K=N=2560 (q/o_proj)   96-97%   |   2.2x
+ *   K=2560 N=6912 (gate)  ~97%     |   2.1x
+ *   K=6912 N=2560 (down)  92-94%   |   3.0x
+ *
+ * The K=6912 case crosses sooner because each tile's 32-trit window
+ * covers a larger fraction of the dense path's per-output work, so the
+ * skip benefit accrues faster as sparsity rises.
+ *
+ * BitNet's measured weight sparsity (38-50%) is well below all three
+ * crossovers. routed16 is the right kernel only when sparsity exceeds
+ * the relevant crossover for the target shape.
  *
  * Production callers should select the kernel based on measured
  * sparsity for the target weight tensor. This header exposes both the
@@ -59,21 +72,38 @@
  *
  * ── Storage ──────────────────────────────────────────────────────────
  *
- * 40 bytes per tile (or 32 bytes if we bit-pack signs; not done here
- * for kernel simplicity). Per column with 40% nonzero density:
- *   ~K * 0.6 nonzeros, ~K * 0.6 / 16 = K/27 tiles, ~K * 1.5 bytes.
- * For BitNet q_proj (K=N=2560, ~50% nnz): ~2560 * 1.3 KB * 2560 ≈ 8.5 MB
- * vs 5-in-8 packed at 1.3 MB. ~6.5× expansion. This is the cost of
- * the routing primitive being a different storage layout.
+ * 40 bytes per tile (4 start_k + 1 n_pos + 1 n_neg + 2 pad + 16 idx_pos
+ * + 16 idx_neg). Could be tightened to ~24 bytes by bit-packing signs,
+ * not done here for kernel simplicity.
+ *
+ * Real BitNet layer-0 measurements (this code path):
+ *   q_proj   K=N=2560     49.6% sparsity   9.41 MB  vs 1.31 MB 5-in-8 (7.2×)
+ *   gate     K=2560 N=6912 39.1% sparsity 27.16 MB vs 3.54 MB 5-in-8 (7.7×)
+ *   down     K=6912 N=2560 38.2% sparsity 27.54 MB vs 3.54 MB 5-in-8 (7.8×)
+ * Range: 7-8× expansion vs 5-in-8 packed. This is the cost of the
+ * routing primitive being a different storage layout.
+ *
+ * ── Per-tile NEON cost ───────────────────────────────────────────────
+ *
+ * Per non-tail tile: 2× vld1q_s8 (X load) + 2× vld1q_u8 (idx load) +
+ * 2× vqtbl2q_u8 (gather) + 2× vaddlvq_s8 (reduce) + 2 scalar adds on
+ * the int32 accumulator ≈ 8 NEON-issue ops + scalar overhead per
+ * 16-lane tile. Compare: dense SDOT covers 16 trits per ~3 NEON ops
+ * (load + amortized unpack + vdotq). Routed16 wins only when sparsity
+ * is high enough that the dense path covers many more trits than
+ * nonzeros per tile (empirical crossover ≈ 96-97% on K=N=2560).
  *
  * ── Constraints ──────────────────────────────────────────────────────
  *
- * Initial primitive supports M=1 only (single-token inference). M>1
- * batched routing is future work — the natural extension is to keep
- * the column-organized tile list and iterate over M inside the j loop.
- *
  * Per project rule (no scalar in production): NEON-only. Compile-time
- * #error if NEON unavailable. Test oracle is m4t_ternary_5in8_matmul_bt_routed_ref.
+ * #error if NEON unavailable. Test oracle is
+ * m4t_ternary_5in8_matmul_bt_routed_ref.
+ *
+ * Supports arbitrary M ≥ 0 (including M=0 which returns immediately).
+ * Loop order is i-outer / j-inner / tile-innermost; for very large M
+ * a tile-outer / i-inner ordering would amortize tile metadata loads
+ * better — that optimization is future work and would require a
+ * dedicated batch entry point so M=1 callers are not penalized.
  */
 
 #ifndef M4T_TERNARY_ROUTED16_H
@@ -124,23 +154,22 @@ size_t   m4t_routed16_packed_total_tiles(const m4t_routed16_packed_t* p);
 size_t   m4t_routed16_packed_bytes(const m4t_routed16_packed_t* p);
 
 /* Production NEON kernel.
- *   Y[1, N] = X[1, K] @ W^T[K, N]
+ *   Y[M, N] = X[M, K] @ W^T[K, N]
  *
- * X: int8 ternary or A8-quantized activations (m4t_trit_t = int8).
- *    The accumulator is int32 with no clamp; |sum| <= K when X is ternary,
- *    or <= 127 * K when X is A8 — caller is responsible for K bound.
+ * X: int8 ternary or A8-quantized activations (m4t_trit_t = int8),
+ *    row-major [M, K]. Per-cell accumulator is int32 with no clamp;
+ *    |Y[i, j]| ≤ K * max|X| (≤ 127*K for A8, ≤ K for ternary). Caller
+ *    is responsible for ensuring K is small enough that this fits.
  * W: routed16-packed weights produced by m4t_ternary_routed16_pack.
- * Y: int32 outputs (m4t_mtfp_t).
+ * Y: int32 outputs (m4t_mtfp_t), row-major [M, N].
  *
  * Preconditions:
- *   M == 1 (initial primitive constraint; asserted in debug)
+ *   M >= 0 (M==0 returns immediately)
  *   K matches W's K (asserted in debug)
  *   N matches W's N (asserted in debug)
  *   K <= M4T_SDOT_K_MAX_EXACT
- *   K + 32 fits in valid X-load range — encoder guarantees window
- *     starts ∈ [0, K), but the load reads start_k+32 bytes; caller
- *     must ensure X allocation has 32 bytes of zero-padded tail or
- *     K is at least M4T_ROUTED16_WINDOW. (See impl.)
+ *   Tail X loads at start_k near K-1 are zero-padded internally via a
+ *     stack buffer — caller does NOT need to over-allocate X.
  */
 void m4t_ternary_routed16_matmul_bt(
     m4t_mtfp_t* Y,
