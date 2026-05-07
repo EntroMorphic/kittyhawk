@@ -132,6 +132,32 @@ typedef struct {
     bitnet_layer_weights_t layers[BITNET_NUM_LAYERS];
 } bitnet_weights_t;
 
+/* ── KV cache (work-unit 7) ─────────────────────────────────────────────
+ *
+ * Per-layer K and V buffers for past positions. Caller allocates once
+ * with bitnet_kv_cache_alloc(max_seq_len), resets between sequences via
+ * bitnet_kv_cache_reset, and the forward pass writes the current
+ * position's K, V at the end of each layer's attention.
+ *
+ * Layout per layer:
+ *   k[layer][position × NUM_KV_HEADS × HEAD_DIM + i] = mantissa
+ *   v[layer][position × NUM_KV_HEADS × HEAD_DIM + i] = mantissa
+ *
+ * Memory: max_seq_len × NUM_KV_HEADS × HEAD_DIM × 4 bytes × NUM_LAYERS × 2.
+ * For max_seq=256: 256 × 5 × 128 × 4 × 30 × 2 ≈ 39 MB. */
+typedef struct {
+    int max_seq_len;
+    int n_layers;
+    int current_pos;            /* number of positions filled, ≤ max_seq_len */
+    size_t per_layer_stride;    /* max_seq_len × NUM_KV_HEADS × HEAD_DIM */
+    m4t_mtfp_t* k;              /* [n_layers × per_layer_stride] */
+    m4t_mtfp_t* v;              /* [n_layers × per_layer_stride] */
+} bitnet_kv_cache_t;
+
+int  bitnet_kv_cache_alloc(bitnet_kv_cache_t* cache, int max_seq_len, int n_layers);
+void bitnet_kv_cache_free (bitnet_kv_cache_t* cache);
+void bitnet_kv_cache_reset(bitnet_kv_cache_t* cache);
+
 /* ── Per-call activation buffers ────────────────────────────────────── */
 
 /* Activation buffers for ONE token's forward pass through ONE block.
@@ -175,6 +201,26 @@ typedef struct {
  * call bitnet_block_scratch_free before exit. */
 void bitnet_block_scratch_alloc(bitnet_block_scratch_t* s);
 void bitnet_block_scratch_free (bitnet_block_scratch_t* s);
+
+/* Forward pass through one transformer block.
+ *   x_io: in/out, [HIDDEN] mantissas. Modified in place.
+ *   w:    layer weights.
+ *   s:    pre-allocated scratch buffers.
+ *   cache: KV cache (NULL if no caching). On non-NULL, the forward
+ *          appends current K, V to cache->k/v at offset
+ *          layer × per_layer_stride + current_pos × NUM_KV_HEADS × HEAD_DIM.
+ *          Caller manages cache->current_pos increment between layers
+ *          (bumped exactly once per token, AFTER the last layer).
+ *   layer_idx: which layer this is (used to index the cache).
+ *   position:  this token's position (used by RoPE and attention). */
+void bitnet_forward_block(
+    m4t_mtfp_t* x_io,
+    const bitnet_layer_weights_t* w,
+    bitnet_block_scratch_t* s,
+    bitnet_kv_cache_t* cache,
+    int layer_idx,
+    int position
+);
 
 #ifdef __cplusplus
 }

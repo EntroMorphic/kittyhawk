@@ -131,10 +131,12 @@ void bitnet_block_scratch_free(bitnet_block_scratch_t* s) {
  *   x = ffn(x)                  ← contains ffn_sub_norm
  *   x = residual + x
  */
-static void bitnet_forward_block(
+void bitnet_forward_block(
     m4t_mtfp_t* x_io,
     const bitnet_layer_weights_t* w,
     bitnet_block_scratch_t* s,
+    bitnet_kv_cache_t* cache,
+    int layer_idx,
     int position)
 {
     /* For now: x_io aliased into s->x at entry, copied back at exit.
@@ -213,29 +215,121 @@ static void bitnet_forward_block(
                         BITNET_HEAD_DIM,
                         BITNET_ROPE_THETA);
 
-    /* Attention (seq=1, no KV cache yet — work-unit 7 adds the cache).
+    /* Attention with KV cache (work-unit 7).
      *
-     * For a single token attending to itself:
-     *   score    = (Q[h] · K[kv_head]) / sqrt(head_dim)        [scalar]
-     *   weights  = softmax([score]) = [1.0]                    [single element]
-     *   attn_out = weights[0] · V[kv_head] = V[kv_head]        [head_dim values]
+     * Per Q head h:
+     *   kv_head_idx = h / (num_q_heads / num_kv_heads)
+     *   scores[t]   = Q[h] · K_cache[layer][t][kv_head_idx] / sqrt(head_dim)
+     *                 for t ∈ [0, position+1)
+     *   weights     = softmax(scores)        [length = position+1]
+     *   attn_out[h] = Σ_t weights[t] · V_cache[layer][t][kv_head_idx]
      *
-     * GQA mapping: Q head h → KV head h / (num_q_heads / num_kv_heads).
-     * For BitNet 20:5, q_per_kv = 4; Q heads {0..3} share KV head 0, etc.
+     * Score → softmax scale: softmax expects "1 LSB = 1 nat". Q · K
+     * dot products in raw int can be enormous (up to 2^63ish). To bring
+     * them into the LUT range [-30, 0] post-max-subtraction, we
+     * right-shift the scores by enough bits to fit. This is a temperature
+     * change relative to HF (softmax(x / T) ≠ softmax(x)) — the per-layer
+     * ε comparison (work-unit 6) measures the resulting mismatch.
      *
-     * The score computation is irrelevant when softmax has only one input,
-     * so we skip it here. Work-unit 7 reintroduces full QK^T + softmax
-     * once the KV cache provides past keys/values. */
+     * 1/sqrt(head_dim) factor is folded into the rescale shift (it's a
+     * constant downscale ≈ /11.3 = ~3.5 bits; absorbed into the heuristic). */
     {
         const int q_per_kv = BITNET_NUM_ATTENTION_HEADS / BITNET_NUM_KV_HEADS;
-        for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
-            int kv_head = h / q_per_kv;
-            memcpy(s->attn_output + (size_t)h * BITNET_HEAD_DIM,
-                   s->v + (size_t)kv_head * BITNET_HEAD_DIM,
-                   BITNET_HEAD_DIM * sizeof(m4t_mtfp_t));
+
+        if (cache == NULL) {
+            /* No-cache fallback: degenerate seq=1 (attn_out = V). */
+            for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
+                int kv_head = h / q_per_kv;
+                memcpy(s->attn_output + (size_t)h * BITNET_HEAD_DIM,
+                       s->v + (size_t)kv_head * BITNET_HEAD_DIM,
+                       BITNET_HEAD_DIM * sizeof(m4t_mtfp_t));
+            }
+            memset(s->attn_scores, 0,
+                   BITNET_NUM_ATTENTION_HEADS * sizeof(m4t_mtfp_t));
+        } else {
+            /* Write current K, V to cache at this layer's slot for `position`. */
+            assert(layer_idx >= 0 && layer_idx < cache->n_layers);
+            assert(position >= 0 && position < cache->max_seq_len);
+            size_t row_size = (size_t)BITNET_NUM_KV_HEADS * BITNET_HEAD_DIM;
+            size_t base = (size_t)layer_idx * cache->per_layer_stride
+                          + (size_t)position * row_size;
+            memcpy(cache->k + base, s->k, row_size * sizeof(m4t_mtfp_t));
+            memcpy(cache->v + base, s->v, row_size * sizeof(m4t_mtfp_t));
+
+            int seq_k = position + 1;
+
+            /* Per-head scratch hoisted out of the head loop (RC-2). */
+            int64_t* scores_i64    = (int64_t*)   malloc((size_t)seq_k * sizeof(int64_t));
+            m4t_mtfp_t* scores_int = (m4t_mtfp_t*)malloc((size_t)seq_k * sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* weights    = (m4t_mtfp_t*)malloc((size_t)seq_k * sizeof(m4t_mtfp_t));
+            assert(scores_i64 && scores_int && weights);
+
+            for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
+                int kv_head = h / q_per_kv;
+                const m4t_mtfp_t* qh = s->q + (size_t)h * BITNET_HEAD_DIM;
+
+                /* Compute scores[t] = dot(qh, K_cache[layer][t][kv_head]). */
+                int64_t max_abs = 1;
+                for (int t = 0; t < seq_k; t++) {
+                    size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                        + (size_t)t * row_size
+                                        + (size_t)kv_head * BITNET_HEAD_DIM;
+                    const m4t_mtfp_t* kh = cache->k + k_row_base;
+                    int64_t acc = 0;
+                    for (int d = 0; d < BITNET_HEAD_DIM; d++) {
+                        acc += (int64_t)qh[d] * (int64_t)kh[d];
+                    }
+                    scores_i64[t] = acc;
+                    int64_t a = acc < 0 ? -acc : acc;
+                    if (a > max_abs) max_abs = a;
+                }
+
+                /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
+                 * Pick shift such that max_abs >> shift ≤ 30 — i.e.,
+                 * scores fit the LUT range without underflow at the top.
+                 * 1/sqrt(head_dim) factor folded into this shift (3.5 bits). */
+                int score_shift = 0;
+                while ((max_abs >> score_shift) > 30) score_shift++;
+                /* Add an extra ~4 bits to absorb the 1/sqrt(d) factor and
+                 * keep the softmax distribution from being too peaked. */
+                score_shift += 4;
+
+                for (int t = 0; t < seq_k; t++) {
+                    int64_t r;
+                    if (scores_i64[t] >= 0) r = scores_i64[t] >> score_shift;
+                    else                    r = -((-scores_i64[t]) >> score_shift);
+                    if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
+                    if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
+                    scores_int[t] = (m4t_mtfp_t)r;
+                }
+
+                /* Softmax over scores. */
+                m4t_mtfp_softmax(weights, scores_int, seq_k);
+
+                /* attn_out[h × head_dim..] = Σ_t weights[t] · V_cache[layer][t][kv_head].
+                 * weights[t] is at scale 2^30; V is mantissa.
+                 * accum at scale 2^30 → >> 30 to recover MTFP19 mantissa. */
+                m4t_mtfp_t* out_h = s->attn_output + (size_t)h * BITNET_HEAD_DIM;
+                for (int d = 0; d < BITNET_HEAD_DIM; d++) {
+                    int64_t acc = 0;
+                    for (int t = 0; t < seq_k; t++) {
+                        size_t v_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                            + (size_t)t * row_size
+                                            + (size_t)kv_head * BITNET_HEAD_DIM;
+                        acc += (int64_t)weights[t] * (int64_t)cache->v[v_row_base + d];
+                    }
+                    out_h[d] = m4t_mtfp_clamp64(acc >> 30);
+                }
+            }
+
+            /* Stash one debug score per head (last position's score),
+             * for the activation dump. */
+            for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
+                s->attn_scores[h] = 0;  /* not load-bearing in tests */
+            }
+
+            free(scores_i64); free(scores_int); free(weights);
         }
-        memset(s->attn_scores, 0,
-               BITNET_NUM_ATTENTION_HEADS * sizeof(m4t_mtfp_t));
     }
 
     /* attn_sub_norm: y = γ · y · rsqrt(mean(y²) + ε) */
@@ -428,32 +522,37 @@ static void bitnet_lm_head(
 int main(int argc, char** argv) {
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
+    int n_positions = 1;       /* number of positions to forward (work-unit 7 cache) */
     const char* weights_arg = NULL;
     const char* dump_path = NULL;
 
-    /* Simple positional + flag parsing:
-     *   bitnet_harness <weights_blob.bin|-> [--token <id>] [--layers <n>] [--dump <path>] */
+    /* Simple positional + flag parsing. */
     if (argc < 2) {
         fprintf(stderr,
-            "Usage: %s <weights_blob.bin|-> [--token <id>] [--layers <n>] [--dump <path>]\n"
+            "Usage: %s <weights_blob.bin|-> "
+            "[--token <id>] [--layers <n>] [--positions <p>] [--dump <path>]\n"
             "  weights_blob.bin — produced by scripts/convert_weights.py.\n"
             "                     '-' for skeleton mode.\n"
             "  --token <id>     — input token id (default: 1).\n"
             "  --layers <n>     — number of transformer layers to run\n"
-            "                     (default: all loaded). Useful for\n"
-            "                     debugging single-layer.\n"
+            "                     (default: all loaded).\n"
+            "  --positions <p>  — number of forward passes to run\n"
+            "                     (positions 0..p-1; default 1). Exercises\n"
+            "                     the KV cache across multiple decode steps.\n"
             "  --dump <path>    — write per-layer activation snapshots to\n"
-            "                     <path>.layer<N>.bin for ε comparison.\n",
+            "                     <path>.pos<P>.layer<N>.bin for ε comparison.\n",
             argv[0]);
         return 1;
     }
     weights_arg = argv[1];
     for (int i = 2; i + 1 < argc; i += 2) {
-        if      (strcmp(argv[i], "--token")  == 0) token_id  = atoi(argv[i+1]);
-        else if (strcmp(argv[i], "--layers") == 0) n_layers  = atoi(argv[i+1]);
-        else if (strcmp(argv[i], "--dump")   == 0) dump_path = argv[i+1];
+        if      (strcmp(argv[i], "--token")     == 0) token_id    = atoi(argv[i+1]);
+        else if (strcmp(argv[i], "--layers")    == 0) n_layers    = atoi(argv[i+1]);
+        else if (strcmp(argv[i], "--positions") == 0) n_positions = atoi(argv[i+1]);
+        else if (strcmp(argv[i], "--dump")      == 0) dump_path   = argv[i+1];
         else { fprintf(stderr, "[harness] unknown flag: %s\n", argv[i]); return 1; }
     }
+    if (n_positions < 1) n_positions = 1;
 
     bitnet_weights_t weights = {0};
     bitnet_weights_loaded_t handle = {0};
@@ -497,21 +596,39 @@ int main(int argc, char** argv) {
     w_dummy.alpha_q = w_dummy.alpha_k = w_dummy.alpha_v = w_dummy.alpha_o
         = w_dummy.alpha_gate = w_dummy.alpha_up = w_dummy.alpha_down = &alpha_dummy;
 
-    /* Forward pass through each layer. */
-    for (int l = 0; l < layers_to_run; l++) {
-        bitnet_layer_weights_t* w_l;
-        if (loaded_ok && weights.layers[l].w_q != NULL) {
-            w_l = &weights.layers[l];
-        } else {
-            w_l = &w_dummy;
-        }
-        bitnet_forward_block(x, w_l, &s, /*position=*/0);
+    /* KV cache (work-unit 7). max_seq_len ≥ n_positions. */
+    bitnet_kv_cache_t cache = {0};
+    int max_seq = n_positions > 256 ? n_positions : 256;
+    if (bitnet_kv_cache_alloc(&cache, max_seq, layers_to_run) != 0) {
+        fprintf(stderr, "[harness] KV cache alloc failed\n");
+        return 1;
+    }
 
-        if (dump_path) {
-            char path[1024];
-            snprintf(path, sizeof(path), "%s.layer%d.bin", dump_path, l);
-            dump_activations_to_file(path, &s, l);
+    /* Multi-position forward. Each position re-embeds the same token
+     * (single-prompt-token mode) — work-unit 8's generation loop replaces
+     * this with a per-token feed pulling from the prior step's argmax. */
+    m4t_mtfp_t x_init[BITNET_HIDDEN_SIZE];
+    memcpy(x_init, x, sizeof(x_init));
+
+    for (int pos = 0; pos < n_positions; pos++) {
+        if (pos > 0) memcpy(x, x_init, sizeof(x_init));  /* re-embed for this pos */
+
+        for (int l = 0; l < layers_to_run; l++) {
+            const bitnet_layer_weights_t* w_l;
+            if (loaded_ok && weights.layers[l].w_q != NULL) {
+                w_l = &weights.layers[l];
+            } else {
+                w_l = &w_dummy;
+            }
+            bitnet_forward_block(x, w_l, &s, &cache, l, pos);
+
+            if (dump_path && pos == n_positions - 1) {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s.layer%d.bin", dump_path, l);
+                dump_activations_to_file(path, &s, l);
+            }
         }
+        cache.current_pos = pos + 1;
     }
 
     /* Final norm + LM head. */
@@ -539,6 +656,7 @@ int main(int argc, char** argv) {
         logits[0], logits[1], logits[2], logits[3]);
 
     bitnet_block_scratch_free(&s);
+    bitnet_kv_cache_free(&cache);
     if (loaded_ok) bitnet_weights_unload(&handle);
     return 0;
 }

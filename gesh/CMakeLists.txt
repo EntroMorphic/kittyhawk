@@ -251,6 +251,7 @@ add_executable(bitnet_harness
     bitnet/bitnet_harness.c
     bitnet/bitnet_stubs.c
     bitnet/bitnet_weights.c
+    bitnet/bitnet_kv_cache.c
 )
 target_include_directories(bitnet_harness PRIVATE bitnet)
 target_link_libraries(bitnet_harness PRIVATE m4t m)
