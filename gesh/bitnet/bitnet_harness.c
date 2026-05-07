@@ -324,12 +324,14 @@ void bitnet_forward_block(
                 }
 
                 /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
-                 * Adaptive: shift so max_abs maps to ≤ 30 nats. Pre-shift
-                 * preserves attention sharpness (vs. fixed-shift, which
-                 * over-flattens for prompts where attention should focus
-                 * on a specific past position). */
+                 * Adaptive: shift so max_abs maps to ≤ 30 nats, plus 1
+                 * extra bit to slightly soften the distribution.
+                 * Empirical sweep over fudge ∈ {0, 1, 2, 3, 4} on a
+                 * 10-prompt fact-recall battery: fudge=1 best (5/10),
+                 * fudge=0 (4/10), fudge=4 (0/10 — totally flat). */
                 int score_shift = 0;
                 while ((max_abs >> score_shift) > 30) score_shift++;
+                score_shift += 1;
 
                 for (int t = 0; t < seq_k; t++) {
                     int64_t r;
@@ -880,10 +882,9 @@ int main(int argc, char** argv) {
         logits[0], logits[1], logits[2], logits[3]);
     if (n_generated > 0) {
         fprintf(stderr, "     generated tokens             =");
-        for (int i = 0; i < n_generated && i < 16; i++) {
+        for (int i = 0; i < n_generated; i++) {
             fprintf(stderr, " %d", generated_tokens[i]);
         }
-        if (n_generated > 16) fprintf(stderr, " ...");
         fprintf(stderr, "\n");
     }
 
