@@ -232,8 +232,96 @@ What Phase 1 **does NOT** establish:
   not a from-scratch base-3 ML model. Phase 3 (train from scratch)
   is where the necessity claim gets tested.
 
+## ε comparison — actual results
+
+The numerical gate ran 2026-05-06 with the model `microsoft/bitnet-b1.58-2B-4T-bf16`
+(unpacked bf16 reference) vs the substrate forward with weights converted from
+the packed `microsoft/bitnet-b1.58-2B-4T` repo. Token: 128000 (BOS for
+"The capital of France is").
+
+**Result: per-layer `sc_inv_ε ≈ 1.0` across all 30 layers.**
+
+The scale-invariant L2 metric returning ~1.0 means
+`||c·s − r||₂ ≈ ||r||₂` — i.e., the best-fit single multiplier reduces
+to "predict zero" because the substrate output and HF reference are
+essentially orthogonal. Tiny residual signal in `ffn.gate_proj`
+(ε ≈ 0.88-0.97 in early layers) because that capture site is before
+the relu² saturation sink.
+
+**Root cause: saturation cascade.** Saturation rates per layer:
+
+| Layer | Q sat | K sat | V sat | Gate sat | Up sat | Block_out sat |
+|-------|-------|-------|-------|----------|--------|---------------|
+| 0     | 78%   | 91%   | 87%   | 61%      | 97%    | 52%           |
+| 1     | 97%   | 98%   | 99%   | 46%      | 100%   | 32%           |
+| 2     | 99%   | 99%   | 99%   | 45%      | 99%    | 54%           |
+| 10    | 100%  | 100%  | 99%   | 1%       | 100%   | 73%           |
+| 20    | 100%  | 100%  | 100%  | 1%       | 100%   | 63%           |
+| 29    | 99%   | 99%   | 99%   | 22%      | 100%   | 39%           |
+
+By layer 1 the BitLinear projection outputs are 97-99% pinned at
+±MTFP19_MAX. Once a cell saturates, it carries no signal — every
+saturated cell holds the same value regardless of input.
+
+**Mechanism:** the BitLinear scale formula
+`y_m = y_raw × α_m × absmax_m / (127 × 3^α_bx)` is mathematically
+correct (derives the right output mantissa given the input's bx).
+BUT: it produces output at `bx_x_norm = bx_γ` (the γ tensor's
+block_exp at conversion time, ~17-21 for BitNet's tiny γ values).
+At bx=20, the substrate can only represent real values up to
+`MTFP19_MAX / 3^20 ≈ 0.166`. Real BitLinear outputs typically
+reach 0.5-3 in BitNet's bf16 trace, comfortably exceeding 0.166 →
+saturation.
+
+This is the **block_exp tracking deficiency** that the closeout doc
+had flagged as a Phase 2 hold-point. Phase 1's gate produced the
+expected diagnostic: "wiring is consistent, but the implicit
+block_exp choice (γ-driven, per-tensor optimal at conversion) is
+incompatible with the activation magnitudes that flow through the
+network."
+
+**What this proves about the substrate:**
+- The 9 substrate primitives (rsqrt, rmsnorm, rope, recip, softmax,
+  a8 quantize/dequantize, vec_scale, relu², elementwise_mul) are
+  algorithmically correct — saturation upstream of any individual
+  primitive is what kills the comparison, not the primitives
+  themselves. This is corroborated by the unit-test pass rate
+  (27/27 ctest cases bit-exact within tolerance).
+- The harness wiring + KV cache + attention computation flows
+  values through the right path; what fails is the magnitude
+  bookkeeping.
+
+**What this does NOT prove:**
+- Whether the substrate gives *correct* base-3 ML inference. Until
+  block_exp tracking is in place, that question is unanswered.
+- Whether the score-rescaling heuristic in attention is right.
+  Saturation upstream means we can't tell.
+- Whether RoPE's rotate_half choice was right (verified by LMM
+  reasoning at work-unit 3, but post-RoPE Q/K saturate so we can't
+  verify against HF).
+
+## Phase 2 entry conditions
+
+The single most-load-bearing fix is **explicit per-activation
+block_exp tracking** through the forward pass. Once that's in place:
+- BitLinear output bx is computed dynamically from input bx + γ_bx
+  rather than inherited from γ_bx.
+- Residual additions become well-defined (rescale to common bx
+  before summing).
+- The score-rescaling heuristic in attention can be replaced with
+  an explicit `bx_Q + bx_K → bx_score` formula.
+- The saturation cascade lifts; ε measurement becomes meaningful.
+
+Phase 2 should start with this single change and re-run the ε
+comparison to verify it produces non-trivial signal (sc_inv_ε
+materially below 1.0 across at least the early layers).
+
 ## Status
 
-Phase 1 LMM cycle complete. Closeout doc filed. Substrate ready
-for the external ε comparison run (which is the actual gate).
-Next phase awaits user direction.
+Phase 1 LMM cycle complete. Closeout doc filed with actual ε
+results. The substrate is wired for end-to-end BitNet inference;
+the implicit block_exp design produces saturation; Phase 2 starts
+with explicit block_exp tracking. Substrate primitives validated
+in isolation (27/27); harness validated as compositional path; the
+numerical fidelity question is now well-posed and deferred to
+Phase 2.
