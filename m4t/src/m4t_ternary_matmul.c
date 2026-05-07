@@ -686,6 +686,87 @@ no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
 /* §20 scalar reference oracle. Per-cell decoded via the spec formula
  * (u_i = (byte / 3^i) mod 3); never dispatches to NEON.
  * Test-only; production code MUST NOT call this. */
+/* Sparse-routed variant. See m4t_ternary_matmul.h for semantics.
+ *
+ * Implementation: walk packed bytes; for each byte, decode 5 trits;
+ * for trits != 0, conditionally add ±X[i, k] to the accumulator. Zero
+ * trits skip the X load entirely.
+ *
+ * Two-level skip:
+ *   1. If the entire byte == 0 (all 5 trits zero), skip the whole byte
+ *      (~1% of bytes for BitNet's distribution: 0.4^5 ≈ 1.0%).
+ *   2. Otherwise per-trit skip on u==0 (~40% of trits).
+ *
+ * The math is identical to the dense scalar_ref since x*0 = 0 and
+ * adding 0 is a no-op. Bit-exact match guaranteed.
+ *
+ * No NEON path: the routing structure is fundamentally a per-cell
+ * conditional, not a SIMD-friendly operation. Per the project rule,
+ * scalar with documented reasoning is acceptable for primitives whose
+ * structure resists vectorization (cross-exp accum precedent). */
+void m4t_ternary_5in8_matmul_bt_routed(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N,
+    int64_t* skipped_zeros)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    int Kp = (K + 4) / 5;
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+    int64_t local_skipped = 0;
+
+    for (int i = 0; i < M; i++) {
+        const m4t_trit_t* xi = X + (size_t)i * K;
+        for (int j = 0; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32_t acc = 0;
+
+            for (int b = 0; b < Kp; b++) {
+                uint8_t byte = wj[b];
+                int k_base = b * 5;
+
+                /* Fast path: byte == 0 means all 5 trits are 0 (route absent). */
+                if (byte == 0u) {
+                    /* Count the in-range zero trits skipped via this byte. */
+                    int n_in_range = (k_base + 5 <= K) ? 5 : (K - k_base);
+                    if (n_in_range < 0) n_in_range = 0;
+                    local_skipped += n_in_range;
+                    continue;
+                }
+
+                /* Per-trit decode + route. */
+                for (int d = 0; d < 5; d++) {
+                    int k = k_base + d;
+                    if (k >= K) break;
+                    uint8_t u = (uint8_t)((byte / POW3[d]) % 3u);
+                    if (u == 0u) {
+                        /* trit = 0 → route absent; no X load, no add. */
+                        local_skipped++;
+                    } else if (u == 1u) {
+                        /* trit = +1 → forward X[i, k] with positive sign. */
+                        acc += (int32_t)xi[k];
+                    } else {
+                        /* trit = -1 (u == 2) → forward X[i, k] with negation. */
+                        acc -= (int32_t)xi[k];
+                    }
+                }
+            }
+
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)acc;
+        }
+    }
+
+    if (skipped_zeros) *skipped_zeros = local_skipped;
+}
+
 void m4t_ternary_5in8_matmul_bt_scalar_ref(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,

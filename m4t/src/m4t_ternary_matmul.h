@@ -181,6 +181,37 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
     int M, int K, int N
 );
 
+/* Sparse-routed variant — first explicitly-routed compute primitive in
+ * the substrate. Same math as m4t_ternary_5in8_matmul_bt; same bit-exact
+ * output. The difference: this walks the 5-in-8 byte stream and treats
+ * each trit as a *route decision* rather than a numeric coefficient:
+ *
+ *   trit = 0   → connection is absent; skip X[i, k] load entirely.
+ *   trit = +1  → forward X[i, k] to accumulator with positive sign.
+ *   trit = -1  → forward X[i, k] to accumulator with negated sign.
+ *
+ * No multiplications are performed. The substrate's existing primitives
+ * already encoded routing structure in their data (the W matrix); this
+ * primitive recognizes and uses that structure rather than computing
+ * through it densely.
+ *
+ * For BitNet's weight distribution (~40% zero trits), this skips ~40%
+ * of the work — fewer X loads, fewer adds, zero multiplies. Bit-exact
+ * vs dense because integer addition of zeros is a no-op.
+ *
+ * Optional output: if `skipped_zeros` != NULL, writes the count of
+ * zero trits encountered (across all M × N output cells). Useful for
+ * sparsity measurement.
+ *
+ * Per the project memory's "math as signatures via routing" foundation. */
+void m4t_ternary_5in8_matmul_bt_routed(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N,
+    int64_t* skipped_zeros  /* optional; pass NULL to skip counting */
+);
+
 /* Per TD-7: §20 sibling with X also packed 5-in-8 (sub-2-bit X-packing).
  *   Y = X @ W^T  where both X and W are §20-packed.
  *
