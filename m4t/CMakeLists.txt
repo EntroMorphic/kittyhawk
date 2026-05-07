@@ -52,6 +52,7 @@ set(M4T_CORE_SRCS
     src/m4t_mtfp4.c
     src/m4t_route.c
     src/m4t_ternary_matmul.c
+    src/m4t_ternary_routed16.c
 )
 
 add_library(m4t STATIC ${M4T_CORE_SRCS})
@@ -182,6 +183,12 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_ternary_routed PRIVATE m4t_test m)
     gesh_test_undebug(test_m4t_ternary_routed)
     add_test(NAME m4t_ternary_routed COMMAND test_m4t_ternary_routed)
+
+    # routed16: NEON sparse-routed kernel — first production routing primitive.
+    add_executable(test_m4t_ternary_routed16 tests/test_m4t_ternary_routed16.c)
+    target_link_libraries(test_m4t_ternary_routed16 PRIVATE m4t_test m)
+    gesh_test_undebug(test_m4t_ternary_routed16)
+    add_test(NAME m4t_ternary_routed16 COMMAND test_m4t_ternary_routed16)
 
     # Ternary MAC NEON path test. Bit-exact verification of production
     # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
