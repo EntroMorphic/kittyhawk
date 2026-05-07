@@ -89,8 +89,11 @@ void bitnet_block_scratch_alloc(bitnet_block_scratch_t* s) {
     s->x              = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
     s->residual       = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
     s->x_norm         = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->x_norm_input   = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
     s->q              = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
+    s->q_pre_rope     = calloc(BITNET_HIDDEN_SIZE,         sizeof(m4t_mtfp_t));
     s->k              = calloc(BITNET_KV_PROJ_DIM,         sizeof(m4t_mtfp_t));
+    s->k_pre_rope     = calloc(BITNET_KV_PROJ_DIM,         sizeof(m4t_mtfp_t));
     s->v              = calloc(BITNET_KV_PROJ_DIM,         sizeof(m4t_mtfp_t));
     /* Single-token: attn_scores is just [num_heads × 1 × 1] = 20 cells.
      * Multi-token: would scale with seq_len. */
@@ -106,8 +109,10 @@ void bitnet_block_scratch_alloc(bitnet_block_scratch_t* s) {
 }
 
 void bitnet_block_scratch_free(bitnet_block_scratch_t* s) {
-    free(s->x); free(s->residual); free(s->x_norm);
-    free(s->q); free(s->k); free(s->v);
+    free(s->x); free(s->residual); free(s->x_norm); free(s->x_norm_input);
+    free(s->q); free(s->q_pre_rope);
+    free(s->k); free(s->k_pre_rope);
+    free(s->v);
     free(s->attn_scores); free(s->attn_output); free(s->attn_sub_norm);
     free(s->gate); free(s->up); free(s->gate_act); free(s->ffn_sub_norm);
     free(s->q_int8);
@@ -152,6 +157,10 @@ void bitnet_forward_block(
     /* x_norm = input_layernorm(x) */
     m4t_mtfp_rmsnorm(s->x_norm, s->x, w->gamma_input_norm,
                         /* eps_mtfp19 */ 1, BITNET_HIDDEN_SIZE);
+    /* Snapshot for the dump — s->x_norm gets overwritten by
+     * post_attention_layernorm later in the block. */
+    memcpy(s->x_norm_input, s->x_norm,
+           BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     /* TODO(work-unit 1.5): empirically determine eps_mtfp19. The HF
      * eps is 1e-5 (FP); the substrate-side equivalent depends on
      * what scale the activations land in. Capture x's magnitude
@@ -208,6 +217,11 @@ void bitnet_forward_block(
         memset(s->k, 0, BITNET_KV_PROJ_DIM * sizeof(m4t_mtfp_t));
         memset(s->v, 0, BITNET_KV_PROJ_DIM * sizeof(m4t_mtfp_t));
     }
+
+    /* Snapshot pre-RoPE Q, K for the dump (HF's q_proj/k_proj hooks
+     * capture pre-RoPE; this lets the comparison be apples-to-apples). */
+    memcpy(s->q_pre_rope, s->q, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
+    memcpy(s->k_pre_rope, s->k, BITNET_KV_PROJ_DIM * sizeof(m4t_mtfp_t));
 
     /* RoPE on Q, K. */
     m4t_mtfp_rope_apply(s->q, s->k, position,
@@ -442,8 +456,11 @@ static int dump_activations_to_file(
         fprintf(stderr, "[harness] cannot open %s for write\n", path);
         return 1;
     }
-    /* Tiny header: magic "ACTV", layer index, then 5 captured tensors. */
-    fwrite("ACTV", 1, 4, f);
+    /* Header: magic "ACTV2" (bumped from ACTV in red-team), layer,
+     * sizes. v2 adds x_norm_input, q_pre_rope, k_pre_rope captures. */
+    fwrite("ACTV2", 1, 5, f);
+    /* 3-byte pad to keep 4-byte alignment for the int32s that follow. */
+    char pad[3] = {0, 0, 0}; fwrite(pad, 1, 3, f);
     int32_t li = layer;
     fwrite(&li, sizeof(int32_t), 1, f);
     int32_t hidden = BITNET_HIDDEN_SIZE;
@@ -452,20 +469,31 @@ static int dump_activations_to_file(
     fwrite(&hidden, sizeof(int32_t), 1, f);
     fwrite(&intermediate, sizeof(int32_t), 1, f);
     fwrite(&kv_proj, sizeof(int32_t), 1, f);
-    /* x_norm (post input_layernorm) */
-    fwrite(s->x_norm, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
-    /* q, k, v (post-projection) */
-    fwrite(s->q, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
-    fwrite(s->k, sizeof(m4t_mtfp_t), BITNET_KV_PROJ_DIM, f);
+
+    /* Capture order (matches scripts/compare_activations.py CAPTURE_ORDER): */
+    /* 1. x_norm_input — true post-input_layernorm output */
+    fwrite(s->x_norm_input, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+    /* 2. q_pre_rope — post-q_proj+α scale, before RoPE */
+    fwrite(s->q_pre_rope, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+    /* 3. k_pre_rope — post-k_proj+α scale, before RoPE */
+    fwrite(s->k_pre_rope, sizeof(m4t_mtfp_t), BITNET_KV_PROJ_DIM, f);
+    /* 4. v — post-v_proj+α scale (no RoPE on V) */
     fwrite(s->v, sizeof(m4t_mtfp_t), BITNET_KV_PROJ_DIM, f);
-    /* attn_sub_norm output */
+    /* 5. q_post_rope — post-RoPE Q (no HF analog hooked) */
+    fwrite(s->q, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+    /* 6. k_post_rope — post-RoPE K */
+    fwrite(s->k, sizeof(m4t_mtfp_t), BITNET_KV_PROJ_DIM, f);
+    /* 7. attn_sub_norm output */
     fwrite(s->attn_sub_norm, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
-    /* gate, up (post-projection FFN) */
+    /* 8. x_norm — post-attn-residual rmsnorm input (post_attention_layernorm output) */
+    fwrite(s->x_norm, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+    /* 9. gate (NB: post-relu²-inplace; raw gate_proj NOT captured) */
     fwrite(s->gate, sizeof(m4t_mtfp_t), BITNET_INTERMEDIATE_SIZE, f);
+    /* 10. up (post-up_proj+α scale, no relu²) */
     fwrite(s->up, sizeof(m4t_mtfp_t), BITNET_INTERMEDIATE_SIZE, f);
-    /* ffn_sub_norm output */
+    /* 11. ffn_sub_norm output */
     fwrite(s->ffn_sub_norm, sizeof(m4t_mtfp_t), BITNET_INTERMEDIATE_SIZE, f);
-    /* block_output (final residual added) */
+    /* 12. block_output */
     fwrite(s->x, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
     fclose(f);
     return 0;

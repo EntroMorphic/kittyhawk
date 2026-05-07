@@ -175,11 +175,17 @@ typedef struct {
     /* Block input/output (also residual buffer). MTFP19. */
     m4t_mtfp_t* x;                /* [HIDDEN] */
     m4t_mtfp_t* residual;         /* [HIDDEN] — pre-norm copy of x */
-    /* Post-norm intermediate. MTFP19. */
+    /* Post-norm intermediate. Reused across both RMSNorms in a block,
+     * so an intermediate dump (x_norm_input) preserves the post-input-LN
+     * value before the post-attn-LN overwrites it. */
     m4t_mtfp_t* x_norm;           /* [HIDDEN] */
-    /* QKV projections (post-BitLinear, MTFP19). */
+    m4t_mtfp_t* x_norm_input;     /* [HIDDEN] copy of post-input-LN x_norm (for dumps) */
+    /* QKV projections (post-BitLinear, MTFP19). q_pre_rope holds the
+     * BitLinear scale-applied Q before RoPE rotation; q is post-RoPE. */
     m4t_mtfp_t* q;                /* [NUM_ATTENTION_HEADS × HEAD_DIM] = [HIDDEN] */
+    m4t_mtfp_t* q_pre_rope;       /* [HIDDEN] for dump */
     m4t_mtfp_t* k;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
+    m4t_mtfp_t* k_pre_rope;       /* [KV_PROJ_DIM] for dump */
     m4t_mtfp_t* v;                /* [NUM_KV_HEADS × HEAD_DIM] = [KV_PROJ_DIM] */
     /* Attention scratch. */
     m4t_mtfp_t* attn_scores;      /* [NUM_ATTENTION_HEADS × seq_q × seq_k] — small for single-token */

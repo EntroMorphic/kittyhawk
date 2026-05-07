@@ -36,8 +36,24 @@ except ImportError as e:
     sys.exit(1)
 
 
-# Tensor capture order in the C-side dump (matches bitnet_harness.c).
-CAPTURE_ORDER = [
+# Tensor capture order in the C-side dump (ACTV2 format; see bitnet_harness.c).
+CAPTURE_ORDER_V2 = [
+    ("input_layernorm.output",          "hidden"),       # 1. x_norm_input
+    ("attn.q_pre_rope",                  "hidden"),       # 2. q before RoPE
+    ("attn.k_pre_rope",                  "kv_proj"),      # 3. k before RoPE
+    ("attn.v",                           "kv_proj"),      # 4. v
+    ("attn.q_post_rope",                 "hidden"),       # 5. q after RoPE
+    ("attn.k_post_rope",                 "kv_proj"),      # 6. k after RoPE
+    ("attn_sub_norm.output",             "hidden"),       # 7
+    ("post_attention_layernorm.output",  "hidden"),       # 8. x_norm (overwritten)
+    ("ffn.gate_post_relu2",              "intermediate"), # 9. gate (post-relu²)
+    ("ffn.up_proj",                      "intermediate"), # 10
+    ("ffn_sub_norm.output",              "intermediate"), # 11
+    ("block_output",                     "hidden"),       # 12
+]
+
+# Legacy ACTV (v1) format.
+CAPTURE_ORDER_V1 = [
     ("input_layernorm.output",          "hidden"),
     ("attn.q",                           "hidden"),
     ("attn.k",                           "kv_proj"),
@@ -51,25 +67,29 @@ CAPTURE_ORDER = [
 
 
 def read_c_dump(path: str):
-    """Parse the C-harness dump format."""
+    """Parse the C-harness dump format (auto-detects v1 vs v2 by magic)."""
     with open(path, "rb") as f:
         data = f.read()
-    if len(data) < 20 or data[:4] != b"ACTV":
+    if data[:5] == b"ACTV2":
+        order = CAPTURE_ORDER_V2
+        # ACTV2 header: 5-byte magic + 3-byte pad + int32 layer + int32×3 sizes = 24 bytes.
+        layer_idx, hidden, intermediate, kv_proj = struct.unpack("<iiii", data[8:24])
+        offset = 24
+    elif data[:4] == b"ACTV":
+        order = CAPTURE_ORDER_V1
+        layer_idx, hidden, intermediate, kv_proj = struct.unpack("<iiii", data[4:20])
+        offset = 20
+    else:
         raise ValueError(f"bad magic in {path}")
-    layer_idx, hidden, intermediate, kv_proj = struct.unpack("<iiii", data[4:20])
-    sizes = {
-        "hidden": hidden,
-        "intermediate": intermediate,
-        "kv_proj": kv_proj,
-    }
+    sizes = {"hidden": hidden, "intermediate": intermediate, "kv_proj": kv_proj}
     out = {"_meta": {"layer": layer_idx, "hidden": hidden,
                       "intermediate": intermediate, "kv_proj": kv_proj}}
-    offset = 20
-    for name, size_key in CAPTURE_ORDER:
+    for name, size_key in order:
         n = sizes[size_key]
         arr = np.frombuffer(data[offset:offset + n * 4], dtype=np.int32)
-        out[name] = arr.copy()  # detach from buffer
+        out[name] = arr.copy()
         offset += n * 4
+    out["_capture_order"] = [n for n, _ in order]
     return out
 
 
@@ -158,19 +178,34 @@ def main():
             print(f"# layer {layer_idx}: {e}")
             continue
 
+        # Map substrate capture site → HF reference key. Keys with no HF
+        # analog (e.g., post-RoPE Q/K — HF only hooks pre-RoPE q_proj output,
+        # post-relu²-gate) are listed but skip the comparison for those.
         site_to_ref_key = {
-            "input_layernorm.output":    f"layer.{layer_idx}.input_layernorm.output",
-            "attn.q":                    f"layer.{layer_idx}.attn.q",
-            "attn.k":                    f"layer.{layer_idx}.attn.k",
-            "attn.v":                    f"layer.{layer_idx}.attn.v",
-            "attn_sub_norm.output":      f"layer.{layer_idx}.attn_sub_norm.output",
-            "ffn.gate_proj":             f"layer.{layer_idx}.ffn.gate_proj",
-            "ffn.up_proj":               f"layer.{layer_idx}.ffn.up_proj",
-            "ffn_sub_norm.output":       f"layer.{layer_idx}.ffn_sub_norm.output",
-            "block_output":              f"layer.{layer_idx}.block_output",
+            "input_layernorm.output":           f"layer.{layer_idx}.input_layernorm.output",
+            "attn.q_pre_rope":                   f"layer.{layer_idx}.attn.q",
+            "attn.k_pre_rope":                   f"layer.{layer_idx}.attn.k",
+            "attn.v":                            f"layer.{layer_idx}.attn.v",
+            "attn.q_post_rope":                  None,
+            "attn.k_post_rope":                  None,
+            "attn_sub_norm.output":              f"layer.{layer_idx}.attn_sub_norm.output",
+            "post_attention_layernorm.output":   f"layer.{layer_idx}.post_attention_layernorm.output",
+            "ffn.gate_post_relu2":               None,
+            "ffn.up_proj":                       f"layer.{layer_idx}.ffn.up_proj",
+            "ffn_sub_norm.output":               f"layer.{layer_idx}.ffn_sub_norm.output",
+            "block_output":                      f"layer.{layer_idx}.block_output",
+            # Legacy ACTV v1 names — map to whatever HF analog still works.
+            "attn.q":                            f"layer.{layer_idx}.attn.q",
+            "attn.k":                            f"layer.{layer_idx}.attn.k",
+            "ffn.gate_proj":                     f"layer.{layer_idx}.ffn.gate_proj",
         }
 
-        for c_key, _ in CAPTURE_ORDER:
+        capture_order = c_dump.get("_capture_order", [n for n, _ in CAPTURE_ORDER_V1])
+        for c_key in capture_order:
+            if site_to_ref_key.get(c_key) is None:
+                continue  # no HF analog
+            _ = c_key  # used below
+            # Iterate by single key now (legacy CAPTURE_ORDER tuple unpacking removed)
             ref_key = site_to_ref_key[c_key]
             c_arr = c_dump.get(c_key)
             if c_arr is None or ref_key not in ref:

@@ -44,7 +44,12 @@ except ImportError as e:
           f"Install with: pip install torch transformers", file=sys.stderr)
     sys.exit(1)
 
-MODEL_REPO = "microsoft/bitnet-b1.58-2B-4T"
+MODEL_REPO = "microsoft/bitnet-b1.58-2B-4T-bf16"
+# Packed-weights repo `microsoft/bitnet-b1.58-2B-4T` is the inference target,
+# but transformers' built-in BitNet model uses plain nn.Linear and can't
+# reshape the packed (out/4, in) tensors. The `-bf16` companion repo holds
+# the same trained weights as standard bf16 nn.Linear matrices — exactly
+# what we want for the HF reference forward pass.
 
 
 def main():
