@@ -1132,6 +1132,209 @@ void m4t_mtfp_rope_apply(
     }
 }
 
+/* ── Integer reciprocal (Newton-Raphson) ────────────────────────────────
+ *
+ * Same shape as m4t_int32_rsqrt: pure-int NR with __int128 intermediate.
+ *
+ * Algorithm:
+ *   y_{n+1} = y_n × (2·Q − src · y_n)  (then rescale)
+ * Fixed-point: y at scale Q = 2^30. 2·Q = 2^31. The src · y product
+ * is at scale Q. (2Q − src·y) is at scale Q. y · (2Q − src·y) is at
+ * scale Q² = 2^60. Right-shift by 30 to recover y at scale Q.
+ *
+ * Initial guess from clz: log2(src) tells us approximate magnitude;
+ * y_0 = 2^(60 - log2(src)) gives an order-of-magnitude correct seed
+ * that NR refines quadratically.
+ *
+ * 5 iterations for full int32 precision (per rsqrt's empirical finding). */
+
+m4t_mtfp_t m4t_int32_recip_scalar_ref(m4t_mtfp_t src) {
+    if (src <= 0) return 0;
+    double v = 1073741824.0 / (double)src;  /* 2^30 / src */
+    int64_t r = (int64_t)(v + 0.5);
+    if (r < 1)             r = 1;
+    if (r > 1073741824LL)  r = 1073741824LL;
+    return (m4t_mtfp_t)r;
+}
+
+m4t_mtfp_t m4t_int32_recip(m4t_mtfp_t src) {
+    if (src <= 0) return 0;
+    if (src == 1) return 1073741824;  /* 2^30 / 1 */
+    /* Initial guess: NR recip needs y_0 such that x · y_0 ∈ (0, 2);
+     * convergence is poor near the boundaries. We aim for x · y_0 ≈ 1.
+     * For src ∈ [2^k, 2^(k+1)): pick y_0 = 2^(29-k), giving x · y_0
+     * ∈ [0.5, 1.0). Comfortably mid-basin. */
+    int log2_src = 31 - __builtin_clz((uint32_t)src);
+    int exp = 29 - log2_src;
+    if (exp < 0) exp = 0;
+    int64_t y = (int64_t)1 << exp;
+    if (y < 1) y = 1;
+
+    /* NR: y_new = y × (2Q - src·y) >> 30. Q = 2^30, 2Q = 2^31. */
+    const __int128 two_Q = (__int128)1 << 31;
+    for (int it = 0; it < 5; it++) {
+        __int128 src_y = (__int128)(uint32_t)src * (__int128)y;  /* scale Q */
+        __int128 t     = two_Q - src_y;                          /* scale Q */
+        __int128 y_t   = (__int128)y * t;                        /* scale Q² = 2^60 */
+        y = (int64_t)(y_t >> 30);                                /* recover scale Q */
+        if (y < 1)              y = 1;
+        if (y > 1073741824LL)   y = 1073741824LL;
+    }
+    return (m4t_mtfp_t)y;
+}
+
+/* ── Softmax (LUT-based exp + integer reciprocal) ──────────────────────
+ *
+ * Per journal/softmax_design_lmm.md.
+ *
+ * exp LUT covers z ∈ [-LUT_RANGE, 0] sampled at LUT_RES points; values
+ * below the range underflow to 0. exp at scale 2^30.
+ *
+ * Per-cell pipeline:
+ *   z = x[i] - max(x)             (int32, ≤ 0)
+ *   e[i] = exp_lut(z)             (int32 at scale 2^30)
+ *   sum = Σ e[i]                  (int64, max ≈ n × 2^30)
+ *   inv = 2^30 / (sum >> shift)    (m4t_int32_recip)
+ *   y[i] = (e[i] · inv) >> (30 - shift)
+ *
+ * Where shift brings sum into int31 range for the reciprocal call. */
+
+static int32_t* g_softmax_exp_lut = NULL;
+static int      g_softmax_lut_initialized = 0;
+
+static void softmax_init_lut(void) {
+    if (g_softmax_lut_initialized) return;
+    int32_t* lut = (int32_t*)malloc((size_t)M4T_SOFTMAX_LUT_RES * sizeof(int32_t));
+    assert(lut);
+    double scale = (double)M4T_SOFTMAX_OUT_SCALE;  /* 2^30 */
+    for (int k = 0; k < M4T_SOFTMAX_LUT_RES; k++) {
+        double z = -(double)k * (double)M4T_SOFTMAX_LUT_RANGE
+                   / (double)M4T_SOFTMAX_LUT_RES;  /* z ∈ [0, -LUT_RANGE) */
+        double v = exp(z) * scale;
+        int32_t vi = (int32_t)(v + 0.5);
+        if (vi < 0) vi = 0;
+        if (vi > M4T_SOFTMAX_OUT_SCALE) vi = M4T_SOFTMAX_OUT_SCALE;
+        lut[k] = vi;
+    }
+    g_softmax_exp_lut = lut;
+    g_softmax_lut_initialized = 1;
+}
+
+/* Compute exp(z) at scale 2^30 for z ≤ 0. Returns 0 for z < -LUT_RANGE.
+ * Linear interpolation between LUT entries. */
+static int32_t softmax_exp_int(int32_t z) {
+    if (z >= 0) return M4T_SOFTMAX_OUT_SCALE;
+    int32_t neg_z = -z;
+    if (neg_z >= M4T_SOFTMAX_LUT_RANGE) return 0;
+    /* index = neg_z × (LUT_RES / LUT_RANGE). LUT_RES=4096, LUT_RANGE=30
+     * → multiplier = 4096/30 ≈ 136.5333. Use Q16 fixed-point: 136.5333 × 2^16
+     * → (LUT_RES << 16) / LUT_RANGE. */
+    int64_t idx_q16 = (int64_t)neg_z * M4T_SOFTMAX_LUT_RES * 65536LL / M4T_SOFTMAX_LUT_RANGE;
+    int idx = (int)(idx_q16 >> 16);
+    int frac = (int)(idx_q16 & 0xFFFF);
+    if (idx >= M4T_SOFTMAX_LUT_RES - 1) {
+        return g_softmax_exp_lut[M4T_SOFTMAX_LUT_RES - 1];
+    }
+    int32_t a = g_softmax_exp_lut[idx];
+    int32_t b = g_softmax_exp_lut[idx + 1];
+    /* Linear interp: a + (b - a) × frac / 2^16. Note b ≤ a (LUT is decreasing). */
+    int32_t v = a + (int32_t)(((int64_t)(b - a) * (int64_t)frac) >> 16);
+    return v;
+}
+
+/* Higher-precision reciprocal: 2^60 / src for src ∈ [1, INT64_MAX].
+ * m4t_int32_recip's output (at scale 2^30) is too coarse for softmax
+ * normalization — when sum is near 2^30, the int truncation produces
+ * ~10% bias. This variant uses pure-int NR with __int128 to keep full
+ * precision in the inv factor; the per-cell multiply then composes
+ * cleanly without accumulating that bias.
+ *
+ * Internal use only. */
+static int64_t softmax_recip60(int64_t src) {
+    if (src <= 0) return 0;
+    int log2_src = 63 - __builtin_clzll((uint64_t)src);
+    int exp_init = 60 - log2_src;
+    if (exp_init < 0) exp_init = 0;
+    if (exp_init > 60) exp_init = 60;
+    int64_t y = (int64_t)1 << exp_init;
+    /* NR: y_new = y × (2·Q − src · y) / Q at Q = 2^60. */
+    const __int128 two_Q = (__int128)1 << 61;
+    for (int it = 0; it < 6; it++) {
+        __int128 src_y = (__int128)src * (__int128)y;  /* scale Q */
+        __int128 t = two_Q - src_y;                    /* scale Q */
+        __int128 y_t = (__int128)y * t;                /* scale Q² */
+        y = (int64_t)(y_t >> 60);                      /* recover scale Q */
+        if (y < 1) y = 1;
+    }
+    return y;
+}
+
+void m4t_mtfp_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
+    assert(n >= 1);
+    assert(y && x);
+    softmax_init_lut();
+
+    /* Find max. */
+    m4t_mtfp_t mx = x[0];
+    for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
+
+    /* exp(x[i] - max) into a scratch; sum in int64. malloc rather than
+     * alloca: BitNet's attention can have n up to ~4096 (max seq_len);
+     * stack pressure is unwarranted for a once-per-call op. */
+    int32_t* e = (int32_t*)malloc((size_t)n * sizeof(int32_t));
+    assert(e);
+    int64_t sum = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t z = (int64_t)x[i] - (int64_t)mx;  /* ≤ 0 */
+        int32_t z_clamped = (z < (int64_t)INT32_MIN) ? INT32_MIN : (int32_t)z;
+        e[i] = softmax_exp_int(z_clamped);
+        sum += e[i];
+    }
+    if (sum < 1) sum = 1;
+
+    /* High-precision reciprocal: inv60 = 2^60 / sum (full int precision).
+     *
+     * Algebra:
+     *   want: y[i] = e[i] / sum_real × 2^30
+     *               = e[i] × 2^30 / sum_int    (sum_int at scale 2^30)
+     *   inv60 = 2^60 / sum_int → e[i] × inv60 = e[i] × 2^60 / sum_int.
+     *   y[i] = e[i] × inv60 >> 30 = e[i] × 2^30 / sum_int.  ✓ */
+    int64_t inv60 = softmax_recip60(sum);
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)e[i] * (__int128)inv60;
+        int64_t scaled = (int64_t)(prod >> 30);
+        if (scaled < 0) scaled = 0;
+        if (scaled > M4T_SOFTMAX_OUT_SCALE) scaled = M4T_SOFTMAX_OUT_SCALE;
+        y[i] = (m4t_mtfp_t)scaled;
+    }
+    free(e);
+}
+
+void m4t_mtfp_softmax_scalar_ref(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
+    /* Independent FP oracle: runtime libm exp, FP sum, FP divide. */
+    assert(n >= 1);
+    assert(y && x);
+    m4t_mtfp_t mx = x[0];
+    for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
+    double* e = (double*)malloc((size_t)n * sizeof(double));
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        double z = (double)x[i] - (double)mx;
+        if (z < -(double)M4T_SOFTMAX_LUT_RANGE) e[i] = 0.0;
+        else e[i] = exp(z);
+        sum += e[i];
+    }
+    if (sum <= 0.0) sum = 1.0;
+    double scale = (double)M4T_SOFTMAX_OUT_SCALE / sum;
+    for (int i = 0; i < n; i++) {
+        double v = e[i] * scale;
+        if (v < 0.0) v = 0.0;
+        if (v > (double)M4T_SOFTMAX_OUT_SCALE) v = (double)M4T_SOFTMAX_OUT_SCALE;
+        y[i] = (m4t_mtfp_t)(v + 0.5);
+    }
+    free(e);
+}
+
 void m4t_mtfp_rope_apply_scalar_ref(
     m4t_mtfp_t* q, m4t_mtfp_t* k,
     int position,

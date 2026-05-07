@@ -165,6 +165,12 @@ if(M4T_BUILD_TESTS)
     gesh_test_undebug(test_m4t_rope)
     add_test(NAME m4t_rope COMMAND test_m4t_rope)
 
+    # Softmax + integer reciprocal — work-unit 4.
+    add_executable(test_m4t_softmax tests/test_m4t_softmax.c)
+    target_link_libraries(test_m4t_softmax PRIVATE m4t_test m)
+    gesh_test_undebug(test_m4t_softmax)
+    add_test(NAME m4t_softmax COMMAND test_m4t_softmax)
+
     # Ternary MAC NEON path test. Bit-exact verification of production
     # m4t_mtfp_ternary_matmul_bt (NEON via vmlal_s32 dispatch when
     # M4T_HAS_NEON) against m4t_mtfp_ternary_matmul_bt_scalar_ref

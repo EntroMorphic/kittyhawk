@@ -453,6 +453,46 @@ void m4t_mtfp_rope_apply_scalar_ref(
     double theta_base
 );
 
+/* ── Integer reciprocal (Newton-Raphson) ────────────────────────────────
+ *
+ * dst = round(2^30 / src) for src ∈ [1, INT32_MAX].
+ *
+ * Output range: [1, 2^30] (clamped). For src = 1 → 2^30, for src = 2^30
+ * → 1.
+ *
+ * Pure-int Newton-Raphson:
+ *   y_{n+1} = y_n · (2·Q − src · y_n) / Q,  Q = 2^30
+ * 5 iterations from a good initial guess give full int32 precision.
+ *
+ * Used by softmax for the 1/Σ exp step. */
+m4t_mtfp_t m4t_int32_recip(m4t_mtfp_t src);
+m4t_mtfp_t m4t_int32_recip_scalar_ref(m4t_mtfp_t src);
+
+/* ── Softmax ───────────────────────────────────────────────────────────
+ *
+ * y[i] = exp(x[i] - max(x)) / Σ exp(x[j] - max(x))
+ *
+ * Input contract: x[i] is int32 representing natural-log units —
+ * 1 LSB = 1 nat. Caller pre-rescales their score to this form.
+ *
+ * Output: y[i] ∈ [0, 2^30] with Σ y[i] ≈ 2^30 (probabilities at
+ * scale 2^30).
+ *
+ * Implementation: exp LUT (init-time libm) covers z ∈ [-30, 0]; values
+ * below underflow to 0. Reciprocal of sum via m4t_int32_recip with
+ * pre-shift to fit int31. Per-cell scalar loop.
+ *
+ * n must be ≥ 1. */
+#define M4T_SOFTMAX_LUT_RANGE  30
+#define M4T_SOFTMAX_LUT_RES    4096
+#define M4T_SOFTMAX_OUT_SCALE  ((int32_t)1 << 30)
+
+void m4t_mtfp_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n);
+
+/* Independent FP test oracle. Runtime libm exp; same algorithm
+ * shape as production. Tolerance comparison. */
+void m4t_mtfp_softmax_scalar_ref(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n);
+
 #ifdef __cplusplus
 }
 #endif
