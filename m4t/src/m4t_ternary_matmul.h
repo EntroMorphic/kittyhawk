@@ -181,6 +181,46 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
     int M, int K, int N
 );
 
+/* §20 routing-shaped matmul. Same I/O as m4t_ternary_5in8_matmul_bt;
+ * same bit-exact output. The internal compute is operationally
+ * routed, not multiplicative:
+ *
+ * Per 16-trit chunk per output, the kernel decodes the W trit signs
+ * (already a routing operation via vqtbl1q_s8 LUT lookup), then
+ * dispatches per lane using mask + select:
+ *
+ *   pos_mask = vceqq_s8(signs, +1)         // lane is +1 trit
+ *   neg_mask = vceqq_s8(signs, -1)         // lane is -1 trit
+ *   pos_sel  = vandq_s8(X, pos_mask)       // X if +1, else 0
+ *   neg_sel  = vandq_s8(X, neg_mask)       // X if -1, else 0
+ *   diff     = vsubq_s8(pos_sel, neg_sel)  // contribution per lane
+ *   acc     += vaddlvq_s8(diff)
+ *
+ * No SDOT, no multiply-accumulate. Each per-cell decision dispatches
+ * on the trit value via mask comparison and value selection. Lanes
+ * where the trit routes to 0 contribute 0 because the mask is 0
+ * (vandq_s8 zeros that lane), not because anything multiplies by 0.
+ *
+ * This is the architecture-conformant path per
+ * memory/feedback_pure_ternary_routed_architecture.md (2026-05-08).
+ * Multiplicative-equivalent kernels (m4t_ternary_5in8_matmul_bt) are
+ * preserved as performance-targeted siblings; this kernel is the
+ * structural definition of "routing × ternary × matmul" on the
+ * substrate.
+ *
+ * Speed: ~3× slower than m4t_ternary_5in8_matmul_bt at typical
+ * BitNet shapes (per the bench in journal/route_matmul_bench.md).
+ * The cost is the architectural commitment to dispatch-shaped
+ * compute over multiplicative compute.
+ *
+ * Preconditions: same as m4t_ternary_5in8_matmul_bt. */
+void m4t_ternary_5in8_matmul_bt_route(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
 /* Scalar-only routed reference. Test/measurement oracle that walks the
  * 5-in-8 byte stream treating each trit as a route decision (0 → skip
  * X[i, k]; +1 → add X[i, k]; -1 → subtract X[i, k]). Bit-exact vs the

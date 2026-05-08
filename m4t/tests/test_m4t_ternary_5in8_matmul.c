@@ -129,6 +129,39 @@ static int test_pack_golden(void) {
     return 0;
 }
 
+/* Test 3b: bit-exact: route kernel (dispatch-shaped) vs scalar oracle. */
+static int test_route_bit_exact(int K, int M, int N, int n_samples) {
+    int Kp = (K + 4) / 5;
+    m4t_trit_t* X = (m4t_trit_t*)calloc((size_t)M * K, sizeof(m4t_trit_t));
+    m4t_trit_t* W_unp = (m4t_trit_t*)calloc((size_t)N * K, sizeof(m4t_trit_t));
+    uint8_t* W_pkd = (uint8_t*)calloc((size_t)N * Kp, 1);
+    m4t_mtfp_t* Y_route = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* Y_ref   = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+
+    for (int s = 0; s < n_samples; s++) {
+        rng_state = (uint32_t)(s + 11) * 0xCC9E2D51u;
+        gen_ternary(X, M * K);
+        gen_ternary(W_unp, N * K);
+        for (int j = 0; j < N; j++) {
+            m4t_pack_trits_5in8_1d(W_pkd + (size_t)j * Kp,
+                                   W_unp + (size_t)j * K, K);
+        }
+
+        m4t_ternary_5in8_matmul_bt_route(Y_route, X, W_pkd, M, K, N);
+        m4t_ternary_5in8_matmul_bt_scalar_ref(Y_ref, X, W_pkd, M, K, N);
+
+        if (memcmp(Y_route, Y_ref, (size_t)M * N * sizeof(m4t_mtfp_t)) != 0) {
+            fprintf(stderr,
+                "FAIL: route vs scalar_ref mismatch K=%d M=%d N=%d sample=%d\n",
+                K, M, N, s);
+            free(X); free(W_unp); free(W_pkd); free(Y_route); free(Y_ref);
+            return 1;
+        }
+    }
+    free(X); free(W_unp); free(W_pkd); free(Y_route); free(Y_ref);
+    return 0;
+}
+
 /* Test 3: bit-exact NEON vs scalar across random workloads. */
 static int test_matmul_bit_exact(int K, int M, int N, int n_samples) {
     /* Per TD-1 / spec §20: Kp = ceil(K/5) bytes per packed row. For
@@ -277,7 +310,58 @@ int main(void) {
         }
     }
 
+    /* m4t_ternary_5in8_matmul_bt_route: routing-shaped sibling.
+     * Must be bit-exact vs scalar_ref oracle across the same shape sweep. */
+    {
+        /* Aligned. */
+        int Ks_r[] = { 80, 160, 320 };
+        int Ms_r[] = { 1, 4, 8 };
+        int Ns_r[] = { 4, 16, 64 };
+        for (size_t ki = 0; ki < sizeof(Ks_r)/sizeof(Ks_r[0]); ki++) {
+            for (size_t mi = 0; mi < sizeof(Ms_r)/sizeof(Ms_r[0]); mi++) {
+                for (size_t ni = 0; ni < sizeof(Ns_r)/sizeof(Ns_r[0]); ni++) {
+                    if (test_route_bit_exact(Ks_r[ki], Ms_r[mi], Ns_r[ni], 5)) {
+                        return 1;
+                    }
+                }
+            }
+        }
+        /* K%80 sweep. */
+        for (int km = 1; km < 80; km++) {
+            int K_test = 160 + km;
+            if (test_route_bit_exact(K_test, 1, 64, 2)) {
+                fprintf(stderr, "FAIL route: K%%80 sweep K=%d\n", K_test);
+                return 1;
+            }
+        }
+        /* K<80. */
+        int K_lt80_r[] = { 1, 5, 17, 33, 79 };
+        for (size_t ki = 0; ki < sizeof(K_lt80_r)/sizeof(K_lt80_r[0]); ki++) {
+            if (test_route_bit_exact(K_lt80_r[ki], 1, 64, 5)) return 1;
+            if (test_route_bit_exact(K_lt80_r[ki], 4, 5, 5)) return 1;
+        }
+        /* M>1 + K%80 != 0. */
+        if (test_route_bit_exact(167, 4, 17, 3)) return 1;
+        if (test_route_bit_exact(287, 8, 5, 3)) return 1;
+        /* K=0 explicit. */
+        {
+            int M = 4, N = 16;
+            m4t_mtfp_t* Y = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < M * N; i++) Y[i] = 0xCAFEBABE;
+            m4t_ternary_5in8_matmul_bt_route(Y, NULL, NULL, M, 0, N);
+            for (int i = 0; i < M * N; i++) {
+                if (Y[i] != 0) {
+                    fprintf(stderr, "FAIL route K=0 expected 0, got %d\n", Y[i]);
+                    free(Y);
+                    return 1;
+                }
+            }
+            free(Y);
+        }
+    }
+
     printf("PASS: m4t_ternary_5in8_matmul (pack/unpack roundtrip + golden + "
-           "aligned bit-exact + K-tail + N-tail + both-tail bit-exact)\n");
+           "aligned bit-exact + K-tail + N-tail + both-tail + K%%80 sweep + "
+           "K=0 + route bit-exact)\n");
     return 0;
 }

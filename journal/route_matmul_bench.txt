@@ -1,0 +1,14 @@
+Routing-shaped vs multiplicative dense matmul
+Both bit-exact; route uses mask+select dispatch (no SDOT).
+n_iter=200 mean ± stddev (ms)
+
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.082±0.006  route 0.232±0.017  ratio 0.351×  diff=0
+  k/v_proj                       K= 2560 N=  640   dense 0.020±0.001  route 0.055±0.001  ratio 0.355×  diff=0
+  gate/up_proj output            K= 2560 N= 6912   dense 0.207±0.006  route 0.590±0.012  ratio 0.350×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.210±0.005  route 0.597±0.009  ratio 0.351×  diff=0
+
+── K%80 sweep ──
+  K=2400 (K%%80=0)               K= 2400 N= 2560   dense 0.072±0.002  route 0.206±0.005  ratio 0.350×  diff=0
+  K=2479 (K%%80=79)              K= 2479 N= 2560   dense 0.075±0.002  route 0.215±0.006  ratio 0.349×  diff=0
+  K=2480 (K%%80=0)               K= 2480 N= 2560   dense 0.075±0.003  route 0.213±0.005  ratio 0.351×  diff=0

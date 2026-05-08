@@ -752,6 +752,230 @@ no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
 #endif
 }
 
+/* §20 routing-shaped matmul. Architecture-conformant per
+ * memory/feedback_pure_ternary_routed_architecture.md (2026-05-08):
+ * the per-cell compute dispatches on trit value via mask + select, not
+ * multiplication. Same I/O and bit-exact output as
+ * m4t_ternary_5in8_matmul_bt; structurally distinct in the operation
+ * performed.
+ *
+ * Inner per-16-trit dispatch (no SDOT, no vmlal):
+ *   1. Decode 16 packed trits → sign vector via vqtbl1q_s8 LUT
+ *      (already a routing op — table lookup is dispatch).
+ *   2. pos_mask = vceqq_s8(signs, +1) → 0xFF where +1, 0x00 elsewhere
+ *   3. neg_mask = vceqq_s8(signs, -1) → 0xFF where -1, 0x00 elsewhere
+ *   4. pos_sel = vandq_s8(X, pos_mask) → X[k] if +1, 0 otherwise
+ *   5. neg_sel = vandq_s8(X, neg_mask) → X[k] if -1, 0 otherwise
+ *   6. diff   = vsubq_s8(pos_sel, neg_sel) → +X / -X / 0 per lane
+ *   7. acc   += vaddlvq_s8(diff) (16-int8 → int16 reduction)
+ *
+ * The masks are binary at the hardware-instruction level, but the
+ * architecture-level operation is "select X based on trit value." No
+ * lane is ever multiplied. Lanes where the trit routes to 0 contribute
+ * 0 because the mask zeros them out — not because anything multiplies
+ * by zero. This satisfies the architecture's routing condition (cell
+ * dispatch on trit value) and non-dense condition (no multiplicative
+ * processing of routed-to-zero cells).
+ *
+ * Cost vs the multiplicative kernel: ~3× more NEON ops per 80-trit
+ * chunk (5 SDOTs replaced by 5×6 = 30 dispatch ops). Bench in
+ * journal/route_matmul_bench.md. */
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+/* Boundary-tile macro for the 4-j-cell route path: takes a 16-byte W
+ * pointer; uses xv0..xv4 from enclosing scope. */
+#define M4T_5IN8_ROUTE_TILE(WJ_PTR, ACC) do {                          \
+    uint8x16_t b = vld1q_u8(WJ_PTR);                                    \
+    uint16x8_t lo16 = vshrq_n_u16(                                      \
+        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);                  \
+    uint16x8_t hi16 = vshrq_n_u16(                                      \
+        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);                 \
+    uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));    \
+    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v_r));            \
+    int8x16_t s0 = vqtbl1q_s8(lut_d0_r, low);                           \
+    int8x16_t s1 = vqtbl1q_s8(lut_d1_r, low);                           \
+    int8x16_t s2 = vqtbl2q_s8(lut_d2_r, high);                          \
+    int8x16_t s3 = vqtbl2q_s8(lut_d3_r, high);                          \
+    int8x16_t s4 = vqtbl2q_s8(lut_d4_r, high);                          \
+    /* Per digit: dispatch X via mask+select, accumulate. */            \
+    uint8x16_t pm0 = vceqq_s8(s0, pos_one_r), nm0 = vceqq_s8(s0, neg_one_r); \
+    uint8x16_t pm1 = vceqq_s8(s1, pos_one_r), nm1 = vceqq_s8(s1, neg_one_r); \
+    uint8x16_t pm2 = vceqq_s8(s2, pos_one_r), nm2 = vceqq_s8(s2, neg_one_r); \
+    uint8x16_t pm3 = vceqq_s8(s3, pos_one_r), nm3 = vceqq_s8(s3, neg_one_r); \
+    uint8x16_t pm4 = vceqq_s8(s4, pos_one_r), nm4 = vceqq_s8(s4, neg_one_r); \
+    int8x16_t d0_diff = vsubq_s8(vandq_s8(xv0, vreinterpretq_s8_u8(pm0)), \
+                                 vandq_s8(xv0, vreinterpretq_s8_u8(nm0))); \
+    int8x16_t d1_diff = vsubq_s8(vandq_s8(xv1, vreinterpretq_s8_u8(pm1)), \
+                                 vandq_s8(xv1, vreinterpretq_s8_u8(nm1))); \
+    int8x16_t d2_diff = vsubq_s8(vandq_s8(xv2, vreinterpretq_s8_u8(pm2)), \
+                                 vandq_s8(xv2, vreinterpretq_s8_u8(nm2))); \
+    int8x16_t d3_diff = vsubq_s8(vandq_s8(xv3, vreinterpretq_s8_u8(pm3)), \
+                                 vandq_s8(xv3, vreinterpretq_s8_u8(nm3))); \
+    int8x16_t d4_diff = vsubq_s8(vandq_s8(xv4, vreinterpretq_s8_u8(pm4)), \
+                                 vandq_s8(xv4, vreinterpretq_s8_u8(nm4))); \
+    (ACC) += (int32_t)vaddlvq_s8(d0_diff)                               \
+          +  (int32_t)vaddlvq_s8(d1_diff)                               \
+          +  (int32_t)vaddlvq_s8(d2_diff)                               \
+          +  (int32_t)vaddlvq_s8(d3_diff)                               \
+          +  (int32_t)vaddlvq_s8(d4_diff);                              \
+} while (0)
+#endif
+
+void m4t_ternary_5in8_matmul_bt_route(
+    m4t_mtfp_t* Y,
+    const m4t_trit_t* X,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    int Kp = (K + 4) / 5;
+    int K_aligned = K - (K % 80);
+    int K_padded  = ((K + 79) / 80) * 80;
+    int K5_padded = K_padded / 5;
+    int j_tile_end = N - (N % 4);
+
+    const uint8x16_t nine_v_r = vdupq_n_u8(9);
+    const int8x16_t  pos_one_r = vdupq_n_s8( 1);
+    const int8x16_t  neg_one_r = vdupq_n_s8(-1);
+    const int8x16_t  lut_d0_r = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
+    const int8x16_t  lut_d1_r = vld1q_s8(M4T_5IN8_LUT_LOW_D1);
+    const int8x16x2_t lut_d2_r = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 + 16),
+    } };
+    const int8x16x2_t lut_d3_r = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 + 16),
+    } };
+    const int8x16x2_t lut_d4_r = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
+    } };
+
+    int alloc_size = K5_padded * 5;
+    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)malloc((size_t)alloc_size) : NULL;
+    if (alloc_size > 0 && !X_strided) return;
+    int8_t* X_d[5];
+    for (int d = 0; d < 5; d++) X_d[d] = X_strided + (size_t)d * K5_padded;
+
+    for (int i = 0; i < M; i++) {
+        const m4t_trit_t* xi = X + (size_t)i * K;
+        for (int n = 0; n < K5_padded; n++) {
+            for (int d = 0; d < 5; d++) {
+                int trit_idx = 5 * n + d;
+                X_d[d][n] = (trit_idx < K) ? xi[trit_idx] : 0;
+            }
+        }
+
+        for (int j = 0; j < j_tile_end; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                M4T_5IN8_ROUTE_TILE(wj0 + k / 5, acc0);
+                M4T_5IN8_ROUTE_TILE(wj1 + k / 5, acc1);
+                M4T_5IN8_ROUTE_TILE(wj2 + k / 5, acc2);
+                M4T_5IN8_ROUTE_TILE(wj3 + k / 5, acc3);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb0[16] = {0}, bb1[16] = {0}, bb2[16] = {0}, bb3[16] = {0};
+                memcpy(bb0, wj0 + byte_off, (size_t)avail);
+                memcpy(bb1, wj1 + byte_off, (size_t)avail);
+                memcpy(bb2, wj2 + byte_off, (size_t)avail);
+                memcpy(bb3, wj3 + byte_off, (size_t)avail);
+                M4T_5IN8_ROUTE_TILE(bb0, acc0);
+                M4T_5IN8_ROUTE_TILE(bb1, acc1);
+                M4T_5IN8_ROUTE_TILE(bb2, acc2);
+                M4T_5IN8_ROUTE_TILE(bb3, acc3);
+            }
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)acc0;
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)acc1;
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)acc2;
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)acc3;
+        }
+
+        /* j_tail: 1-3 trailing j cells. Single-cell dispatch path. */
+        for (int j = j_tile_end; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32_t acc = 0;
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+                M4T_5IN8_ROUTE_TILE(wj + k / 5, acc);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb[16] = {0};
+                memcpy(bb, wj + byte_off, (size_t)avail);
+                M4T_5IN8_ROUTE_TILE(bb, acc);
+            }
+
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)acc;
+        }
+    }
+
+    if (X_strided) free(X_strided);
+#else
+#error "m4t_ternary_5in8_matmul_bt_route requires NEON + ARM_FEATURE_DOTPROD; \
+no scalar fallback per project rule."
+#endif
+}
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+#undef M4T_5IN8_ROUTE_TILE
+#endif
+
 /* §20 scalar reference oracle. Per-cell decoded via the spec formula
  * (u_i = (byte / 3^i) mod 3); never dispatches to NEON.
  * Test-only; production code MUST NOT call this. */
