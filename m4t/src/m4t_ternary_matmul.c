@@ -362,6 +362,13 @@ void m4t_mtfp_ternary_matmul_bt(
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_packed);
 
+    /* K=0 degenerate: dot product over zero terms is 0. Skip rest to
+     * avoid NULL+0 pointer arithmetic UB. */
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
     int Kp = M4T_TRIT_PACKED_BYTES(K);
 
     /* Per journal/m4t_matmul_tile_synthesize.md: register-tile by 4 j cells.
@@ -880,10 +887,20 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
     assert((const void*)Y != (const void*)X_packed);
     assert((const void*)Y != (const void*)W_packed);
 
+    /* K=0 degenerate: skip rest to avoid NULL+0 pointer arithmetic UB. */
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    /* K%80 fix (same pattern as m4t_ternary_5in8_matmul_bt): extend NEON
+     * tile body to K_padded; boundary tile uses stack-local zero-padded
+     * W bytes. No scalar tail. See journal/k80_fix_lmm.md. */
     int Kp = (K + 4) / 5;
-    int K5 = (K + 4) / 5;
-    int k_tile_end = K - (K % 80);
+    int K_aligned = K - (K % 80);
+    int K_padded = ((K + 79) / 80) * 80;
+    int K5_padded = K_padded / 5;
     int j_tile_end = N - (N % 4);
     int kp_tile = Kp - (Kp % 16);    /* multiple of 16 for X-decode chunking */
 
@@ -905,21 +922,15 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
         vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
     } };
 
-    int alloc_size = K5 * 5;
-    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)malloc((size_t)alloc_size) : NULL;
+    /* X_strided: K5_padded * 5 bytes, zero-init via calloc. The unpack
+     * loop fills [0, Kp) per X_d[d]; positions [Kp, K5_padded) stay 0
+     * — those decode to zero trits in the boundary tile, contributing 0. */
+    int alloc_size = K5_padded * 5;
+    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)calloc((size_t)alloc_size, 1) : NULL;
     if (alloc_size > 0 && !X_strided) return;
     int8_t* X_d[5];
     for (int d = 0; d < 5; d++) {
-        X_d[d] = X_strided + (size_t)d * K5;
-    }
-
-    /* Scratch xi buffer for per-trit scalar K-tail (decoded once per row). */
-    int8_t* xi_scratch = (K % 80 != 0)
-        ? (int8_t*)malloc((size_t)(K % 80))
-        : NULL;
-    if ((K % 80 != 0) && !xi_scratch) {
-        if (X_strided) free(X_strided);
-        return;
+        X_d[d] = X_strided + (size_t)d * K5_padded;
     }
 
     for (int i = 0; i < M; i++) {
@@ -949,17 +960,7 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
             }
         }
 
-        /* Materialize the K-tail xi values once (raw int8 trits at k=k_tile_end..K-1)
-         * by decoding from X_packed. Used by both K-tail paths below. */
-        if (xi_scratch) {
-            for (int k = k_tile_end; k < K; k++) {
-                int b = k / 5, dp = k % 5;
-                uint8_t u = (uint8_t)((xi_p[b] / POW3[dp]) % 3u);
-                xi_scratch[k - k_tile_end] = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
-            }
-        }
-
-        /* Tile body: 4 j cells × full 80-trit chunks. (Identical to §20.) */
+        /* Tile body: 4 j cells × full 80-trit chunks + boundary tile. */
         for (int j = 0; j < j_tile_end; j += 4) {
             const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
             const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
@@ -971,7 +972,28 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
             int32x4_t acc2 = vdupq_n_s32(0);
             int32x4_t acc3 = vdupq_n_s32(0);
 
-            for (int k = 0; k < k_tile_end; k += 80) {
+            #define M4T_5IN8_XP_DECODE_SDOT_BUF(BUF, ACC) do {             \
+                uint8x16_t b = vld1q_u8(BUF);                              \
+                uint16x8_t lo16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                uint16x8_t hi16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                uint8x16_t high = vcombine_u8(                             \
+                    vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                (ACC) = vdotq_s32((ACC), xv0, d0);                         \
+                (ACC) = vdotq_s32((ACC), xv1, d1);                         \
+                (ACC) = vdotq_s32((ACC), xv2, d2);                         \
+                (ACC) = vdotq_s32((ACC), xv3, d3);                         \
+                (ACC) = vdotq_s32((ACC), xv4, d4);                         \
+            } while (0)
+
+            for (int k = 0; k < K_aligned; k += 80) {
                 int x_idx = k / 5;
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
@@ -979,66 +1001,81 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
                 int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
                 int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-                #define M4T_5IN8_DECODE_AND_SDOT(WJ, ACC) do {                 \
-                    uint8x16_t b = vld1q_u8((WJ) + k / 5);                     \
-                    uint16x8_t lo16 = vshrq_n_u16(                             \
-                        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
-                    uint16x8_t hi16 = vshrq_n_u16(                             \
-                        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
-                    uint8x16_t high = vcombine_u8(                             \
-                        vmovn_u16(lo16), vmovn_u16(hi16));                     \
-                    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
-                    int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
-                    int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
-                    int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
-                    int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
-                    int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
-                    (ACC) = vdotq_s32((ACC), xv0, d0);                         \
-                    (ACC) = vdotq_s32((ACC), xv1, d1);                         \
-                    (ACC) = vdotq_s32((ACC), xv2, d2);                         \
-                    (ACC) = vdotq_s32((ACC), xv3, d3);                         \
-                    (ACC) = vdotq_s32((ACC), xv4, d4);                         \
-                } while (0)
-
-                M4T_5IN8_DECODE_AND_SDOT(wj0, acc0);
-                M4T_5IN8_DECODE_AND_SDOT(wj1, acc1);
-                M4T_5IN8_DECODE_AND_SDOT(wj2, acc2);
-                M4T_5IN8_DECODE_AND_SDOT(wj3, acc3);
-
-                #undef M4T_5IN8_DECODE_AND_SDOT
+                M4T_5IN8_XP_DECODE_SDOT_BUF(wj0 + k / 5, acc0);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(wj1 + k / 5, acc1);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(wj2 + k / 5, acc2);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(wj3 + k / 5, acc3);
             }
 
-            int32_t s0 = vaddvq_s32(acc0);
-            int32_t s1 = vaddvq_s32(acc1);
-            int32_t s2 = vaddvq_s32(acc2);
-            int32_t s3 = vaddvq_s32(acc3);
+            /* Boundary tile (K%80 != 0): stack-local zero-padded W per j cell. */
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-            for (int k = k_tile_end; k < K; k++) {
-                int byte_idx  = k / 5;
-                int digit_pos = k % 5;
-                int8_t x_k = xi_scratch[k - k_tile_end];
-                #define M4T_5IN8_DECODE_TRIT(WJ) (                             \
-                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 1u ?  1 : \
-                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 2u ? -1 : \
-                                                                              0)
-                s0 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj0);
-                s1 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj1);
-                s2 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj2);
-                s3 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj3);
-                #undef M4T_5IN8_DECODE_TRIT
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb0[16] = {0}, bb1[16] = {0}, bb2[16] = {0}, bb3[16] = {0};
+                memcpy(bb0, wj0 + byte_off, (size_t)avail);
+                memcpy(bb1, wj1 + byte_off, (size_t)avail);
+                memcpy(bb2, wj2 + byte_off, (size_t)avail);
+                memcpy(bb3, wj3 + byte_off, (size_t)avail);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(bb0, acc0);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(bb1, acc1);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(bb2, acc2);
+                M4T_5IN8_XP_DECODE_SDOT_BUF(bb3, acc3);
             }
 
-            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)s0;
-            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)s1;
-            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)s2;
-            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)s3;
+            #undef M4T_5IN8_XP_DECODE_SDOT_BUF
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)vaddvq_s32(acc0);
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)vaddvq_s32(acc1);
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)vaddvq_s32(acc2);
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)vaddvq_s32(acc3);
         }
 
         for (int j = j_tile_end; j < N; j++) {
             const uint8_t* wj = W_packed + (size_t)j * Kp;
             int32x4_t acc = vdupq_n_s32(0);
 
-            for (int k = 0; k < k_tile_end; k += 80) {
+            #define M4T_5IN8_XP_JTAIL_SDOT(BUF) do {                       \
+                uint8x16_t b = vld1q_u8(BUF);                              \
+                uint16x8_t lo16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                uint16x8_t hi16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                uint8x16_t high = vcombine_u8(                             \
+                    vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                acc = vdotq_s32(acc, xv0, d0);                             \
+                acc = vdotq_s32(acc, xv1, d1);                             \
+                acc = vdotq_s32(acc, xv2, d2);                             \
+                acc = vdotq_s32(acc, xv3, d3);                             \
+                acc = vdotq_s32(acc, xv4, d4);                             \
+            } while (0)
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+                M4T_5IN8_XP_JTAIL_SDOT(wj + k / 5);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
                 int x_idx = k / 5;
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
@@ -1046,41 +1083,21 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
                 int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
                 int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-                uint8x16_t b = vld1q_u8(wj + k / 5);
-                uint16x8_t lo16 = vshrq_n_u16(
-                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
-                uint16x8_t hi16 = vshrq_n_u16(
-                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
-                uint8x16_t high = vcombine_u8(
-                    vmovn_u16(lo16), vmovn_u16(hi16));
-                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
-                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
-                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
-                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
-                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
-                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
-                acc = vdotq_s32(acc, xv0, d0);
-                acc = vdotq_s32(acc, xv1, d1);
-                acc = vdotq_s32(acc, xv2, d2);
-                acc = vdotq_s32(acc, xv3, d3);
-                acc = vdotq_s32(acc, xv4, d4);
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb[16] = {0};
+                memcpy(bb, wj + byte_off, (size_t)avail);
+                M4T_5IN8_XP_JTAIL_SDOT(bb);
             }
 
-            int32_t s = vaddvq_s32(acc);
-            for (int k = k_tile_end; k < K; k++) {
-                int byte_idx  = k / 5;
-                int digit_pos = k % 5;
-                uint8_t u = (uint8_t)((wj[byte_idx] / POW3[digit_pos]) % 3u);
-                int w = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
-                s += (int32_t)xi_scratch[k - k_tile_end] * (int32_t)w;
-            }
+            #undef M4T_5IN8_XP_JTAIL_SDOT
 
-            Y[(size_t)i * N + j] = (m4t_mtfp_t)s;
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)vaddvq_s32(acc);
         }
     }
 
     if (X_strided)  free(X_strided);
-    if (xi_scratch) free(xi_scratch);
 #else
 #error "m4t_ternary_5in8_matmul_xpacked_bt requires NEON + ARM_FEATURE_DOTPROD; \
 no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."

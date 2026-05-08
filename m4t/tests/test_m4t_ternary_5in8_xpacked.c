@@ -155,6 +155,36 @@ int main(void) {
         }
     }
 
-    printf("PASS: m4t_ternary_5in8_xpacked (G1 NEON==scalar_ref + G2 xpacked==§20)\n");
+    /* Per journal/k80_fix_lmm.md: full K%80 sweep covering every
+     * boundary-tile pattern after the K%80 fix landed in xpacked. */
+    for (int km = 1; km < 80; km++) {
+        int K_test = 160 + km;
+        if (test_xpacked_bit_exact(K_test, 1, 64, 3)) {
+            fprintf(stderr, "FAIL: K%%80 sweep K=%d (km=%d)\n", K_test, km);
+            return 1;
+        }
+        if (test_xpacked_vs_bt(K_test, 1, 64, 3)) {
+            fprintf(stderr, "FAIL: K%%80 vs §20 sweep K=%d\n", K_test);
+            return 1;
+        }
+    }
+
+    /* K=0 explicit. */
+    {
+        int M = 4, N = 16;
+        m4t_mtfp_t* Y = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < M * N; i++) Y[i] = 0xDEADBEEF;
+        m4t_ternary_5in8_matmul_xpacked_bt(Y, NULL, NULL, M, 0, N);
+        for (int i = 0; i < M * N; i++) {
+            if (Y[i] != 0) {
+                fprintf(stderr, "FAIL: xpacked K=0 expected 0, got %d\n", Y[i]);
+                free(Y);
+                return 1;
+            }
+        }
+        free(Y);
+    }
+
+    printf("PASS: m4t_ternary_5in8_xpacked (G1 NEON==scalar_ref + G2 xpacked==§20 + K%%80 sweep + K=0)\n");
     return 0;
 }

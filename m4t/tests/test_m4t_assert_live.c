@@ -29,6 +29,8 @@
 #include "m4t_mtfp.h"
 #include "m4t_mtfp4.h"
 #include "m4t_ternary_matmul.h"
+#include "m4t_ternary_routed16.h"
+#include "m4t_ternary_rowskip.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
 
@@ -84,6 +86,18 @@ static void violate_trit_pack(void) {
     m4t_pack_trits_1d(dst, src, 1);
 }
 
+static void violate_routed16(void) {
+    /* m4t_ternary_routed16.c:74 — assert(K >= 0 && N >= 0) at the start
+     * of m4t_ternary_routed16_pack. Pass K=-1 to trip. */
+    (void)m4t_ternary_routed16_pack(NULL, -1, 1);
+}
+
+static void violate_rowskip(void) {
+    /* m4t_ternary_rowskip.c:93 — assert(K >= 0 && N >= 0) at the start
+     * of m4t_ternary_rowskip_pack. Pass K=-1 to trip. */
+    (void)m4t_ternary_rowskip_pack(NULL, -1, 1);
+}
+
 /* ── Parameterized harness ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -93,16 +107,20 @@ typedef struct {
 } assert_case_t;
 
 static const assert_case_t cases[] = {
-    { "m4t_route.c",          "m4t_route_topk_abs(T > MAX_T)",
-                              violate_route },
-    { "m4t_mtfp.c",           "m4t_mtfp_vec_zero(n < 0)",
-                              violate_mtfp },
-    { "m4t_mtfp4.c",          "m4t_mtfp4_sdot_matmul_bt(M < 0)",
-                              violate_mtfp4 },
-    { "m4t_ternary_matmul.c", "m4t_mtfp_ternary_matmul_bt(Y aliases X)",
-                              violate_ternary_matmul },
-    { "m4t_trit_pack.c",      "m4t_pack_trits_1d(trit out of {-1,0,1})",
-                              violate_trit_pack },
+    { "m4t_route.c",            "m4t_route_topk_abs(T > MAX_T)",
+                                violate_route },
+    { "m4t_mtfp.c",             "m4t_mtfp_vec_zero(n < 0)",
+                                violate_mtfp },
+    { "m4t_mtfp4.c",            "m4t_mtfp4_sdot_matmul_bt(M < 0)",
+                                violate_mtfp4 },
+    { "m4t_ternary_matmul.c",   "m4t_mtfp_ternary_matmul_bt(Y aliases X)",
+                                violate_ternary_matmul },
+    { "m4t_trit_pack.c",        "m4t_pack_trits_1d(trit out of {-1,0,1})",
+                                violate_trit_pack },
+    { "m4t_ternary_routed16.c", "m4t_ternary_routed16_pack(K < 0)",
+                                violate_routed16 },
+    { "m4t_ternary_rowskip.c",  "m4t_ternary_rowskip_pack(K < 0)",
+                                violate_rowskip },
 };
 static const int N_CASES = (int)(sizeof(cases) / sizeof(cases[0]));
 

@@ -473,12 +473,97 @@ static int test_conversions_neon_vs_scalar_ref(void) {
     return 0;
 }
 
+/* Per journal/k80_fix_lmm.md (mirror for K%16): explicit sweep covering
+ * every boundary-tile pattern. K = 16 + km for km ∈ {1..15} hits every
+ * K%16 mod with both main loop AND boundary tile active. K<16 cases
+ * exercise the boundary-tile-only path. */
+static int test_sdot_matmul_k16_sweep(void) {
+    g_rng = 0xb04e5e7au;
+    for (int km = 1; km < 16; km++) {
+        for (int K_base = 16; K_base <= 64; K_base += 16) {
+            int K = K_base + km;
+            int M = 2, N = 5;  /* 5 = 4 j_tile + 1 j_tail */
+            int8_t* X = malloc((size_t)M * K);
+            int8_t* W = malloc((size_t)N * K);
+            int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+            int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+
+            for (int i = 0; i < M * K; i++) X[i] = rand_mtfp4();
+            for (int i = 0; i < N * K; i++) W[i] = rand_trit();
+
+            m4t_mtfp4_sdot_matmul_bt(Y, X, W, M, K, N);
+
+            for (int i = 0; i < M; i++) {
+                for (int j = 0; j < N; j++) {
+                    int64_t acc = 0;
+                    for (int k = 0; k < K; k++) {
+                        acc += (int64_t)X[i*K+k] * (int64_t)W[j*K+k];
+                    }
+                    Yref[i*N+j] = (int32_t)acc;
+                }
+            }
+            for (int i = 0; i < M*N; i++) {
+                if (Y[i] != Yref[i]) {
+                    printf("FAIL k16_sweep K=%d cell %d: got=%d ref=%d\n",
+                           K, i, Y[i], Yref[i]);
+                    free(X); free(W); free(Y); free(Yref);
+                    return 1;
+                }
+            }
+            free(X); free(W); free(Y); free(Yref);
+        }
+    }
+    /* K<16 (entire kernel is boundary tile). */
+    int K_lt[] = {1, 5, 8, 15};
+    for (size_t kli = 0; kli < sizeof(K_lt)/sizeof(K_lt[0]); kli++) {
+        int K = K_lt[kli];
+        int M = 2, N = 5;
+        int8_t* X = malloc((size_t)M * K);
+        int8_t* W = malloc((size_t)N * K);
+        int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+        int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+        for (int i = 0; i < M * K; i++) X[i] = rand_mtfp4();
+        for (int i = 0; i < N * K; i++) W[i] = rand_trit();
+        m4t_mtfp4_sdot_matmul_bt(Y, X, W, M, K, N);
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < N; j++) {
+                int64_t acc = 0;
+                for (int k = 0; k < K; k++) acc += (int64_t)X[i*K+k] * (int64_t)W[j*K+k];
+                Yref[i*N+j] = (int32_t)acc;
+            }
+        }
+        for (int i = 0; i < M*N; i++) {
+            if (Y[i] != Yref[i]) {
+                printf("FAIL K<16 K=%d cell %d: got=%d ref=%d\n", K, i, Y[i], Yref[i]);
+                free(X); free(W); free(Y); free(Yref);
+                return 1;
+            }
+        }
+        free(X); free(W); free(Y); free(Yref);
+    }
+    /* K=0 explicit. */
+    {
+        int M = 4, N = 4;
+        int32_t Y[16];
+        for (int i = 0; i < 16; i++) Y[i] = 0xDEADBEEF;
+        m4t_mtfp4_sdot_matmul_bt(Y, NULL, NULL, M, 0, N);
+        for (int i = 0; i < 16; i++) {
+            if (Y[i] != 0) {
+                printf("FAIL K=0 expected 0, got %d at %d\n", Y[i], i);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_clamp_basic())                return 1;
     if (test_sdot_matmul_small())          return 1;
     if (test_sdot_matmul_large())          return 1;
     if (test_sdot_matmul_high_mag())       return 1;
     if (test_sdot_matmul_long_k())         return 1;
+    if (test_sdot_matmul_k16_sweep())      return 1;
     if (test_sdot_zero_dim())              return 1;
     if (test_widen_exact())                return 1;
     if (test_narrow_round())               return 1;
@@ -487,6 +572,6 @@ int main(void) {
     if (test_narrow_property())            return 1;
     if (test_roundtrip_widen_narrow())     return 1;
     if (test_conversions_neon_vs_scalar_ref()) return 1;
-    printf("m4t_mtfp4: all 13 tests passed\n");
+    printf("m4t_mtfp4: all 14 tests passed\n");
     return 0;
 }

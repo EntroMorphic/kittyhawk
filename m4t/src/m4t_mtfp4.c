@@ -13,6 +13,7 @@
 #include "m4t_internal.h"
 
 #include <assert.h>
+#include <string.h>
 
 /* SCALE_RATIO = 3^(MTFP_RADIX - MTFP4_RADIX) = 3^(10 - 2) = 3^8 = 6561.
  * Odd by construction (powers of 3 are odd), which makes
@@ -44,6 +45,13 @@ void m4t_mtfp4_sdot_matmul_bt(
     /* Aliasing precondition: Y must not alias X or W. */
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W);
+    /* K=0 degenerate: dot product over zero terms is 0. Skip rest to
+     * avoid NULL+0 pointer arithmetic UB. */
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
     /* Sample-based debug check: spot-check a few weights are valid trits.
      * Exhaustive validation is O(NK) per call, too expensive; sampling
      * catches "caller forgot to use ternary" without becoming a hot-path
@@ -57,9 +65,35 @@ void m4t_mtfp4_sdot_matmul_bt(
     /* Per journal/m4t_matmul_tile_synthesize.md: register-tile by 4 j cells.
      * 4 parallel SDOT accumulator chains pipeline better on M-series than
      * the prior single-acc chain (audit measured 1.8× wall-clock gain at
-     * apples-to-apples comparison). N%4 tail handled by the original
-     * single-j-cell NEON path (NEON, not scalar — geometric tail rule). */
+     * apples-to-apples comparison).
+     *
+     * K%16 fix (per journal/k80_fix_lmm.md + journal/k80_remediation.md):
+     * extend NEON tile body to K_padded = ceil(K/16)*16. Boundary tile
+     * uses 16-byte stack-local zero-padded X and W buffers when K%16 != 0.
+     * No scalar tail.
+     *
+     * Performance characteristics (measured BEFORE/AFTER, n_iter=200):
+     *   K%16 == 0:       unchanged (boundary check FALSE, fast path).
+     *                    BitNet shapes (K=2560, 6912, 640) all here.
+     *   K%16 ∈ [1..15]:  approximately neutral (±6%). The eliminated
+     *                    scalar tail (per-cell mul-add, ~1 cycle/cell)
+     *                    is cost-equivalent to the boundary-tile setup
+     *                    (memcpy + NEON ops). This fix does not deliver
+     *                    a speedup — unlike the K%80 fix in
+     *                    m4t_ternary_5in8_matmul_bt where the scalar
+     *                    tail was per-trit divide-modulo (heavy).
+     *   K < 16:          slight absolute regression (µs scale).
+     *                    K=1: 0.001ms → 0.006ms; K=15: 0.003ms → 0.011ms.
+     *                    Boundary-tile NEON setup dominates when there
+     *                    are very few real trits. Not a realistic
+     *                    matmul workload.
+     *
+     * Why this fix lands despite no speed win: code-consistency with
+     * the dense 5-in-8 kernel (no scalar in production per project rule),
+     * and bit-exact preserved across all K%16 patterns. */
     int j_tile_end = N - (N % 4);
+    int K_aligned = K - (K % 16);
+    int K_padded  = ((K + 15) / 16) * 16;
 
     for (int i = 0; i < M; i++) {
         const int8_t* xi = (const int8_t*)(X + (size_t)i * K);
@@ -71,16 +105,15 @@ void m4t_mtfp4_sdot_matmul_bt(
             const int8_t* wj2 = (const int8_t*)(W + (size_t)(j + 2) * K);
             const int8_t* wj3 = (const int8_t*)(W + (size_t)(j + 3) * K);
 
-            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
-            int k = 0;
-
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
             int32x4_t vacc0 = vdupq_n_s32(0);
             int32x4_t vacc1 = vdupq_n_s32(0);
             int32x4_t vacc2 = vdupq_n_s32(0);
             int32x4_t vacc3 = vdupq_n_s32(0);
-            for (; k + 16 <= K; k += 16) {
-                int8x16_t va  = vld1q_s8(xi + k);             /* shared X */
+
+            /* Main NEON path: full 16-trit tiles. */
+            for (int k = 0; k < K_aligned; k += 16) {
+                int8x16_t va  = vld1q_s8(xi + k);
                 int8x16_t vw0 = vld1q_s8(wj0 + k);
                 int8x16_t vw1 = vld1q_s8(wj1 + k);
                 int8x16_t vw2 = vld1q_s8(wj2 + k);
@@ -90,49 +123,82 @@ void m4t_mtfp4_sdot_matmul_bt(
                 vacc2 = vdotq_s32(vacc2, va, vw2);
                 vacc3 = vdotq_s32(vacc3, va, vw3);
             }
-            acc0 = vaddvq_s32(vacc0);
-            acc1 = vaddvq_s32(vacc1);
-            acc2 = vaddvq_s32(vacc2);
-            acc3 = vaddvq_s32(vacc3);
-#endif
-            /* Geometric scalar tail (k not multiple of 16). NEON loop
-             * above handles whole 16-K blocks; this handles the 0-15
-             * remainder per j cell. */
-            for (; k < K; k++) {
+
+            /* Boundary tile (K%16 != 0): stack-local zero-padded X and W. */
+            if (K_padded > K_aligned) {
+                int avail = K - K_aligned;
+                assert(avail >= 1 && avail <= 15);
+                int8_t xbuf[16] = {0};
+                int8_t wb0[16] = {0}, wb1[16] = {0}, wb2[16] = {0}, wb3[16] = {0};
+                memcpy(xbuf, xi + K_aligned, (size_t)avail);
+                memcpy(wb0, wj0 + K_aligned, (size_t)avail);
+                memcpy(wb1, wj1 + K_aligned, (size_t)avail);
+                memcpy(wb2, wj2 + K_aligned, (size_t)avail);
+                memcpy(wb3, wj3 + K_aligned, (size_t)avail);
+                int8x16_t va  = vld1q_s8(xbuf);
+                int8x16_t vw0 = vld1q_s8(wb0);
+                int8x16_t vw1 = vld1q_s8(wb1);
+                int8x16_t vw2 = vld1q_s8(wb2);
+                int8x16_t vw3 = vld1q_s8(wb3);
+                vacc0 = vdotq_s32(vacc0, va, vw0);
+                vacc1 = vdotq_s32(vacc1, va, vw1);
+                vacc2 = vdotq_s32(vacc2, va, vw2);
+                vacc3 = vdotq_s32(vacc3, va, vw3);
+            }
+
+            Y[i * N + j + 0] = (m4t_mtfp_t)vaddvq_s32(vacc0);
+            Y[i * N + j + 1] = (m4t_mtfp_t)vaddvq_s32(vacc1);
+            Y[i * N + j + 2] = (m4t_mtfp_t)vaddvq_s32(vacc2);
+            Y[i * N + j + 3] = (m4t_mtfp_t)vaddvq_s32(vacc3);
+#else
+            /* No-NEON: scalar reference (path used only on hosts without
+             * DOTPROD; project rule gates production to NEON+DOTPROD via
+             * compile-time error in the public dispatcher path). */
+            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+            for (int k = 0; k < K; k++) {
                 int32_t x_k = (int32_t)xi[k];
                 acc0 += x_k * (int32_t)wj0[k];
                 acc1 += x_k * (int32_t)wj1[k];
                 acc2 += x_k * (int32_t)wj2[k];
                 acc3 += x_k * (int32_t)wj3[k];
             }
-
             Y[i * N + j + 0] = (m4t_mtfp_t)acc0;
             Y[i * N + j + 1] = (m4t_mtfp_t)acc1;
             Y[i * N + j + 2] = (m4t_mtfp_t)acc2;
             Y[i * N + j + 3] = (m4t_mtfp_t)acc3;
+#endif
         }
 
-        /* N%4 tail: 1-3 remaining j cells, original single-j-cell NEON
-         * path. Same kernel shape as pre-tile; geometric tail rule. */
+        /* N%4 tail: 1-3 remaining j cells, single-j-cell NEON path. */
         for (int j = j_tile_end; j < N; j++) {
             const int8_t* wj = (const int8_t*)(W + (size_t)j * K);
-            int32_t acc = 0;
-            int k = 0;
 
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
             int32x4_t vacc = vdupq_n_s32(0);
-            for (; k + 16 <= K; k += 16) {
+            for (int k = 0; k < K_aligned; k += 16) {
                 int8x16_t va = vld1q_s8(xi + k);
                 int8x16_t vw = vld1q_s8(wj + k);
                 vacc = vdotq_s32(vacc, va, vw);
             }
-            acc = vaddvq_s32(vacc);
-#endif
-            for (; k < K; k++) {
+            if (K_padded > K_aligned) {
+                int avail = K - K_aligned;
+                assert(avail >= 1 && avail <= 15);
+                int8_t xbuf[16] = {0};
+                int8_t wbuf[16] = {0};
+                memcpy(xbuf, xi + K_aligned, (size_t)avail);
+                memcpy(wbuf, wj + K_aligned, (size_t)avail);
+                int8x16_t va = vld1q_s8(xbuf);
+                int8x16_t vw = vld1q_s8(wbuf);
+                vacc = vdotq_s32(vacc, va, vw);
+            }
+            Y[i * N + j] = (m4t_mtfp_t)vaddvq_s32(vacc);
+#else
+            int32_t acc = 0;
+            for (int k = 0; k < K; k++) {
                 acc += (int32_t)xi[k] * (int32_t)wj[k];
             }
-
             Y[i * N + j] = (m4t_mtfp_t)acc;
+#endif
         }
     }
 }
