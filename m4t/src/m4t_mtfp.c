@@ -1602,8 +1602,15 @@ static inline int32x4_t softmax_exp_poly_neon(int32x4_t z) {
     int32x4_t result = vsubq_s32(vdupq_n_s32(M4T_SOFTMAX_OUT_SCALE), Vt_div);
 
     /* Apply 2^(-v_int): result >> v_int per lane (vshlq_s32 with negative
-     * count is per-lane variable shift). */
-    result = vshlq_s32(result, vnegq_s32(v_int));
+     * count is per-lane variable shift).
+     *
+     * v_int can reach ~41 for nz_safe = 29 (since w = 29*94548 = 2,741,892,
+     * and 2,741,892 >> 16 = 41). vshlq_s32 with shift count whose absolute
+     * value > 31 is UB in C semantics (though ARM's SSHL produces 0 by
+     * sign-fill). Clamp v_int to 31 for portability — the result for any
+     * v_int ≥ 31 is necessarily 0 here (result ≤ 2^30, so result >> 31 = 0). */
+    int32x4_t v_int_safe = vminq_s32(v_int, vdupq_n_s32(31));
+    result = vshlq_s32(result, vnegq_s32(v_int_safe));
 
     /* Apply special-case masks: 0 where neg_z >= LUT_RANGE; OUT_SCALE
      * where z >= 0. */

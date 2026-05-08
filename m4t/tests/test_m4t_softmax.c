@@ -202,6 +202,31 @@ static void test_softmax_underflow(void) {
     }
 }
 
+static void test_softmax_boundary_z(void) {
+    /* V14.G red-team: exercise the z range [-29, 0] where the NEON polynomial
+     * exp's v_int can exceed 31 (UB on vshlq_s32 without the clamp fix).
+     * mx = 0; x = [0, -1, ..., -29] gives z = [0, -1, ..., -29]. */
+    int n = 30;
+    m4t_mtfp_t x[30];
+    for (int i = 0; i < n; i++) x[i] = (m4t_mtfp_t)(-i);
+    m4t_mtfp_t y_prod[30], y_ref[30];
+    m4t_mtfp_softmax          (y_prod, x, n);
+    m4t_mtfp_softmax_scalar_ref(y_ref, x, n);
+    int fails = softmax_compare(y_prod, y_ref, n, "boundary-z");
+    if (fails == 0) {
+        fprintf(stderr, "  [boundary-z] OK\n");
+    }
+    /* Also verify: y[i] for i in {22, 25, 29} should be very small (≤ 16
+     * at scale 2^30, since exp(-22) * 2^30 ≈ 0.29). */
+    for (int i = 22; i <= 29 && i < n; i++) {
+        if (y_prod[i] > 100) {
+            fprintf(stderr, "  [boundary-z] FAIL: y[%d]=%d (expected ≤ 100)\n",
+                    i, y_prod[i]);
+            g_fails++;
+        }
+    }
+}
+
 int main(void) {
     fprintf(stderr, "test_m4t_softmax: recip boundaries...\n");
     test_recip_boundaries();
@@ -216,6 +241,8 @@ int main(void) {
     test_softmax_one_hot();
     fprintf(stderr, "test_m4t_softmax: underflow...\n");
     test_softmax_underflow();
+    fprintf(stderr, "test_m4t_softmax: boundary-z (V14.G red-team)...\n");
+    test_softmax_boundary_z();
     fprintf(stderr, "test_m4t_softmax: random vs FP scalar_ref...\n");
     test_softmax_random(8);
     test_softmax_random(64);
