@@ -162,6 +162,68 @@ static int test_route_bit_exact(int K, int M, int N, int n_samples) {
     return 0;
 }
 
+/* Test 3c: bit-exact at the edge of the route kernel's supported X range
+ * (|X[k]| <= 127, excluding INT8_MIN=-128). Verifies +127 and -127 X
+ * values pair correctly with all three trit signs. The dispatch path's
+ * vsubq_s8 is exact when |X[k]| <= 127; -128 would overflow but is
+ * excluded by precondition. */
+static int test_route_x_range_extremes(int K, int M, int N) {
+    int Kp = (K + 4) / 5;
+    m4t_trit_t* X = (m4t_trit_t*)calloc((size_t)M * K, sizeof(m4t_trit_t));
+    m4t_trit_t* W_unp = (m4t_trit_t*)calloc((size_t)N * K, sizeof(m4t_trit_t));
+    uint8_t* W_pkd = (uint8_t*)calloc((size_t)N * Kp, 1);
+    m4t_mtfp_t* Y_route = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* Y_ref   = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+
+    /* Pattern 1: all X = +127, varied W. */
+    for (int i = 0; i < M * K; i++) X[i] = (m4t_trit_t)127;
+    rng_state = 0xA1u;
+    gen_ternary(W_unp, N * K);
+    for (int j = 0; j < N; j++) {
+        m4t_pack_trits_5in8_1d(W_pkd + (size_t)j * Kp, W_unp + (size_t)j * K, K);
+    }
+    m4t_ternary_5in8_matmul_bt_route(Y_route, X, W_pkd, M, K, N);
+    m4t_ternary_5in8_matmul_bt_scalar_ref(Y_ref, X, W_pkd, M, K, N);
+    if (memcmp(Y_route, Y_ref, (size_t)M * N * sizeof(m4t_mtfp_t)) != 0) {
+        fprintf(stderr, "FAIL route X=+127 K=%d M=%d N=%d\n", K, M, N);
+        goto fail;
+    }
+
+    /* Pattern 2: all X = -127, varied W. */
+    for (int i = 0; i < M * K; i++) X[i] = (m4t_trit_t)-127;
+    rng_state = 0xB2u;
+    gen_ternary(W_unp, N * K);
+    for (int j = 0; j < N; j++) {
+        m4t_pack_trits_5in8_1d(W_pkd + (size_t)j * Kp, W_unp + (size_t)j * K, K);
+    }
+    m4t_ternary_5in8_matmul_bt_route(Y_route, X, W_pkd, M, K, N);
+    m4t_ternary_5in8_matmul_bt_scalar_ref(Y_ref, X, W_pkd, M, K, N);
+    if (memcmp(Y_route, Y_ref, (size_t)M * N * sizeof(m4t_mtfp_t)) != 0) {
+        fprintf(stderr, "FAIL route X=-127 K=%d M=%d N=%d\n", K, M, N);
+        goto fail;
+    }
+
+    /* Pattern 3: mixed X in {-127, ..., +127} via cycling, random W. */
+    for (int i = 0; i < M * K; i++) X[i] = (m4t_trit_t)((i * 17) % 255 - 127);
+    rng_state = 0xC3u;
+    gen_ternary(W_unp, N * K);
+    for (int j = 0; j < N; j++) {
+        m4t_pack_trits_5in8_1d(W_pkd + (size_t)j * Kp, W_unp + (size_t)j * K, K);
+    }
+    m4t_ternary_5in8_matmul_bt_route(Y_route, X, W_pkd, M, K, N);
+    m4t_ternary_5in8_matmul_bt_scalar_ref(Y_ref, X, W_pkd, M, K, N);
+    if (memcmp(Y_route, Y_ref, (size_t)M * N * sizeof(m4t_mtfp_t)) != 0) {
+        fprintf(stderr, "FAIL route mixed X K=%d M=%d N=%d\n", K, M, N);
+        goto fail;
+    }
+
+    free(X); free(W_unp); free(W_pkd); free(Y_route); free(Y_ref);
+    return 0;
+fail:
+    free(X); free(W_unp); free(W_pkd); free(Y_route); free(Y_ref);
+    return 1;
+}
+
 /* Test 3: bit-exact NEON vs scalar across random workloads. */
 static int test_matmul_bit_exact(int K, int M, int N, int n_samples) {
     /* Per TD-1 / spec §20: Kp = ceil(K/5) bytes per packed row. For
@@ -358,6 +420,22 @@ int main(void) {
             }
             free(Y);
         }
+        /* M=0 explicit (early return path). */
+        {
+            int M = 0, N = 16, K = 80;
+            int Kp = (K + 4) / 5;
+            uint8_t* W = (uint8_t*)calloc((size_t)N * Kp, 1);
+            m4t_mtfp_t* Y = NULL;  /* zero-size buffer, M=0 should not write */
+            m4t_ternary_5in8_matmul_bt_route(Y, NULL, W, M, K, N);
+            free(W);
+            /* If we reach here without crashing, M=0 short-circuit works. */
+        }
+        /* X range extremes: ±127 and mixed values. The route kernel's
+         * vsubq_s8 is exact at |X|<=127; this ensures the precondition
+         * documented in the header is honored by the kernel. */
+        if (test_route_x_range_extremes(80,  1, 16)) return 1;
+        if (test_route_x_range_extremes(160, 4, 16)) return 1;
+        if (test_route_x_range_extremes(167, 4, 17)) return 1;  /* K%80!=0 + N%4!=0 */
     }
 
     printf("PASS: m4t_ternary_5in8_matmul (pack/unpack roundtrip + golden + "

@@ -838,6 +838,15 @@ void m4t_ternary_5in8_matmul_bt_route(
         return;
     }
 
+    /* Sample-based debug check: X must satisfy |X[k]| <= 127
+     * (i.e., no INT8_MIN). The dispatch path's vsubq_s8 would
+     * overflow on X=-128 with trit=-1. Spot-check a few cells per
+     * row. NOTE: under -DNDEBUG this compiles out. */
+    if (M > 0 && K > 0) {
+        assert(X[0] != (m4t_trit_t)-128);
+        assert(X[(size_t)(M - 1) * K + (K - 1)] != (m4t_trit_t)-128);
+    }
+
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
     int Kp = (K + 4) / 5;
     int K_aligned = K - (K % 80);

@@ -213,7 +213,18 @@ void m4t_ternary_5in8_matmul_bt_scalar_ref(
  * The cost is the architectural commitment to dispatch-shaped
  * compute over multiplicative compute.
  *
- * Preconditions: same as m4t_ternary_5in8_matmul_bt. */
+ * Preconditions:
+ *   - Same shape preconditions as m4t_ternary_5in8_matmul_bt
+ *     (M, K, N >= 0; K <= M4T_SDOT_K_MAX_EXACT; aliasing).
+ *   - **|X[i, k]| <= 127** (i.e., X must fit in int8 range
+ *     [-127, +127], EXCLUDING the INT8_MIN value -128). The
+ *     dispatch path computes `vsubq_s8(pos_sel, neg_sel)` where a
+ *     -128 input would produce +128 in the difference, overflowing
+ *     int8 and wrapping. BitNet's A8 quantization satisfies this
+ *     by construction (it clamps to [-127, +127]). Ternary inputs
+ *     trivially satisfy this. Other callers must clamp.
+ *   - Asserted at debug-build time on sampled X values; production
+ *     callers must ensure the precondition. */
 void m4t_ternary_5in8_matmul_bt_route(
     m4t_mtfp_t* Y,
     const m4t_trit_t* X,

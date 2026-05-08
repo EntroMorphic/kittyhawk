@@ -1,0 +1,20 @@
+=== run 1 ===
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.081±0.005  route 0.229±0.014  ratio 0.351×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.210±0.006  route 0.599±0.014  ratio 0.350×  diff=0
+=== run 2 ===
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.077±0.004  route 0.220±0.006  ratio 0.352×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.213±0.007  route 0.603±0.014  ratio 0.354×  diff=0
+=== run 3 ===
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.078±0.003  route 0.221±0.007  ratio 0.351×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.212±0.007  route 0.602±0.013  ratio 0.352×  diff=0
+=== run 4 ===
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.077±0.002  route 0.221±0.007  ratio 0.349×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.214±0.007  route 0.615±0.015  ratio 0.349×  diff=0
+=== run 5 ===
+── BitNet shapes ──
+  q/o_proj                       K= 2560 N= 2560   dense 0.077±0.003  route 0.221±0.009  ratio 0.350×  diff=0
+  down_proj                      K= 6912 N= 2560   dense 0.212±0.008  route 0.605±0.015  ratio 0.351×  diff=0
