@@ -29,7 +29,6 @@
 #include "m4t_mtfp.h"
 #include "m4t_mtfp4.h"
 #include "m4t_ternary_matmul.h"
-#include "m4t_ternary_routed16.h"
 #include "m4t_ternary_rowskip.h"
 #include "m4t_trit_pack.h"
 #include "m4t_types.h"
@@ -86,12 +85,6 @@ static void violate_trit_pack(void) {
     m4t_pack_trits_1d(dst, src, 1);
 }
 
-static void violate_routed16(void) {
-    /* m4t_ternary_routed16.c:74 — assert(K >= 0 && N >= 0) at the start
-     * of m4t_ternary_routed16_pack. Pass K=-1 to trip. */
-    (void)m4t_ternary_routed16_pack(NULL, -1, 1);
-}
-
 static void violate_rowskip(void) {
     /* m4t_ternary_rowskip.c:93 — assert(K >= 0 && N >= 0) at the start
      * of m4t_ternary_rowskip_pack. Pass K=-1 to trip. */
@@ -117,8 +110,6 @@ static const assert_case_t cases[] = {
                                 violate_ternary_matmul },
     { "m4t_trit_pack.c",        "m4t_pack_trits_1d(trit out of {-1,0,1})",
                                 violate_trit_pack },
-    { "m4t_ternary_routed16.c", "m4t_ternary_routed16_pack(K < 0)",
-                                violate_routed16 },
     { "m4t_ternary_rowskip.c",  "m4t_ternary_rowskip_pack(K < 0)",
                                 violate_rowskip },
 };
