@@ -91,7 +91,14 @@ static void test_config_v(int M, int K, int N, double density, double pos_frac,
     m4t_mtfp_ternary_matmul_bt(Y_vmlal, X, W_pack, NULL, M, K, N);
     m4t_mtfp_ternary_matmul_bt_scalar_ref(Y_ref, X, W_pack, NULL, M, K, N);
 
+    /* V4 (pure-ternary audit): verify route variant is also bit-exact. */
+    m4t_mtfp_t* Y_route = M > 0 && N > 0 ? malloc(sizeof(m4t_mtfp_t) * (size_t)M * N) : NULL;
+    if (Y_route) {
+        m4t_mtfp_ternary_matmul_bt_route(Y_route, X, W_pack, NULL, M, K, N);
+    }
+
     int local_fails = 0;
+    int route_fails = 0;
     for (int i = 0; i < M * N; i++) {
         if (Y_vmlal[i] != Y_ref[i]) {
             local_fails++;
@@ -101,17 +108,26 @@ static void test_config_v(int M, int K, int N, double density, double pos_frac,
                     label, i, (int)Y_vmlal[i], (int)Y_ref[i]);
             }
         }
+        if (Y_route && Y_route[i] != Y_ref[i]) {
+            route_fails++;
+            if (route_fails <= 3) {
+                fprintf(stderr,
+                    "  FAIL %s i=%d route=%d ref=%d\n",
+                    label, i, (int)Y_route[i], (int)Y_ref[i]);
+            }
+        }
     }
-    if (local_fails == 0) {
-        if (verbose) printf("  %-50s : PASS  (M=%d K=%d N=%d, %d cells)\n",
+    if (local_fails == 0 && route_fails == 0) {
+        if (verbose) printf("  %-50s : PASS  (M=%d K=%d N=%d, %d cells, vmlal+route)\n",
                             label, M, K, N, M * N);
     } else {
-        printf("  %-50s : FAIL  (%d / %d mismatches)\n",
-               label, local_fails, M * N);
-        g_fails += local_fails;
+        printf("  %-50s : FAIL  (vmlal=%d, route=%d / %d mismatches)\n",
+               label, local_fails, route_fails, M * N);
+        g_fails += local_fails + route_fails;
     }
 
     free(X); free(W_unp); free(W_pack); free(Y_vmlal); free(Y_ref);
+    free(Y_route);
 }
 
 /* Convenience wrapper preserving the original verbose-on-pass behavior. */

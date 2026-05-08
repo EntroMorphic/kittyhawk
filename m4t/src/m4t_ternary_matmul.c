@@ -421,6 +421,196 @@ void m4t_mtfp_ternary_matmul_bt(
     }
 }
 
+/* Routing-shaped helper: dispatch-on-trit dot product for one j cell.
+ * Mirrors ternary_dot_vmlal but uses mask+select instead of multiply.
+ * Used by m4t_mtfp_ternary_matmul_bt_route below.
+ *
+ * Per 16-trit chunk:
+ *   1. Decode 16 trits → int8 sign vector (existing LUT pattern)
+ *   2. pos_mask, neg_mask (int8 vectors of 0xFF/0x00)
+ *   3. Widen each int8 mask to 4 int32x4 chunks via vmovl_s8/vmovl_s16
+ *      chains (sign-extension preserves 0xFF → 0xFFFFFFFF).
+ *   4. Per int32x4 chunk: vandq with X, vsubq (pos - neg), vpadalq_s32
+ *      to accumulate into int64x2.
+ *
+ * No vmlal_s32. No multiplication. */
+#if M4T_HAS_NEON
+static int64_t ternary_dot_route(
+    const m4t_mtfp_t* xi,
+    const uint8_t* wj,
+    int K)
+{
+    int k = 0;
+
+    const uint8x16_t dup_idx  = vld1q_u8(M4T_TM_DUP_IDX);
+    const int8x16_t  shift_s  = vreinterpretq_s8_u8(vld1q_u8(M4T_TM_SHIFT_LANE));
+    const uint8x16_t mask_03  = vdupq_n_u8(0x03u);
+    const int8x16_t  lut_sign = vld1q_s8(M4T_TRIT_DECODE_LUT);
+
+    const int8x16_t pos_one_v = vdupq_n_s8( 1);
+    const int8x16_t neg_one_v = vdupq_n_s8(-1);
+
+    int64x2_t acc0 = vdupq_n_s64(0);
+    int64x2_t acc1 = vdupq_n_s64(0);
+
+    /* Boundary tile fix: walk by 16-trit chunks, with stack-local
+     * zero-padded W bytes for the K%16 boundary. Eliminates scalar tail. */
+    int K_aligned = K - (K % 16);
+
+    while (k < K_aligned) {
+        uint32_t w32;
+        memcpy(&w32, wj + (k >> 2), 4);
+        uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
+        uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
+        uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
+        uint8x16_t codes   = vandq_u8(shifted, mask_03);
+        int8x16_t  signs   = vqtbl1q_s8(lut_sign, codes);
+
+        uint8x16_t pos_mask_u8 = vceqq_s8(signs, pos_one_v);
+        uint8x16_t neg_mask_u8 = vceqq_s8(signs, neg_one_v);
+
+        int8x16_t pm_s = vreinterpretq_s8_u8(pos_mask_u8);
+        int8x16_t nm_s = vreinterpretq_s8_u8(neg_mask_u8);
+
+        int16x8_t pm_lo16 = vmovl_s8(vget_low_s8(pm_s));
+        int16x8_t pm_hi16 = vmovl_s8(vget_high_s8(pm_s));
+        int16x8_t nm_lo16 = vmovl_s8(vget_low_s8(nm_s));
+        int16x8_t nm_hi16 = vmovl_s8(vget_high_s8(nm_s));
+
+        int32x4_t pm_0 = vmovl_s16(vget_low_s16(pm_lo16));
+        int32x4_t pm_1 = vmovl_s16(vget_high_s16(pm_lo16));
+        int32x4_t pm_2 = vmovl_s16(vget_low_s16(pm_hi16));
+        int32x4_t pm_3 = vmovl_s16(vget_high_s16(pm_hi16));
+        int32x4_t nm_0 = vmovl_s16(vget_low_s16(nm_lo16));
+        int32x4_t nm_1 = vmovl_s16(vget_high_s16(nm_lo16));
+        int32x4_t nm_2 = vmovl_s16(vget_low_s16(nm_hi16));
+        int32x4_t nm_3 = vmovl_s16(vget_high_s16(nm_hi16));
+
+        int32x4_t a0 = vld1q_s32(xi + k);
+        int32x4_t a1 = vld1q_s32(xi + k +  4);
+        int32x4_t a2 = vld1q_s32(xi + k +  8);
+        int32x4_t a3 = vld1q_s32(xi + k + 12);
+
+        int32x4_t d0 = vsubq_s32(vandq_s32(a0, pm_0), vandq_s32(a0, nm_0));
+        int32x4_t d1 = vsubq_s32(vandq_s32(a1, pm_1), vandq_s32(a1, nm_1));
+        int32x4_t d2 = vsubq_s32(vandq_s32(a2, pm_2), vandq_s32(a2, nm_2));
+        int32x4_t d3 = vsubq_s32(vandq_s32(a3, pm_3), vandq_s32(a3, nm_3));
+
+        acc0 = vpadalq_s32(acc0, d0);
+        acc1 = vpadalq_s32(acc1, d1);
+        acc0 = vpadalq_s32(acc0, d2);
+        acc1 = vpadalq_s32(acc1, d3);
+
+        k += 16;
+    }
+
+    /* Boundary tile: K%16 trailing trits with stack-local zero-padded W
+     * and X. */
+    if (k < K) {
+        int avail_trits = K - k;
+        assert(avail_trits >= 1 && avail_trits <= 15);
+        /* Pack 16 trits worth: caller's wj has 4 bytes for trits k..k+15
+         * but only avail_trits are real; rest are zero by encoder convention
+         * BUT we may read past the end of allocation for K<16 cases. Use
+         * a stack-local 4-byte buffer copying what's there. */
+        int byte_off = k >> 2;
+        int byte_avail = ((K + 3) >> 2) - byte_off;  /* bytes that exist */
+        if (byte_avail < 0) byte_avail = 0;
+        if (byte_avail > 4) byte_avail = 4;
+        uint8_t wb[4] = {0, 0, 0, 0};
+        if (byte_avail > 0) memcpy(wb, wj + byte_off, (size_t)byte_avail);
+
+        /* Load 16 X values, zero-padding past K. */
+        m4t_mtfp_t xb[16] = {0};
+        for (int i = 0; i < avail_trits; i++) xb[i] = xi[k + i];
+
+        uint32_t w32;
+        memcpy(&w32, wb, 4);
+        uint8x16_t packed  = vreinterpretq_u8_u32(vdupq_n_u32(w32));
+        uint8x16_t dup     = vqtbl1q_u8(packed, dup_idx);
+        uint8x16_t shifted = vshlq_u8(dup, vnegq_s8(shift_s));
+        uint8x16_t codes   = vandq_u8(shifted, mask_03);
+        int8x16_t  signs   = vqtbl1q_s8(lut_sign, codes);
+
+        uint8x16_t pos_mask_u8 = vceqq_s8(signs, pos_one_v);
+        uint8x16_t neg_mask_u8 = vceqq_s8(signs, neg_one_v);
+
+        int8x16_t pm_s = vreinterpretq_s8_u8(pos_mask_u8);
+        int8x16_t nm_s = vreinterpretq_s8_u8(neg_mask_u8);
+
+        int16x8_t pm_lo16 = vmovl_s8(vget_low_s8(pm_s));
+        int16x8_t pm_hi16 = vmovl_s8(vget_high_s8(pm_s));
+        int16x8_t nm_lo16 = vmovl_s8(vget_low_s8(nm_s));
+        int16x8_t nm_hi16 = vmovl_s8(vget_high_s8(nm_s));
+
+        int32x4_t pm_0 = vmovl_s16(vget_low_s16(pm_lo16));
+        int32x4_t pm_1 = vmovl_s16(vget_high_s16(pm_lo16));
+        int32x4_t pm_2 = vmovl_s16(vget_low_s16(pm_hi16));
+        int32x4_t pm_3 = vmovl_s16(vget_high_s16(pm_hi16));
+        int32x4_t nm_0 = vmovl_s16(vget_low_s16(nm_lo16));
+        int32x4_t nm_1 = vmovl_s16(vget_high_s16(nm_lo16));
+        int32x4_t nm_2 = vmovl_s16(vget_low_s16(nm_hi16));
+        int32x4_t nm_3 = vmovl_s16(vget_high_s16(nm_hi16));
+
+        int32x4_t a0 = vld1q_s32((int32_t*)xb +  0);
+        int32x4_t a1 = vld1q_s32((int32_t*)xb +  4);
+        int32x4_t a2 = vld1q_s32((int32_t*)xb +  8);
+        int32x4_t a3 = vld1q_s32((int32_t*)xb + 12);
+
+        int32x4_t d0 = vsubq_s32(vandq_s32(a0, pm_0), vandq_s32(a0, nm_0));
+        int32x4_t d1 = vsubq_s32(vandq_s32(a1, pm_1), vandq_s32(a1, nm_1));
+        int32x4_t d2 = vsubq_s32(vandq_s32(a2, pm_2), vandq_s32(a2, nm_2));
+        int32x4_t d3 = vsubq_s32(vandq_s32(a3, pm_3), vandq_s32(a3, nm_3));
+
+        acc0 = vpadalq_s32(acc0, d0);
+        acc1 = vpadalq_s32(acc1, d1);
+        acc0 = vpadalq_s32(acc0, d2);
+        acc1 = vpadalq_s32(acc1, d3);
+    }
+
+    return vgetq_lane_s64(acc0, 0) + vgetq_lane_s64(acc0, 1)
+         + vgetq_lane_s64(acc1, 0) + vgetq_lane_s64(acc1, 1);
+}
+#endif
+
+void m4t_mtfp_ternary_matmul_bt_route(
+    m4t_mtfp_t* Y, const m4t_mtfp_t* X, const uint8_t* W_packed,
+    uint8_t* flags,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+    int Kp = M4T_TRIT_PACKED_BYTES(K);
+
+#if M4T_HAS_NEON
+    for (int i = 0; i < M; i++) {
+        const m4t_mtfp_t* X_row = X + (size_t)i * K;
+        m4t_mtfp_t*       Y_row = Y + (size_t)i * N;
+
+        for (int j = 0; j < N; j++) {
+            int64_t acc = ternary_dot_route(X_row, W_packed + (size_t)j * Kp, K);
+            m4t_mtfp_t out = m4t_mtfp_clamp64(acc);
+            if (flags && acc != (int64_t)out) {
+                int cell_index = i * N + j;
+                m4t_flag_or(flags, cell_index, M4T_FLAG_SATURATED);
+            }
+            Y_row[j] = out;
+        }
+    }
+#else
+#error "m4t_mtfp_ternary_matmul_bt_route requires NEON; no scalar fallback per project rule."
+#endif
+}
+
 /* Scalar-only reference. Same M·N outer loop; uses ternary_dot_scalar
  * for every cell regardless of M4T_HAS_NEON. Test-only oracle for
  * bit-exact verification gates. Per ternary_mac_routing T-G2. */
@@ -434,6 +624,11 @@ void m4t_mtfp_ternary_matmul_bt_scalar_ref(
     assert(Y && (K == 0 || (X && W_packed)));
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_packed);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
 
     int Kp = M4T_TRIT_PACKED_BYTES(K);
 

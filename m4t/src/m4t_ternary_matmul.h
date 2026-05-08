@@ -72,6 +72,31 @@ void m4t_mtfp_ternary_matmul_bt(
     int M, int K, int N
 );
 
+/* Routing-shaped sibling (V4 of pure-ternary audit). Same I/O and
+ * bit-exact output as m4t_mtfp_ternary_matmul_bt; inner compute is
+ * dispatch-shaped (mask + select on int32 X), no vmlal_s32 multiply.
+ *
+ * Per cell: decode trit → sign byte → vceqq generates int8 mask →
+ * widen to int32 mask → vandq with X → vsubq for ±X / 0 contribution
+ * → vpadalq_s32 to accumulate as int64.
+ *
+ * Architecture compliance per
+ * memory/feedback_pure_ternary_routed_architecture.md:
+ *   (1) pure ternary, (2) routed, (3) non-dense, (4) no binary
+ *   structures (masks transient at instruction level), (5) no
+ *   scalar ops.
+ *
+ * Saturation tracking: same as m4t_mtfp_ternary_matmul_bt. Optional
+ * flags side-channel; when non-NULL, sets M4T_FLAG_SATURATED on
+ * cells whose int64 accumulator overflows MTFP19 mantissa range. */
+void m4t_mtfp_ternary_matmul_bt_route(
+    m4t_mtfp_t*     Y,
+    const m4t_mtfp_t* X,
+    const uint8_t*  W_packed,
+    uint8_t*        flags,
+    int M, int K, int N
+);
+
 /* Scalar-only reference. Same semantics as m4t_mtfp_ternary_matmul_bt
  * above; never dispatches to NEON. Exposed for tests so the bit-exact
  * verification gate has a stable oracle even after productionization
