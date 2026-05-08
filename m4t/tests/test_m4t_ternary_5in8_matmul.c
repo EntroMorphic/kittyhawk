@@ -221,6 +221,29 @@ int main(void) {
         }
     }
 
+    /* Per journal/k80_fix_lmm.md: full K%80 sweep covering every
+     * boundary-tile pattern. The patched kernel runs the NEON tile
+     * body to K_padded = ceil(K/80)*80 with stack-local zero-padded
+     * W for the boundary tile. K%80 ∈ {1..79} sweep verifies every
+     * trit-count-in-boundary-tile configuration. */
+    for (int km = 1; km < 80; km++) {
+        int K_test = 160 + km;  /* covers main tile + boundary tile */
+        if (test_matmul_bit_exact(K_test, 1, 64, 3)) {
+            fprintf(stderr, "FAIL: K%%80 sweep K=%d (km=%d)\n", K_test, km);
+            return 1;
+        }
+    }
+
+    /* K<80 sweep: entire kernel IS the boundary tile. */
+    int K_lt80[] = { 1, 5, 17, 33, 40, 64, 79 };
+    for (size_t ki = 0; ki < sizeof(K_lt80)/sizeof(K_lt80[0]); ki++) {
+        if (test_matmul_bit_exact(K_lt80[ki], 1, 64, 5)) {
+            fprintf(stderr, "FAIL: K<80 sweep K=%d\n", K_lt80[ki]);
+            return 1;
+        }
+        if (test_matmul_bit_exact(K_lt80[ki], 4, 5, 5)) return 1;  /* with N-tail */
+    }
+
     printf("PASS: m4t_ternary_5in8_matmul (pack/unpack roundtrip + golden + "
            "aligned bit-exact + K-tail + N-tail + both-tail bit-exact)\n");
     return 0;

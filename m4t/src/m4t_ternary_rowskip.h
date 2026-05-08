@@ -19,21 +19,26 @@
  * 3898 (43.6% empty) gives ~43.6% per-call speedup on that BitLinear,
  * minus the gather overhead.
  *
- * ── When this primitive helps ────────────────────────────────────────
+ * ── Selection policy (per measured benches) ─────────────────────────
  *
- * For BitLinears with substantial empty-K-row count. Per the BitNet
- * audit:
- *   layer 1 down_proj  —  43.6% empty (largest single win)
+ * After the K%80 fix to m4t_ternary_5in8_matmul_bt (journal/k80_fix_lmm.md),
+ * rowskip's net benefit is roughly proportional to the empty-row
+ * fraction, minus a small gather/pad overhead. Smart dispatch:
+ *
+ *   skip% ≥ 5%   → use rowskip
+ *   skip% <  5%  → use dense (m4t_ternary_5in8_matmul_bt)
+ *
+ * BitNet layer-0 BitLinears that benefit from rowskip:
+ *   layer 1 down_proj  —  43.6% empty (largest single win, ~50% reduction)
  *   layer 2 down_proj  —  27.7%
  *   layer 29 o_proj    —  24.0%
  *   layer 0 o_proj     —  15.5%
  *   layer 3 down_proj  —  14.9%
- *   layer 0 down_proj  —   4.8%
- *   most middle layers —   <1%   (rowskip provides no win; pay only gather overhead)
+ *   most other layers  —  <5%   (use dense, rowskip pays only gather overhead)
  *
- * Caller should select between rowskip and dense per-BitLinear based
- * on the compression ratio. Below ~5% empty rows, rowskip is likely
- * a net wash or slight regression due to gather overhead.
+ * Aggregate across BitNet's 210 calls/token at smart dispatch:
+ * ~+0.9% over dense alone. Most of the per-token compute savings are
+ * concentrated in 4-5 specific (layer, BitLinear) pairs.
  *
  * ── Bit-exactness ───────────────────────────────────────────────────
  *

@@ -496,17 +496,30 @@ void m4t_ternary_5in8_matmul_bt(
     assert((const void*)Y != (const void*)W_packed);
 
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
-    /* Per TD-1 (relaxation of strict K%80 + N%4 alignment):
-     *   k_tile_end = K - K%80 (multiple of 80; tile body covers this range)
-     *   j_tile_end = N - N%4  (multiple of 4)
-     *   K%80 trailing trits and N%4 trailing j cells handled by geometric
-     *   scalar tail per project rule (sub-block scalar tails are allowed). */
+    /* Per journal/k80_fix_lmm.md: the inner tile body processes 80-trit
+     * chunks via 5 SDOTs each. Previously, K%80 trailing trits used a
+     * geometric scalar tail (per-trit divide-modulo decode + multiply).
+     * That tail dominated when K%80 was large — e.g., K=6912 (K%80=32)
+     * spent ~18% of the kernel in scalar.
+     *
+     * The new path runs the NEON tile body to K_padded (next multiple
+     * of 80 ≥ K). Trits at positions [K, K_padded) are zero on both
+     * sides:
+     *   - X side: pre-permute loop already zero-fills past K (trit_idx
+     *     < K check). Just need the X_strided buffer sized for K_padded.
+     *   - W side: at the boundary tile (k = K_aligned), W_packed has
+     *     fewer than 16 valid bytes. We use a 16-byte stack-local buffer
+     *     per j cell, copying the available real bytes and zeroing the
+     *     rest. Zero W trits contribute 0 to the dot product.
+     *
+     * Result: bit-exact, no scalar tail, single NEON path covers all K. */
     int Kp = (K + 4) / 5;            /* packed bytes per row */
-    int K5 = (K + 4) / 5;            /* strided X array length per digit */
-    int k_tile_end = K - (K % 80);
+    int K_aligned = K - (K % 80);    /* last full-80 boundary (≤ K) */
+    int K_padded = ((K + 79) / 80) * 80;  /* next multiple of 80 ≥ K */
+    int K5_padded = K_padded / 5;    /* X_d[d] array length per digit
+                                      * (K_padded is always a multiple
+                                      * of 80 = 16*5, hence of 5) */
     int j_tile_end = N - (N % 4);
-
-    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
 
     const uint8x16_t nine_v = vdupq_n_u8(9);
     const int8x16_t  lut_d0 = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
@@ -524,24 +537,23 @@ void m4t_ternary_5in8_matmul_bt(
         vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
     } };
 
-    /* Strided X buffer: K5 * 5 ≥ K bytes. Trailing slots (K5*5 - K) zero-padded. */
-    int alloc_size = K5 * 5;
+    /* Strided X buffer: K5_padded * 5 ≥ K_padded bytes. Trailing slots
+     * (positions ≥ K) zero-padded by the pre-permute loop. */
+    int alloc_size = K5_padded * 5;
     int8_t* X_strided = (alloc_size > 0) ? (int8_t*)malloc((size_t)alloc_size) : NULL;
     if (alloc_size > 0 && !X_strided) return;
     int8_t* X_d[5];
     for (int d = 0; d < 5; d++) {
-        X_d[d] = X_strided + (size_t)d * K5;
+        X_d[d] = X_strided + (size_t)d * K5_padded;
     }
 
     for (int i = 0; i < M; i++) {
         const m4t_trit_t* xi = X + (size_t)i * K;
 
         /* Permute X[i, :] into 5 stride-aligned arrays. Trit indices >= K
-         * are zero-padded so tile body's vld1q_s8 reads valid data even
-         * if the last X_d entry corresponds to trits past K (it won't be
-         * used by the tile body, which stops at k_tile_end/5; but the
-         * permutation pass must avoid OOB read on xi). */
-        for (int n = 0; n < K5; n++) {
+         * are zero-padded; the tile body now reads up to K5_padded slots
+         * per X_d[d], which covers the boundary tile at k=K_aligned. */
+        for (int n = 0; n < K5_padded; n++) {
             for (int d = 0; d < 5; d++) {
                 int trit_idx = 5 * n + d;
                 X_d[d][n] = (trit_idx < K) ? xi[trit_idx] : 0;
@@ -560,7 +572,29 @@ void m4t_ternary_5in8_matmul_bt(
             int32x4_t acc2 = vdupq_n_s32(0);
             int32x4_t acc3 = vdupq_n_s32(0);
 
-            for (int k = 0; k < k_tile_end; k += 80) {
+            #define M4T_5IN8_DECODE_AND_SDOT_BUF(BUF, ACC) do {            \
+                uint8x16_t b = vld1q_u8(BUF);                              \
+                uint16x8_t lo16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                uint16x8_t hi16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                uint8x16_t high = vcombine_u8(                             \
+                    vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                (ACC) = vdotq_s32((ACC), xv0, d0);                         \
+                (ACC) = vdotq_s32((ACC), xv1, d1);                         \
+                (ACC) = vdotq_s32((ACC), xv2, d2);                         \
+                (ACC) = vdotq_s32((ACC), xv3, d3);                         \
+                (ACC) = vdotq_s32((ACC), xv4, d4);                         \
+            } while (0)
+
+            /* Main NEON tile body: full 80-trit chunks within [0, K_aligned). */
+            for (int k = 0; k < K_aligned; k += 80) {
                 int x_idx = k / 5;
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
@@ -568,55 +602,48 @@ void m4t_ternary_5in8_matmul_bt(
                 int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
                 int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-                #define M4T_5IN8_DECODE_AND_SDOT(WJ, ACC) do {                 \
-                    uint8x16_t b = vld1q_u8((WJ) + k / 5);                     \
-                    uint16x8_t lo16 = vshrq_n_u16(                             \
-                        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
-                    uint16x8_t hi16 = vshrq_n_u16(                             \
-                        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
-                    uint8x16_t high = vcombine_u8(                             \
-                        vmovn_u16(lo16), vmovn_u16(hi16));                     \
-                    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
-                    int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
-                    int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
-                    int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
-                    int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
-                    int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
-                    (ACC) = vdotq_s32((ACC), xv0, d0);                         \
-                    (ACC) = vdotq_s32((ACC), xv1, d1);                         \
-                    (ACC) = vdotq_s32((ACC), xv2, d2);                         \
-                    (ACC) = vdotq_s32((ACC), xv3, d3);                         \
-                    (ACC) = vdotq_s32((ACC), xv4, d4);                         \
-                } while (0)
-
-                M4T_5IN8_DECODE_AND_SDOT(wj0, acc0);
-                M4T_5IN8_DECODE_AND_SDOT(wj1, acc1);
-                M4T_5IN8_DECODE_AND_SDOT(wj2, acc2);
-                M4T_5IN8_DECODE_AND_SDOT(wj3, acc3);
-
-                #undef M4T_5IN8_DECODE_AND_SDOT
+                M4T_5IN8_DECODE_AND_SDOT_BUF(wj0 + k / 5, acc0);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(wj1 + k / 5, acc1);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(wj2 + k / 5, acc2);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(wj3 + k / 5, acc3);
             }
+
+            /* Boundary tile: covers [K_aligned, K_padded) when K%80 != 0.
+             * W_packed may have fewer than 16 valid bytes here; copy
+             * what's available into a 16-byte stack-local buffer and
+             * zero the rest. Zero W trits contribute 0 to the dot. */
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                if (avail < 0) avail = 0;
+                if (avail > 16) avail = 16;
+                uint8_t bb0[16] = {0}, bb1[16] = {0}, bb2[16] = {0}, bb3[16] = {0};
+                if (avail > 0) {
+                    memcpy(bb0, wj0 + byte_off, (size_t)avail);
+                    memcpy(bb1, wj1 + byte_off, (size_t)avail);
+                    memcpy(bb2, wj2 + byte_off, (size_t)avail);
+                    memcpy(bb3, wj3 + byte_off, (size_t)avail);
+                }
+                M4T_5IN8_DECODE_AND_SDOT_BUF(bb0, acc0);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(bb1, acc1);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(bb2, acc2);
+                M4T_5IN8_DECODE_AND_SDOT_BUF(bb3, acc3);
+            }
+
+            #undef M4T_5IN8_DECODE_AND_SDOT_BUF
 
             int32_t s0 = vaddvq_s32(acc0);
             int32_t s1 = vaddvq_s32(acc1);
             int32_t s2 = vaddvq_s32(acc2);
             int32_t s3 = vaddvq_s32(acc3);
-
-            /* Geometric scalar tail: K%80 trailing trits per j cell (4 in lockstep). */
-            for (int k = k_tile_end; k < K; k++) {
-                int byte_idx  = k / 5;
-                int digit_pos = k % 5;
-                int8_t x_k = xi[k];
-                #define M4T_5IN8_DECODE_TRIT(WJ) (                             \
-                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 1u ?  1 : \
-                    (uint8_t)((WJ[byte_idx] / POW3[digit_pos]) % 3u) == 2u ? -1 : \
-                                                                              0)
-                s0 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj0);
-                s1 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj1);
-                s2 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj2);
-                s3 += (int32_t)x_k * (int32_t)M4T_5IN8_DECODE_TRIT(wj3);
-                #undef M4T_5IN8_DECODE_TRIT
-            }
 
             Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)s0;
             Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)s1;
@@ -624,14 +651,45 @@ void m4t_ternary_5in8_matmul_bt(
             Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)s3;
         }
 
-        /* N-tail: 1-3 trailing j cells. Single-acc NEON inner loop +
-         * scalar K-tail. NEON throughout the bulk; geometric scalar tail
-         * for K%80 trits per project rule. */
+        /* N-tail: 1-3 trailing j cells. Single-acc NEON path covering
+         * full 80-trit chunks plus boundary tile (no scalar tail). */
         for (int j = j_tile_end; j < N; j++) {
             const uint8_t* wj = W_packed + (size_t)j * Kp;
             int32x4_t acc = vdupq_n_s32(0);
 
-            for (int k = 0; k < k_tile_end; k += 80) {
+            #define M4T_5IN8_JTAIL_SDOT(BUF) do {                          \
+                uint8x16_t b = vld1q_u8(BUF);                              \
+                uint16x8_t lo16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);         \
+                uint16x8_t hi16 = vshrq_n_u16(                             \
+                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);        \
+                uint8x16_t high = vcombine_u8(                             \
+                    vmovn_u16(lo16), vmovn_u16(hi16));                     \
+                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));     \
+                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);                    \
+                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);                    \
+                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);                   \
+                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);                   \
+                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);                   \
+                acc = vdotq_s32(acc, xv0, d0);                             \
+                acc = vdotq_s32(acc, xv1, d1);                             \
+                acc = vdotq_s32(acc, xv2, d2);                             \
+                acc = vdotq_s32(acc, xv3, d3);                             \
+                acc = vdotq_s32(acc, xv4, d4);                             \
+            } while (0)
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+                M4T_5IN8_JTAIL_SDOT(wj + k / 5);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
                 int x_idx = k / 5;
                 int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
                 int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
@@ -639,36 +697,20 @@ void m4t_ternary_5in8_matmul_bt(
                 int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
                 int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
 
-                uint8x16_t b = vld1q_u8(wj + k / 5);
-                uint16x8_t lo16 = vshrq_n_u16(
-                    vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);
-                uint16x8_t hi16 = vshrq_n_u16(
-                    vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);
-                uint8x16_t high = vcombine_u8(
-                    vmovn_u16(lo16), vmovn_u16(hi16));
-                uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v));
-                int8x16_t d0 = vqtbl1q_s8(lut_d0, low);
-                int8x16_t d1 = vqtbl1q_s8(lut_d1, low);
-                int8x16_t d2 = vqtbl2q_s8(lut_d2, high);
-                int8x16_t d3 = vqtbl2q_s8(lut_d3, high);
-                int8x16_t d4 = vqtbl2q_s8(lut_d4, high);
-                acc = vdotq_s32(acc, xv0, d0);
-                acc = vdotq_s32(acc, xv1, d1);
-                acc = vdotq_s32(acc, xv2, d2);
-                acc = vdotq_s32(acc, xv3, d3);
-                acc = vdotq_s32(acc, xv4, d4);
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                if (avail < 0) avail = 0;
+                if (avail > 16) avail = 16;
+                uint8_t bb[16] = {0};
+                if (avail > 0) {
+                    memcpy(bb, wj + byte_off, (size_t)avail);
+                }
+                M4T_5IN8_JTAIL_SDOT(bb);
             }
 
-            int32_t s = vaddvq_s32(acc);
-            for (int k = k_tile_end; k < K; k++) {
-                int byte_idx  = k / 5;
-                int digit_pos = k % 5;
-                uint8_t u = (uint8_t)((wj[byte_idx] / POW3[digit_pos]) % 3u);
-                int w = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
-                s += (int32_t)xi[k] * (int32_t)w;
-            }
+            #undef M4T_5IN8_JTAIL_SDOT
 
-            Y[(size_t)i * N + j] = (m4t_mtfp_t)s;
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)vaddvq_s32(acc);
         }
     }
 
