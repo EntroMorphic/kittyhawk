@@ -314,10 +314,11 @@ void bitnet_forward_block(
                                         + (size_t)t * row_size
                                         + (size_t)kv_head * BITNET_HEAD_DIM;
                     const m4t_mtfp_t* kh = cache->k + k_row_base;
-                    int64_t acc = 0;
-                    for (int d = 0; d < BITNET_HEAD_DIM; d++) {
-                        acc += (int64_t)qh[d] * (int64_t)kh[d];
-                    }
+                    /* V14.A: NEON int32×int32→int64 dot via libm4t helper.
+                     * Same semantics as the prior scalar loop, but the
+                     * production code path is NEON-only per condition (5)
+                     * of the pure-ternary directive. */
+                    int64_t acc = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
                     scores_i64[t] = acc;
                     int64_t a = acc < 0 ? -acc : acc;
                     if (a > max_abs) max_abs = a;
@@ -347,18 +348,16 @@ void bitnet_forward_block(
 
                 /* attn_out[h × head_dim..] = Σ_t weights[t] · V_cache[layer][t][kv_head].
                  * weights[t] is at scale 2^30; V is mantissa.
-                 * accum at scale 2^30 → >> 30 to recover MTFP19 mantissa. */
+                 * V14.B: NEON outer-product accumulate via libm4t helper.
+                 * Loop order swapped (t outer, d inner contiguous) for NEON
+                 * vmlal_s32 broadcast pattern; bit-exact equivalent of the
+                 * prior (d, t) scalar loop. */
                 m4t_mtfp_t* out_h = s->attn_output + (size_t)h * BITNET_HEAD_DIM;
-                for (int d = 0; d < BITNET_HEAD_DIM; d++) {
-                    int64_t acc = 0;
-                    for (int t = 0; t < seq_k; t++) {
-                        size_t v_row_base = (size_t)layer_idx * cache->per_layer_stride
-                                            + (size_t)t * row_size
-                                            + (size_t)kv_head * BITNET_HEAD_DIM;
-                        acc += (int64_t)weights[t] * (int64_t)cache->v[v_row_base + d];
-                    }
-                    out_h[d] = m4t_mtfp_clamp64(acc >> 30);
-                }
+                const m4t_mtfp_t* V_base = cache->v
+                    + (size_t)layer_idx * cache->per_layer_stride
+                    + (size_t)kv_head * BITNET_HEAD_DIM;
+                m4t_mtfp_attn_v_combine(out_h, 30, weights, V_base, row_size,
+                                        seq_k, BITNET_HEAD_DIM);
             }
 
             /* Stash one debug score per head (last position's score),

@@ -135,6 +135,127 @@ int64_t m4t_mtfp_vec_dot_i64_scalar_ref(const m4t_mtfp_t* x, const m4t_mtfp_t* y
     return acc;
 }
 
+/* V14.B of pure-ternary audit: NEON attention V output projection.
+ * y[d] = clamp64(sum_t w[t] * V[t][d] >> shift). Inner d-loop NEON;
+ * outer t-loop broadcasts w[t]. Shift+clamp pass also NEON. */
+void m4t_mtfp_attn_v_combine(
+    m4t_mtfp_t* y, int shift,
+    const m4t_mtfp_t* w,
+    const m4t_mtfp_t* V_base, size_t v_stride,
+    int seq_k, int head_dim)
+{
+    assert(seq_k >= 0 && head_dim >= 0);
+    assert(shift >= 0 && shift <= 62);
+    if (seq_k == 0 || head_dim == 0) return;
+    assert(y && w && V_base);
+#if M4T_HAS_NEON
+    /* Stack-local int64 accumulator. head_dim is small (≤ 256 in BitNet),
+     * so 2 KB stack is fine. VLA. */
+    int64_t acc[head_dim];
+    for (int d = 0; d < head_dim; d++) acc[d] = 0;
+
+    int n_aligned = head_dim - (head_dim % 4);
+
+    /* Outer t loop, inner NEON d loop. */
+    for (int t = 0; t < seq_k; t++) {
+        const m4t_mtfp_t* v_row = V_base + (size_t)t * v_stride;
+        int32x2_t wv = vdup_n_s32(w[t]);
+        int d = 0;
+        for (; d < n_aligned; d += 4) {
+            int32x4_t v4 = vld1q_s32(v_row + d);
+            int64x2_t acc_lo = vld1q_s64(acc + d);
+            int64x2_t acc_hi = vld1q_s64(acc + d + 2);
+            acc_lo = vmlal_s32(acc_lo, wv, vget_low_s32(v4));
+            acc_hi = vmlal_s32(acc_hi, wv, vget_high_s32(v4));
+            vst1q_s64(acc + d, acc_lo);
+            vst1q_s64(acc + d + 2, acc_hi);
+        }
+        if (d < head_dim) {
+            /* Boundary tile: copy into 4-wide stack bufs to make the
+             * vector loads/stores safe regardless of avail (1, 2, or 3).
+             * Same pattern as the shift+clamp tile below. */
+            int avail = head_dim - d;
+            m4t_mtfp_t vbuf[4] = {0};
+            int64_t   abuf[4] = {0,0,0,0};
+            for (int j = 0; j < avail; j++) {
+                vbuf[j] = v_row[d + j];
+                abuf[j] = acc[d + j];
+            }
+            int32x4_t v4 = vld1q_s32(vbuf);
+            int64x2_t acc_lo = vld1q_s64(abuf);
+            int64x2_t acc_hi = vld1q_s64(abuf + 2);
+            acc_lo = vmlal_s32(acc_lo, wv, vget_low_s32(v4));
+            acc_hi = vmlal_s32(acc_hi, wv, vget_high_s32(v4));
+            vst1q_s64(abuf, acc_lo);
+            vst1q_s64(abuf + 2, acc_hi);
+            for (int j = 0; j < avail; j++) acc[d + j] = abuf[j];
+        }
+    }
+
+    /* NEON shift + clamp + narrow. y[d] = clamp64(acc[d] >> shift).
+     * vminq_s64/vmaxq_s64 are not in standard NEON, so we clamp at int32:
+     *   - vqmovn_s64 saturates int64 → int32 (covers gross overflow)
+     *   - vminq_s32/vmaxq_s32 then enforce ±M4T_MTFP_MAX_VAL (MTFP19 range)
+     * For BitNet (shift=30), shifted values fit int32 in practice; the
+     * vqmovn_s64 saturation is a safety net, the int32 clamp is what
+     * makes the result MTFP19-conformant. */
+    int64x2_t cnt    = vdupq_n_s64(-shift);
+    int32x4_t v_max  = vdupq_n_s32(M4T_MTFP_MAX_VAL);
+    int32x4_t v_min  = vdupq_n_s32(-(int32_t)M4T_MTFP_MAX_VAL);
+    int d = 0;
+    for (; d < n_aligned; d += 4) {
+        int64x2_t acc_lo = vld1q_s64(acc + d);
+        int64x2_t acc_hi = vld1q_s64(acc + d + 2);
+        int64x2_t s_lo = vshlq_s64(acc_lo, cnt);
+        int64x2_t s_hi = vshlq_s64(acc_hi, cnt);
+        int32x2_t y_lo = vqmovn_s64(s_lo);
+        int32x2_t y_hi = vqmovn_s64(s_hi);
+        int32x4_t y4 = vcombine_s32(y_lo, y_hi);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(y + d, y4);
+    }
+    if (d < head_dim) {
+        int avail = head_dim - d;
+        int64_t buf[4] = {0,0,0,0};
+        for (int j = 0; j < avail; j++) buf[j] = acc[d + j];
+        int64x2_t acc_lo = vld1q_s64(buf);
+        int64x2_t acc_hi = vld1q_s64(buf + 2);
+        int64x2_t s_lo = vshlq_s64(acc_lo, cnt);
+        int64x2_t s_hi = vshlq_s64(acc_hi, cnt);
+        int32x2_t y_lo = vqmovn_s64(s_lo);
+        int32x2_t y_hi = vqmovn_s64(s_hi);
+        int32x4_t y4 = vcombine_s32(y_lo, y_hi);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        m4t_mtfp_t ybuf[4];
+        vst1q_s32(ybuf, y4);
+        for (int j = 0; j < avail; j++) y[d + j] = ybuf[j];
+    }
+#else
+#error "m4t_mtfp_attn_v_combine requires NEON; no scalar fallback per project rule."
+#endif
+}
+
+void m4t_mtfp_attn_v_combine_scalar_ref(
+    m4t_mtfp_t* y, int shift,
+    const m4t_mtfp_t* w,
+    const m4t_mtfp_t* V_base, size_t v_stride,
+    int seq_k, int head_dim)
+{
+    assert(seq_k >= 0 && head_dim >= 0);
+    assert(shift >= 0 && shift <= 62);
+    if (seq_k == 0 || head_dim == 0) return;
+    assert(y && w && V_base);
+    for (int d = 0; d < head_dim; d++) {
+        int64_t acc = 0;
+        for (int t = 0; t < seq_k; t++) {
+            acc += (int64_t)w[t] * (int64_t)V_base[(size_t)t * v_stride + d];
+        }
+        y[d] = m4t_mtfp_clamp64(acc >> shift);
+    }
+}
+
 /* ── Cross-exponent accumulator (§14.2 named opt-in) ────────────────────── */
 
 /* Powers of 3 up to 3^19, defined as compile-time integer constants so

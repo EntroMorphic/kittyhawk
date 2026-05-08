@@ -144,6 +144,41 @@ int64_t m4t_mtfp_vec_dot_i64(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n);
  * Production code MUST NOT call this. */
 int64_t m4t_mtfp_vec_dot_i64_scalar_ref(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n);
 
+/* Attention V output projection:
+ *   y[d] = clamp64(sum_t w[t] * V[t][d] >> shift)
+ * where V[t][d] = V_base[(size_t)t * v_stride + d].
+ *
+ * V14.B of pure-ternary audit: replaces the scalar (d, t) loop in
+ * bitnet_forward_block's attention path. NEON-only production. The
+ * inner loop is over d (contiguous in V); w[t] is broadcast (vdup_n_s32)
+ * and accumulated into int64x2 lanes via vmlal_s32. Shift+clamp pass
+ * uses vshlq_s64 + vminq_s64/vmaxq_s64 + vmovn_s64.
+ *
+ * Stack-local int64 accumulator (head_dim ≤ 256 in BitNet → ≤ 2 KB).
+ *
+ * Bound analysis: per product fits int64 (≤ 2^60); summed over seq_k
+ * activations may approach int64 limits at very long contexts —
+ * matches the prior scalar implementation's behavior. Caller responsible.
+ *
+ * Preconditions:
+ *   seq_k >= 0, head_dim >= 0
+ *   shift >= 0 and shift <= 62
+ *   y, w, V_base non-NULL when seq_k > 0 and head_dim > 0
+ *   v_stride >= head_dim (rows do not overlap inside the [head_dim] slice)
+ */
+void m4t_mtfp_attn_v_combine(
+    m4t_mtfp_t* y, int shift,
+    const m4t_mtfp_t* w,
+    const m4t_mtfp_t* V_base, size_t v_stride,
+    int seq_k, int head_dim);
+
+/* Scalar-only reference. Test oracle. Production must not call. */
+void m4t_mtfp_attn_v_combine_scalar_ref(
+    m4t_mtfp_t* y, int shift,
+    const m4t_mtfp_t* w,
+    const m4t_mtfp_t* V_base, size_t v_stride,
+    int seq_k, int head_dim);
+
 /* ── Cross-exponent accumulator (§14.2 named opt-in) ──────────────────────
  *
  * The cross-block-exponent add policy from §14.2 of the substrate spec,

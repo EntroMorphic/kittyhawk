@@ -332,6 +332,97 @@ static void test_vec_dot_i64_extreme(void) {
     free(x); free(y);
 }
 
+/* ── m4t_mtfp_attn_v_combine (V14.B) ───────────────────────────────────── */
+
+static void test_attn_v_combine_aligned(void) {
+    /* head_dim%4=0 cases: NEON inner loop, no boundary tile. */
+    int seq_k_sizes[] = { 1, 4, 32, 256 };
+    int hd_sizes[]    = { 4, 8, 16, 64, 128 };
+    for (size_t a = 0; a < sizeof(seq_k_sizes)/sizeof(seq_k_sizes[0]); a++) {
+        int seq_k = seq_k_sizes[a];
+        for (size_t b = 0; b < sizeof(hd_sizes)/sizeof(hd_sizes[0]); b++) {
+            int hd = hd_sizes[b];
+            size_t v_stride = (size_t)hd + 7;  /* not contiguous between rows */
+            m4t_mtfp_t* w  = (m4t_mtfp_t*)calloc((size_t)seq_k, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* V  = (m4t_mtfp_t*)calloc(v_stride * (size_t)seq_k, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+            for (int t = 0; t < seq_k; t++) w[t] = (m4t_mtfp_t)((t * 311) % 5000 - 2500);
+            for (size_t i = 0; i < v_stride * (size_t)seq_k; i++)
+                V[i] = (m4t_mtfp_t)(((int)i * 137) % 6000 - 3000);
+            m4t_mtfp_attn_v_combine          (y,  10, w, V, v_stride, seq_k, hd);
+            m4t_mtfp_attn_v_combine_scalar_ref(yr, 10, w, V, v_stride, seq_k, hd);
+            for (int d = 0; d < hd; d++) {
+                if (y[d] != yr[d]) {
+                    FAIL("attn_v_combine aligned seq_k=%d hd=%d d=%d: NEON=%d ref=%d",
+                         seq_k, hd, d, (int)y[d], (int)yr[d]);
+                }
+            }
+            free(w); free(V); free(y); free(yr);
+        }
+    }
+}
+
+static void test_attn_v_combine_unaligned(void) {
+    /* head_dim%4 ∈ {1,2,3}: shift+clamp boundary tile and inner-loop tile fire. */
+    int hd_sizes[] = { 1, 2, 3, 5, 6, 7, 9, 13, 15, 17, 33, 65, 127 };
+    int seq_k = 17;
+    for (size_t b = 0; b < sizeof(hd_sizes)/sizeof(hd_sizes[0]); b++) {
+        int hd = hd_sizes[b];
+        size_t v_stride = (size_t)hd + 3;
+        m4t_mtfp_t* w  = (m4t_mtfp_t*)calloc((size_t)seq_k, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* V  = (m4t_mtfp_t*)calloc(v_stride * (size_t)seq_k, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+        for (int t = 0; t < seq_k; t++) w[t] = (m4t_mtfp_t)((t * 41) % 4000 - 2000);
+        for (size_t i = 0; i < v_stride * (size_t)seq_k; i++)
+            V[i] = (m4t_mtfp_t)(((int)i * 19) % 4000 - 2000);
+        m4t_mtfp_attn_v_combine          (y,  8, w, V, v_stride, seq_k, hd);
+        m4t_mtfp_attn_v_combine_scalar_ref(yr, 8, w, V, v_stride, seq_k, hd);
+        for (int d = 0; d < hd; d++) {
+            if (y[d] != yr[d]) {
+                FAIL("attn_v_combine unaligned seq_k=%d hd=%d d=%d: NEON=%d ref=%d",
+                     seq_k, hd, d, (int)y[d], (int)yr[d]);
+            }
+        }
+        free(w); free(V); free(y); free(yr);
+    }
+}
+
+static void test_attn_v_combine_clamps(void) {
+    /* High-magnitude weights and values to exercise the int64 saturating
+     * narrow + MTFP19 clamp at the tail of the helper. */
+    int seq_k = 64, hd = 32;
+    size_t v_stride = (size_t)hd;
+    m4t_mtfp_t* w  = (m4t_mtfp_t*)calloc((size_t)seq_k, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* V  = (m4t_mtfp_t*)calloc(v_stride * (size_t)seq_k, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)hd, sizeof(m4t_mtfp_t));
+    for (int t = 0; t < seq_k; t++) w[t] = (t & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+    for (size_t i = 0; i < v_stride * (size_t)seq_k; i++)
+        V[i] = ((int)i & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+    m4t_mtfp_attn_v_combine          (y,  30, w, V, v_stride, seq_k, hd);
+    m4t_mtfp_attn_v_combine_scalar_ref(yr, 30, w, V, v_stride, seq_k, hd);
+    for (int d = 0; d < hd; d++) {
+        if (y[d] != yr[d]) {
+            FAIL("attn_v_combine clamps d=%d: NEON=%d ref=%d", d, (int)y[d], (int)yr[d]);
+        }
+    }
+    free(w); free(V); free(y); free(yr);
+}
+
+static void test_attn_v_combine_zero(void) {
+    /* seq_k=0 leaves output untouched (caller-zeroed semantics: helper
+     * returns early without writing). */
+    int hd = 8;
+    m4t_mtfp_t y[8];
+    for (int i = 0; i < hd; i++) y[i] = 0xABCDEF;
+    m4t_mtfp_attn_v_combine(y, 30, NULL, NULL, 0, 0, hd);
+    for (int i = 0; i < hd; i++) {
+        if (y[i] != 0xABCDEF) FAIL("attn_v_combine seq_k=0 wrote y[%d]", i);
+    }
+}
+
 int main(void) {
     test_clamp64();
 
@@ -365,6 +456,11 @@ int main(void) {
     test_vec_dot_i64_aligned();
     test_vec_dot_i64_unaligned();
     test_vec_dot_i64_extreme();
+
+    test_attn_v_combine_aligned();
+    test_attn_v_combine_unaligned();
+    test_attn_v_combine_clamps();
+    test_attn_v_combine_zero();
 
     if (failures) {
         fprintf(stderr, "\n%d assertion(s) failed\n", failures);
