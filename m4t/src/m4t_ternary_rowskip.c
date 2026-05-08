@@ -5,7 +5,7 @@
  */
 
 #include "m4t_ternary_rowskip.h"
-#include "m4t_ternary_matmul.h"  /* m4t_ternary_5in8_matmul_bt */
+#include "m4t_ternary_matmul.h"  /* m4t_ternary_5in8_matmul_bt_route */
 #include "m4t_trit_pack.h"
 #include "m4t_internal.h"
 #include "m4t_mtfp4.h"           /* M4T_SDOT_K_MAX_EXACT */
@@ -227,7 +227,13 @@ void m4t_ternary_rowskip_matmul_bt(
         if (i > 0 && K_pad > K_c) {
             memset(X_compressed + K_c, 0, (size_t)(K_pad - K_c));
         }
-        m4t_ternary_5in8_matmul_bt(yi, X_compressed, W->W_packed, 1, K_pad, N);
+        /* V7 of pure-ternary audit: dispatch to the architecture-conformant
+         * route kernel (per-cell mask+select, no SDOT). The X = -128
+         * precondition of _bt_route is satisfied here because X_compressed
+         * is gathered from m4t_trit_t input, which BitNet's A8 quantization
+         * clamps to [-127, +127]. Caller-side guarantee. */
+        m4t_ternary_5in8_matmul_bt_route(yi, X_compressed, W->W_packed,
+                                          1, K_pad, N);
     }
 
     free(X_compressed);

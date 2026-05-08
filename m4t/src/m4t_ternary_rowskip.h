@@ -12,12 +12,26 @@
  *      W into 5-in-8 format on only those K positions. Compressed
  *      K = K - count(empty rows).
  *   2. At call time: gather X into X_compressed using the index list,
- *      then call the existing dense kernel m4t_ternary_5in8_matmul_bt
- *      on the compressed K.
+ *      then call m4t_ternary_5in8_matmul_bt_route (the architecture-
+ *      conformant routing-shaped kernel, V1 of pure-ternary audit) on
+ *      the compressed K.
  *
  * The win: kernel work is linear in K, so reducing K from 6912 to
- * 3898 (43.6% empty) gives ~43.6% per-call speedup on that BitLinear,
- * minus the gather overhead.
+ * 3898 (43.6% empty) gives ~43.6% per-call speedup on the inner
+ * matmul, minus the gather overhead.
+ *
+ * ── Architecture compliance (V7 of pure-ternary audit) ──────────────
+ *
+ * rowskip's nonempty_idx is an INTEGER POSITION LIST, not a binary
+ * indicator structure — it stores K-indices, not membership bits.
+ * Positional indices are the same hardware primitive that any kernel
+ * uses to address arrays; they are not the "binary structures" that
+ * the pure-ternary directive prohibits.
+ *
+ * The internal call dispatches to _bt_route (mask+select dispatch, no
+ * multiplication). All five conditions of the pure-ternary directive
+ * are satisfied via this dispatch: pure ternary, routed, non-dense,
+ * no binary structures, no scalar ops.
  *
  * ── Selection policy (per measured benches) ─────────────────────────
  *
@@ -109,6 +123,11 @@ size_t m4t_ternary_rowskip_packed_bytes(const m4t_ternary_rowskip_packed_t* p);
  *   M >= 0 (M==0 returns immediately)
  *   K matches W's K_original (asserted in debug)
  *   N matches W's N (asserted in debug)
+ *   |X[i, k]| <= 127 (no INT8_MIN). This is inherited from
+ *     m4t_ternary_5in8_matmul_bt_route (the architecture-conformant
+ *     inner kernel). BitNet's A8 quantization satisfies this by
+ *     construction (clamps to [-127, +127]); ternary inputs trivially
+ *     satisfy. Other callers must clamp.
  */
 void m4t_ternary_rowskip_matmul_bt(
     m4t_mtfp_t* Y,
