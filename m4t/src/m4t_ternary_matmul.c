@@ -495,6 +495,14 @@ void m4t_ternary_5in8_matmul_bt(
     assert((const void*)Y != (const void*)X);
     assert((const void*)Y != (const void*)W_packed);
 
+    /* K=0 degenerate case: dot product over zero terms is 0. Handle
+     * up front so the rest of the kernel never sees K=0 (avoids
+     * NULL+0 pointer arithmetic UB on X, W_packed). */
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
 #if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
     /* Per journal/k80_fix_lmm.md: the inner tile body processes 80-trit
      * chunks via 5 SDOTs each. Previously, K%80 trailing trits used a
@@ -512,7 +520,22 @@ void m4t_ternary_5in8_matmul_bt(
      *     per j cell, copying the available real bytes and zeroing the
      *     rest. Zero W trits contribute 0 to the dot product.
      *
-     * Result: bit-exact, no scalar tail, single NEON path covers all K. */
+     * Result: bit-exact, no scalar tail, single NEON path covers all K.
+     *
+     * Performance characteristics (measured, K=N=2560 unless noted):
+     *   K%80 == 0:        unchanged (fast path; conditional skips boundary).
+     *   K%80 ∈ [4..79]:   collapses to ~K%80=0 baseline (former scalar
+     *                     tail eliminated; up to +2.9× on K%80=79).
+     *   K%80 ∈ [1..3]:    boundary tile fires for 1-3 real trits + many
+     *                     zero-padded — pays full 80-trit SDOT setup.
+     *                     Slight regression (~5%) at K%80=1 vs same
+     *                     K%80=0 baseline. In BitNet's actual shapes
+     *                     (K ∈ {2560, 6912, 640}, K%80 ∈ {0, 32}) this
+     *                     case never fires.
+     *   K < ~10:          boundary tile pays full SDOT setup for 1-9
+     *                     real trits; slower in absolute terms (~µs)
+     *                     than the old scalar-only path. Not a realistic
+     *                     BitLinear shape; not optimized. */
     int Kp = (K + 4) / 5;            /* packed bytes per row */
     int K_aligned = K - (K % 80);    /* last full-80 boundary (≤ K) */
     int K_padded = ((K + 79) / 80) * 80;  /* next multiple of 80 ≥ K */
@@ -623,15 +646,15 @@ void m4t_ternary_5in8_matmul_bt(
 
                 int byte_off = k / 5;
                 int avail = Kp - byte_off;
-                if (avail < 0) avail = 0;
-                if (avail > 16) avail = 16;
+                /* Math: avail ∈ [1, 16] when boundary tile fires.
+                 *   K = 80q + r, r ∈ [1, 79], byte_off = 16q,
+                 *   Kp = 16q + ceil(r/5), so avail = ceil(r/5) ∈ [1, 16]. */
+                assert(avail >= 1 && avail <= 16);
                 uint8_t bb0[16] = {0}, bb1[16] = {0}, bb2[16] = {0}, bb3[16] = {0};
-                if (avail > 0) {
-                    memcpy(bb0, wj0 + byte_off, (size_t)avail);
-                    memcpy(bb1, wj1 + byte_off, (size_t)avail);
-                    memcpy(bb2, wj2 + byte_off, (size_t)avail);
-                    memcpy(bb3, wj3 + byte_off, (size_t)avail);
-                }
+                memcpy(bb0, wj0 + byte_off, (size_t)avail);
+                memcpy(bb1, wj1 + byte_off, (size_t)avail);
+                memcpy(bb2, wj2 + byte_off, (size_t)avail);
+                memcpy(bb3, wj3 + byte_off, (size_t)avail);
                 M4T_5IN8_DECODE_AND_SDOT_BUF(bb0, acc0);
                 M4T_5IN8_DECODE_AND_SDOT_BUF(bb1, acc1);
                 M4T_5IN8_DECODE_AND_SDOT_BUF(bb2, acc2);
@@ -699,12 +722,9 @@ void m4t_ternary_5in8_matmul_bt(
 
                 int byte_off = k / 5;
                 int avail = Kp - byte_off;
-                if (avail < 0) avail = 0;
-                if (avail > 16) avail = 16;
+                assert(avail >= 1 && avail <= 16);
                 uint8_t bb[16] = {0};
-                if (avail > 0) {
-                    memcpy(bb, wj + byte_off, (size_t)avail);
-                }
+                memcpy(bb, wj + byte_off, (size_t)avail);
                 M4T_5IN8_JTAIL_SDOT(bb);
             }
 

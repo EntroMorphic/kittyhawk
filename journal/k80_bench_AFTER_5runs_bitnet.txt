@@ -1,0 +1,35 @@
+=== AFTER run 1 BitNet ===
+── BitNet shapes ──
+  q/o/gate/up shape (K%%80=0)      K= 2560 N=2560 K%80= 0   0.0780 ± 0.0033 ms   (n=200)
+  gate/up output (K%%80=0)         K= 2560 N=6912 K%80= 0   0.2093 ± 0.0069 ms   (n=200)
+  down_proj shape (K%%80=32)       K= 6912 N=2560 K%80=32   0.2142 ± 0.0067 ms   (n=200)
+  k_proj/v_proj (K%%80=0)          K= 2560 N= 640 K%80= 0   0.0195 ± 0.0005 ms   (n=200)
+
+=== AFTER run 2 BitNet ===
+── BitNet shapes ──
+  q/o/gate/up shape (K%%80=0)      K= 2560 N=2560 K%80= 0   0.0781 ± 0.0026 ms   (n=200)
+  gate/up output (K%%80=0)         K= 2560 N=6912 K%80= 0   0.2123 ± 0.0083 ms   (n=200)
+  down_proj shape (K%%80=32)       K= 6912 N=2560 K%80=32   0.2138 ± 0.0068 ms   (n=200)
+  k_proj/v_proj (K%%80=0)          K= 2560 N= 640 K%80= 0   0.0196 ± 0.0005 ms   (n=200)
+
+=== AFTER run 3 BitNet ===
+── BitNet shapes ──
+  q/o/gate/up shape (K%%80=0)      K= 2560 N=2560 K%80= 0   0.0795 ± 0.0049 ms   (n=200)
+  gate/up output (K%%80=0)         K= 2560 N=6912 K%80= 0   0.2177 ± 0.0078 ms   (n=200)
+  down_proj shape (K%%80=32)       K= 6912 N=2560 K%80=32   0.2222 ± 0.0080 ms   (n=200)
+  k_proj/v_proj (K%%80=0)          K= 2560 N= 640 K%80= 0   0.0202 ± 0.0011 ms   (n=200)
+
+=== AFTER run 4 BitNet ===
+── BitNet shapes ──
+  q/o/gate/up shape (K%%80=0)      K= 2560 N=2560 K%80= 0   0.0789 ± 0.0031 ms   (n=200)
+  gate/up output (K%%80=0)         K= 2560 N=6912 K%80= 0   0.2156 ± 0.0073 ms   (n=200)
+  down_proj shape (K%%80=32)       K= 6912 N=2560 K%80=32   0.2198 ± 0.0076 ms   (n=200)
+  k_proj/v_proj (K%%80=0)          K= 2560 N= 640 K%80= 0   0.0200 ± 0.0009 ms   (n=200)
+
+=== AFTER run 5 BitNet ===
+── BitNet shapes ──
+  q/o/gate/up shape (K%%80=0)      K= 2560 N=2560 K%80= 0   0.0799 ± 0.0044 ms   (n=200)
+  gate/up output (K%%80=0)         K= 2560 N=6912 K%80= 0   0.2174 ± 0.0080 ms   (n=200)
+  down_proj shape (K%%80=32)       K= 6912 N=2560 K%80=32   0.2208 ± 0.0066 ms   (n=200)
+  k_proj/v_proj (K%%80=0)          K= 2560 N= 640 K%80= 0   0.0201 ± 0.0010 ms   (n=200)
+

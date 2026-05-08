@@ -244,6 +244,39 @@ int main(void) {
         if (test_matmul_bit_exact(K_lt80[ki], 4, 5, 5)) return 1;  /* with N-tail */
     }
 
+    /* K=0 explicit: degenerate dot product, Y must be all zeros.
+     * Kernel must handle without UB or wrong output. */
+    {
+        int M = 4, N = 16;
+        m4t_mtfp_t* Y = (m4t_mtfp_t*)calloc((size_t)M * N, sizeof(m4t_mtfp_t));
+        /* Pre-fill Y with sentinel to detect "kernel didn't write". */
+        for (int i = 0; i < M * N; i++) Y[i] = 0xDEADBEEF;
+        m4t_ternary_5in8_matmul_bt(Y, NULL, NULL, M, 0, N);
+        for (int i = 0; i < M * N; i++) {
+            if (Y[i] != 0) {
+                fprintf(stderr, "FAIL: K=0 expected Y[%d]=0, got %d\n", i, Y[i]);
+                free(Y);
+                return 1;
+            }
+        }
+        free(Y);
+    }
+
+    /* M>1 K%80 sweep: same K%80 pattern coverage but with multi-row M.
+     * Catches per-row state contamination (e.g., X_strided not refreshed,
+     * acc registers not reset, Y rows interleaved). */
+    int K_m_sweep[] = { 161, 200, 239, 320 + 17, 400 + 79, 4, 33, 79 };
+    int Ms_m_sweep[] = { 2, 4, 8 };
+    for (size_t ki = 0; ki < sizeof(K_m_sweep)/sizeof(K_m_sweep[0]); ki++) {
+        for (size_t mi = 0; mi < sizeof(Ms_m_sweep)/sizeof(Ms_m_sweep[0]); mi++) {
+            if (test_matmul_bit_exact(K_m_sweep[ki], Ms_m_sweep[mi], 64, 3)) {
+                fprintf(stderr, "FAIL: M>1 sweep K=%d M=%d\n",
+                        K_m_sweep[ki], Ms_m_sweep[mi]);
+                return 1;
+            }
+        }
+    }
+
     printf("PASS: m4t_ternary_5in8_matmul (pack/unpack roundtrip + golden + "
            "aligned bit-exact + K-tail + N-tail + both-tail bit-exact)\n");
     return 0;
