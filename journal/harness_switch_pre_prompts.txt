@@ -1,0 +1,16 @@
+P1 capital_france:
+     argmax over full vocab        = 220
+     post-final-norm x[0..3]      = -297 308 133 1379
+     logits[0..3]                  = 393 644 397 912
+P2 largest_planet:
+     argmax over full vocab        = 50789
+     post-final-norm x[0..3]      = -69 203 -229 498
+     logits[0..3]                  = 217 422 145 118
+P3 quick_brown_fox:
+     argmax over full vocab        = 279
+     post-final-norm x[0..3]      = -204 -238 -183 1527
+     logits[0..3]                  = 861 961 553 547
+P4 def_fib:
+     argmax over full vocab        = 471
+     post-final-norm x[0..3]      = 266 454 176 260
+     logits[0..3]                  = 328 731 766 601
