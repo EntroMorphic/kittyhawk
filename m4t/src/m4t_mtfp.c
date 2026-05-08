@@ -1505,64 +1505,116 @@ m4t_mtfp_t m4t_int32_recip(m4t_mtfp_t src) {
     return (m4t_mtfp_t)y;
 }
 
-/* ── Softmax (LUT-based exp + integer reciprocal) ──────────────────────
+/* ── Softmax (NEON polynomial exp + integer reciprocal) ────────────────
  *
- * Per journal/softmax_design_lmm.md.
+ * V14.G replaces the 4096-entry LUT (which required scalar gather per
+ * cell) with a NEON-friendly polynomial.
  *
- * exp LUT covers z ∈ [-LUT_RANGE, 0] sampled at LUT_RES points; values
- * below the range underflow to 0. exp at scale 2^30.
+ * Range reduction via powers of 2: w = -z * (2^16 / ln(2)) gives a Q16
+ * fixed-point representation of -z/ln(2). Split into v_int = w >> 16
+ * (integer log2 part) and t = w & 0xFFFF (fractional part).
  *
- * Per-cell pipeline:
- *   z = x[i] - max(x)             (int32, ≤ 0)
- *   e[i] = exp_lut(z)             (int32 at scale 2^30)
- *   sum = Σ e[i]                  (int64, max ≈ n × 2^30)
- *   inv = 2^30 / (sum >> shift)    (m4t_int32_recip)
- *   y[i] = (e[i] · inv) >> (30 - shift)
+ *   exp(z) = 2^(z/ln(2)) = 2^(-v_int - t/2^16)
+ *          = 2^(-v_int) × 2^(-t/2^16)
  *
- * Where shift brings sum into int31 range for the reciprocal call. */
+ * The fractional 2^(-u) for u ∈ [0, 1) is a 6-coefficient Horner
+ * polynomial on t (coefficients are the Taylor series of 2^(-u),
+ * scaled to 2^31). Final result is right-shifted by v_int to apply
+ * the integer power of 2.
+ *
+ * Both production (NEON) and scalar_ref-style scalar use the same
+ * polynomial — bit-exact equivalence.
+ *
+ * Coefficients at scale 2^31:
+ *   c0 = 2^31, c1 = round(ln(2) × 2^31), c2 = round(ln(2)²/2 × 2^31),
+ *   ..., c6 = round(ln(2)⁶/720 × 2^31). 7-term Horner yields ~14-16
+ *   bits of precision over t ∈ [0, 2^16) (i.e., u ∈ [0, 1)). */
 
-static int32_t* g_softmax_exp_lut = NULL;
-static int      g_softmax_lut_initialized = 0;
+#define M4T_LN2_INV_Q16 94548          /* round(2^16 / ln(2)) */
+#define M4T_EXP_C1 1488522237          /* round(ln(2) × 2^31) */
+#define M4T_EXP_C2 515916191           /* round(ln(2)²/2 × 2^31) */
+#define M4T_EXP_C3 119212030           /* round(ln(2)³/6 × 2^31) */
+#define M4T_EXP_C4 20650989            /* round(ln(2)⁴/24 × 2^31) */
+#define M4T_EXP_C5 2863222             /* round(ln(2)⁵/120 × 2^31) */
+#define M4T_EXP_C6 330809              /* round(ln(2)⁶/720 × 2^31) */
+/* C0 = 2^31 — kept as int64 since it doesn't fit signed int32. The last
+ * Horner step computes V_at_2_30 = 2^30 − (V × t) >> 17 directly,
+ * avoiding the int32 overflow. */
 
-static void softmax_init_lut(void) {
-    if (g_softmax_lut_initialized) return;
-    int32_t* lut = (int32_t*)malloc((size_t)M4T_SOFTMAX_LUT_RES * sizeof(int32_t));
-    assert(lut);
-    double scale = (double)M4T_SOFTMAX_OUT_SCALE;  /* 2^30 */
-    for (int k = 0; k < M4T_SOFTMAX_LUT_RES; k++) {
-        double z = -(double)k * (double)M4T_SOFTMAX_LUT_RANGE
-                   / (double)M4T_SOFTMAX_LUT_RES;  /* z ∈ [0, -LUT_RANGE) */
-        double v = exp(z) * scale;
-        int32_t vi = (int32_t)(v + 0.5);
-        if (vi < 0) vi = 0;
-        if (vi > M4T_SOFTMAX_OUT_SCALE) vi = M4T_SOFTMAX_OUT_SCALE;
-        lut[k] = vi;
-    }
-    g_softmax_exp_lut = lut;
-    g_softmax_lut_initialized = 1;
-}
-
-/* Compute exp(z) at scale 2^30 for z ≤ 0. Returns 0 for z < -LUT_RANGE.
- * Linear interpolation between LUT entries. */
-static int32_t softmax_exp_int(int32_t z) {
+__attribute__((unused))
+static int32_t softmax_exp_poly_int(int32_t z) {
     if (z >= 0) return M4T_SOFTMAX_OUT_SCALE;
     int32_t neg_z = -z;
-    if (neg_z >= M4T_SOFTMAX_LUT_RANGE) return 0;
-    /* index = neg_z × (LUT_RES / LUT_RANGE). LUT_RES=4096, LUT_RANGE=30
-     * → multiplier = 4096/30 ≈ 136.5333. Use Q16 fixed-point: 136.5333 × 2^16
-     * → (LUT_RES << 16) / LUT_RANGE. */
-    int64_t idx_q16 = (int64_t)neg_z * M4T_SOFTMAX_LUT_RES * 65536LL / M4T_SOFTMAX_LUT_RANGE;
-    int idx = (int)(idx_q16 >> 16);
-    int frac = (int)(idx_q16 & 0xFFFF);
-    if (idx >= M4T_SOFTMAX_LUT_RES - 1) {
-        return g_softmax_exp_lut[M4T_SOFTMAX_LUT_RES - 1];
-    }
-    int32_t a = g_softmax_exp_lut[idx];
-    int32_t b = g_softmax_exp_lut[idx + 1];
-    /* Linear interp: a + (b - a) × frac / 2^16. Note b ≤ a (LUT is decreasing). */
-    int32_t v = a + (int32_t)(((int64_t)(b - a) * (int64_t)frac) >> 16);
-    return v;
+    if (neg_z >= M4T_SOFTMAX_LUT_RANGE) return 0;  /* RANGE = 30 */
+    int32_t w = neg_z * M4T_LN2_INV_Q16;
+    int32_t v_int = w >> 16;
+    int64_t t = w & 0xFFFF;
+    int64_t V = M4T_EXP_C6;
+    V = M4T_EXP_C5 - ((V * t) >> 16);
+    V = M4T_EXP_C4 - ((V * t) >> 16);
+    V = M4T_EXP_C3 - ((V * t) >> 16);
+    V = M4T_EXP_C2 - ((V * t) >> 16);
+    V = M4T_EXP_C1 - ((V * t) >> 16);
+    /* Final step at scale 2^30 directly (skip C0 = 2^31 to stay in int32):
+     * result_at_2^30 = 2^30 − (V × t) >> 17. */
+    int64_t r = (int64_t)M4T_SOFTMAX_OUT_SCALE - ((V * t) >> 17);
+    int64_t result = r >> v_int;
+    if (result < 0) result = 0;
+    if (result > M4T_SOFTMAX_OUT_SCALE) result = M4T_SOFTMAX_OUT_SCALE;
+    return (int32_t)result;
 }
+
+#if M4T_HAS_NEON
+/* NEON inline: same polynomial as softmax_exp_poly_int, processed for
+ * 4 cells in parallel. Bit-exact match to scalar version. */
+static inline int32x4_t softmax_exp_poly_neon(int32x4_t z) {
+    uint32x4_t mask_zpos = vcgezq_s32(z);                     /* z >= 0 → OUT_SCALE */
+    int32x4_t  neg_z     = vnegq_s32(z);
+    uint32x4_t mask_zlow = vcgeq_s32(neg_z, vdupq_n_s32(M4T_SOFTMAX_LUT_RANGE));
+    /* Clamp neg_z into [0, 29] for safe poly computation; out-of-range
+     * lanes are masked at the end. */
+    int32x4_t nz_safe = vminq_s32(vmaxq_s32(neg_z, vdupq_n_s32(0)),
+                                  vdupq_n_s32(M4T_SOFTMAX_LUT_RANGE - 1));
+    int32x4_t w     = vmulq_n_s32(nz_safe, M4T_LN2_INV_Q16);
+    int32x4_t v_int = vshrq_n_s32(w, 16);
+    int32x4_t t     = vandq_s32(w, vdupq_n_s32(0xFFFF));
+
+    int32x4_t V = vdupq_n_s32(M4T_EXP_C6);
+    #define HORNER_NEON(c_const) do { \
+        int64x2_t Vt_lo = vmull_s32(vget_low_s32(V),  vget_low_s32(t)); \
+        int64x2_t Vt_hi = vmull_s32(vget_high_s32(V), vget_high_s32(t)); \
+        int32x4_t Vt = vcombine_s32(vmovn_s64(vshrq_n_s64(Vt_lo, 16)), \
+                                    vmovn_s64(vshrq_n_s64(Vt_hi, 16))); \
+        V = vsubq_s32(vdupq_n_s32(c_const), Vt); \
+    } while (0)
+    HORNER_NEON(M4T_EXP_C5);
+    HORNER_NEON(M4T_EXP_C4);
+    HORNER_NEON(M4T_EXP_C3);
+    HORNER_NEON(M4T_EXP_C2);
+    HORNER_NEON(M4T_EXP_C1);
+    #undef HORNER_NEON
+
+    /* Final step: result_at_2^30 = 2^30 − V*t >> 17. */
+    int64x2_t Vt_lo = vmull_s32(vget_low_s32(V),  vget_low_s32(t));
+    int64x2_t Vt_hi = vmull_s32(vget_high_s32(V), vget_high_s32(t));
+    int32x4_t Vt_div = vcombine_s32(vmovn_s64(vshrq_n_s64(Vt_lo, 17)),
+                                     vmovn_s64(vshrq_n_s64(Vt_hi, 17)));
+    int32x4_t result = vsubq_s32(vdupq_n_s32(M4T_SOFTMAX_OUT_SCALE), Vt_div);
+
+    /* Apply 2^(-v_int): result >> v_int per lane (vshlq_s32 with negative
+     * count is per-lane variable shift). */
+    result = vshlq_s32(result, vnegq_s32(v_int));
+
+    /* Apply special-case masks: 0 where neg_z >= LUT_RANGE; OUT_SCALE
+     * where z >= 0. */
+    result = vbslq_s32(mask_zlow, vdupq_n_s32(0), result);
+    result = vbslq_s32(mask_zpos, vdupq_n_s32(M4T_SOFTMAX_OUT_SCALE), result);
+    /* Clamp to [0, OUT_SCALE] for safety against polynomial small drift. */
+    result = vminq_s32(vmaxq_s32(result, vdupq_n_s32(0)),
+                       vdupq_n_s32(M4T_SOFTMAX_OUT_SCALE));
+    return result;
+}
+#endif /* M4T_HAS_NEON */
 
 /* Higher-precision reciprocal: 2^60 / src for src ∈ [1, INT64_MAX].
  * m4t_int32_recip's output (at scale 2^30) is too coarse for softmax
@@ -1594,42 +1646,133 @@ static int64_t softmax_recip60(int64_t src) {
 void m4t_mtfp_softmax(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
     assert(n >= 1);
     assert(y && x);
-    softmax_init_lut();
+#if M4T_HAS_NEON
+    /* Stage 1: NEON max reduction. */
+    int32x4_t mx_v = vdupq_n_s32(x[0]);
+    int n_aligned = n - (n % 4);
+    int i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t xv = vld1q_s32(x + i);
+        mx_v = vmaxq_s32(mx_v, xv);
+    }
+    int32_t mx = vmaxvq_s32(mx_v);
+    for (; i < n; i++) if (x[i] > mx) mx = x[i];
 
-    /* Find max. */
-    m4t_mtfp_t mx = x[0];
-    for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
-
-    /* exp(x[i] - max) into a scratch; sum in int64. malloc rather than
-     * alloca: BitNet's attention can have n up to ~4096 (max seq_len);
-     * stack pressure is unwarranted for a once-per-call op. */
+    /* Stage 2: NEON polynomial exp + sum. e[i] is non-negative ≤ 2^30. */
     int32_t* e = (int32_t*)malloc((size_t)n * sizeof(int32_t));
     assert(e);
-    int64_t sum = 0;
-    for (int i = 0; i < n; i++) {
-        int64_t z = (int64_t)x[i] - (int64_t)mx;  /* ≤ 0 */
-        int32_t z_clamped = (z < (int64_t)INT32_MIN) ? INT32_MIN : (int32_t)z;
-        e[i] = softmax_exp_int(z_clamped);
-        sum += e[i];
+    int64x2_t sum_lo = vdupq_n_s64(0);
+    int64x2_t sum_hi = vdupq_n_s64(0);
+    int32x4_t mx_bcast = vdupq_n_s32(mx);
+    i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t xv = vld1q_s32(x + i);
+        int32x4_t zv = vsubq_s32(xv, mx_bcast);  /* z = x - mx, ≤ 0 in normal case */
+        int32x4_t ev = softmax_exp_poly_neon(zv);
+        vst1q_s32(e + i, ev);
+        /* Accumulate to int64 (each e ≤ 2^30, sum ≤ n × 2^30). */
+        sum_lo = vaddw_s32(sum_lo, vget_low_s32(ev));
+        sum_hi = vaddw_s32(sum_hi, vget_high_s32(ev));
     }
+    /* Boundary tile for n%4 != 0. */
+    if (i < n) {
+        int avail = n - i;
+        m4t_mtfp_t xbuf[4] = {0};
+        for (int j = 0; j < avail; j++) xbuf[j] = x[i + j];
+        int32x4_t xv = vld1q_s32(xbuf);
+        int32x4_t zv = vsubq_s32(xv, mx_bcast);
+        int32x4_t ev = softmax_exp_poly_neon(zv);
+        m4t_mtfp_t ebuf[4];
+        vst1q_s32(ebuf, ev);
+        for (int j = 0; j < avail; j++) {
+            e[i + j] = ebuf[j];
+            sum_lo = vsetq_lane_s64(vgetq_lane_s64(sum_lo, 0) + ebuf[j], sum_lo, 0);
+        }
+    }
+    int64_t sum = vgetq_lane_s64(sum_lo, 0) + vgetq_lane_s64(sum_lo, 1)
+                + vgetq_lane_s64(sum_hi, 0) + vgetq_lane_s64(sum_hi, 1);
     if (sum < 1) sum = 1;
 
-    /* High-precision reciprocal: inv60 = 2^60 / sum (full int precision).
-     *
-     * Algebra:
-     *   want: y[i] = e[i] / sum_real × 2^30
-     *               = e[i] × 2^30 / sum_int    (sum_int at scale 2^30)
-     *   inv60 = 2^60 / sum_int → e[i] × inv60 = e[i] × 2^60 / sum_int.
-     *   y[i] = e[i] × inv60 >> 30 = e[i] × 2^30 / sum_int.  ✓ */
+    /* Stage 3: scalar setup of inv60 (once-per-call, like rsqrt setup
+     * in V14.C; not per-cell). */
     int64_t inv60 = softmax_recip60(sum);
-    for (int i = 0; i < n; i++) {
-        __int128 prod = (__int128)e[i] * (__int128)inv60;
-        int64_t scaled = (int64_t)(prod >> 30);
-        if (scaled < 0) scaled = 0;
-        if (scaled > M4T_SOFTMAX_OUT_SCALE) scaled = M4T_SOFTMAX_OUT_SCALE;
-        y[i] = (m4t_mtfp_t)scaled;
+
+    /* Stage 4: NEON per-cell e[i] × inv60 >> 30, clamp [0, OUT_SCALE].
+     * Same uint96 multiply pattern as V14.F: e (uint32) × inv60 (uint64)
+     * decomposed via 32-bit limbs. e is non-negative so no sign handling. */
+    uint64_t inv60_u = (uint64_t)inv60;
+    uint32_t inv60_lo32 = (uint32_t)inv60_u;
+    uint32_t inv60_hi32 = (uint32_t)(inv60_u >> 32);
+    int32x4_t v_max = vdupq_n_s32(M4T_SOFTMAX_OUT_SCALE);
+    int32x4_t v_zero = vdupq_n_s32(0);
+
+    i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t ev = vld1q_s32(e + i);
+        for (int half = 0; half < 2; half++) {
+            uint32x2_t e_pair = (half == 0)
+                ? vreinterpret_u32_s32(vget_low_s32(ev))
+                : vreinterpret_u32_s32(vget_high_s32(ev));
+            uint64x2_t P_lo = vmull_u32(e_pair, vdup_n_u32(inv60_lo32));
+            uint64x2_t P_hi = vmull_u32(e_pair, vdup_n_u32(inv60_hi32));
+            /* Combined 96-bit V = P_hi << 32 + P_lo. >> 30 to get y. */
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+            /* Right-shift uint96 by 30: result = (V_high << 34) | (V_low >> 30). */
+            uint64x2_t V_low = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                         vmovl_u32(L0));
+            uint64x2_t V_high = vmovl_u32(L2);
+            uint64x2_t shifted = vorrq_u64(vshlq_n_u64(V_high, 34),
+                                            vshrq_n_u64(V_low, 30));
+            int32x2_t y_pair = vqmovn_s64(vreinterpretq_s64_u64(shifted));
+            if (half == 0) vst1_s32(y + i,     y_pair);
+            else           vst1_s32(y + i + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(y + i);
+        y4 = vminq_s32(vmaxq_s32(y4, v_zero), v_max);
+        vst1q_s32(y + i, y4);
+    }
+    if (i < n) {
+        int avail = n - i;
+        m4t_mtfp_t ebuf[4] = {0}, ybuf[4] = {0};
+        for (int j = 0; j < avail; j++) ebuf[j] = e[i + j];
+        int32x4_t ev = vld1q_s32(ebuf);
+        for (int half = 0; half < 2; half++) {
+            uint32x2_t e_pair = (half == 0)
+                ? vreinterpret_u32_s32(vget_low_s32(ev))
+                : vreinterpret_u32_s32(vget_high_s32(ev));
+            uint64x2_t P_lo = vmull_u32(e_pair, vdup_n_u32(inv60_lo32));
+            uint64x2_t P_hi = vmull_u32(e_pair, vdup_n_u32(inv60_hi32));
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+            uint64x2_t V_low = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                         vmovl_u32(L0));
+            uint64x2_t V_high = vmovl_u32(L2);
+            uint64x2_t shifted = vorrq_u64(vshlq_n_u64(V_high, 34),
+                                            vshrq_n_u64(V_low, 30));
+            int32x2_t y_pair = vqmovn_s64(vreinterpretq_s64_u64(shifted));
+            if (half == 0) vst1_s32(ybuf,     y_pair);
+            else           vst1_s32(ybuf + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(ybuf);
+        y4 = vminq_s32(vmaxq_s32(y4, v_zero), v_max);
+        vst1q_s32(ybuf, y4);
+        for (int j = 0; j < avail; j++) y[i + j] = ybuf[j];
     }
     free(e);
+#else
+#error "m4t_mtfp_softmax requires NEON; no scalar fallback per project rule."
+#endif
 }
 
 void m4t_mtfp_softmax_scalar_ref(m4t_mtfp_t* y, const m4t_mtfp_t* x, int n) {
