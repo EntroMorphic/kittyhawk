@@ -332,6 +332,189 @@ static void test_vec_dot_i64_extreme(void) {
     free(x); free(y);
 }
 
+/* ── m4t_mtfp_relu2_inplace_bx (V14.D) ─────────────────────────────────── */
+
+static void test_relu2_bx_aligned(void) {
+    int sizes[]  = { 4, 16, 64, 256, 6912 };
+    int shifts[] = { 0, 1, 2, 3, 4, 8, 16, 19 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+            int shift_exp = shifts[k];
+            int x_bx = (shift_exp + 1) / 2 + 1;
+            int target_bx = 2 * x_bx - shift_exp;
+            m4t_mtfp_t* x  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* xr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                int v = (i * 547) % 60000 - 30000;
+                x[i] = (m4t_mtfp_t)v;
+                xr[i] = (m4t_mtfp_t)v;
+            }
+            m4t_mtfp_relu2_inplace_bx          (x,  x_bx, target_bx, n);
+            m4t_mtfp_relu2_inplace_bx_scalar_ref(xr, x_bx, target_bx, n);
+            for (int i = 0; i < n; i++) {
+                if (x[i] != xr[i]) {
+                    FAIL("relu2_bx aligned shift_exp=%d n=%d i=%d: NEON=%d ref=%d",
+                         shift_exp, n, i, (int)x[i], (int)xr[i]);
+                    break;
+                }
+            }
+            free(x); free(xr);
+        }
+    }
+}
+
+static void test_relu2_bx_unaligned(void) {
+    int sizes[]  = { 1, 2, 3, 5, 7, 11, 17, 33, 65, 129 };
+    int shifts[] = { 0, 1, 3, 7 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+            int shift_exp = shifts[k];
+            int x_bx = (shift_exp + 1) / 2 + 1;
+            int target_bx = 2 * x_bx - shift_exp;
+            m4t_mtfp_t* x  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* xr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                int v = (i * 191) % 50000 - 25000;
+                x[i] = (m4t_mtfp_t)v;
+                xr[i] = (m4t_mtfp_t)v;
+            }
+            m4t_mtfp_relu2_inplace_bx          (x,  x_bx, target_bx, n);
+            m4t_mtfp_relu2_inplace_bx_scalar_ref(xr, x_bx, target_bx, n);
+            for (int i = 0; i < n; i++) {
+                if (x[i] != xr[i]) {
+                    FAIL("relu2_bx unaligned shift_exp=%d n=%d i=%d: NEON=%d ref=%d",
+                         shift_exp, n, i, (int)x[i], (int)xr[i]);
+                    break;
+                }
+            }
+            free(x); free(xr);
+        }
+    }
+}
+
+static void test_relu2_bx_extreme(void) {
+    int n = 256;
+    int shifts[] = { 1, 2, 5, 10, 19 };
+    for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+        int shift_exp = shifts[k];
+        int xb = (shift_exp + 1) / 2 + 5;
+        int tb = 2 * xb - shift_exp;
+        m4t_mtfp_t* x  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* xr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            m4t_mtfp_t v = (i & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+            x[i] = v; xr[i] = v;
+        }
+        m4t_mtfp_relu2_inplace_bx          (x,  xb, tb, n);
+        m4t_mtfp_relu2_inplace_bx_scalar_ref(xr, xb, tb, n);
+        for (int i = 0; i < n; i++) {
+            if (x[i] != xr[i]) {
+                FAIL("relu2_bx extreme shift_exp=%d i=%d: NEON=%d ref=%d",
+                     shift_exp, i, (int)x[i], (int)xr[i]);
+                break;
+            }
+        }
+        free(x); free(xr);
+    }
+}
+
+/* ── m4t_mtfp_elementwise_mul_bx (V14.E) ───────────────────────────────── */
+
+static void test_elementwise_mul_bx_aligned(void) {
+    int sizes[]  = { 4, 16, 64, 256, 6912 };
+    int shifts[] = { 0, 1, 2, 3, 5, 10, 19 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+            int shift_exp = shifts[k];
+            int a_bx = (shift_exp + 1) / 2 + 1;
+            int b_bx = (shift_exp / 2) + 1;
+            int target_bx = a_bx + b_bx - shift_exp;
+            m4t_mtfp_t* a = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* b = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                a[i] = (m4t_mtfp_t)((i * 311) % 60000 - 30000);
+                b[i] = (m4t_mtfp_t)((i * 103) % 50000 - 25000);
+            }
+            m4t_mtfp_elementwise_mul_bx          (y,  a, a_bx, b, b_bx, target_bx, n);
+            m4t_mtfp_elementwise_mul_bx_scalar_ref(yr, a, a_bx, b, b_bx, target_bx, n);
+            for (int i = 0; i < n; i++) {
+                if (y[i] != yr[i]) {
+                    FAIL("ew_mul_bx aligned shift_exp=%d n=%d i=%d: NEON=%d ref=%d",
+                         shift_exp, n, i, (int)y[i], (int)yr[i]);
+                    break;
+                }
+            }
+            free(a); free(b); free(y); free(yr);
+        }
+    }
+}
+
+static void test_elementwise_mul_bx_unaligned(void) {
+    int sizes[]  = { 1, 2, 3, 5, 7, 11, 17, 33, 129 };
+    int shifts[] = { 0, 1, 3, 8 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+            int shift_exp = shifts[k];
+            int a_bx = (shift_exp + 1) / 2 + 1;
+            int b_bx = (shift_exp / 2) + 1;
+            int target_bx = a_bx + b_bx - shift_exp;
+            m4t_mtfp_t* a = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* b = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                a[i] = (m4t_mtfp_t)((i * 401) % 30000 - 15000);
+                b[i] = (m4t_mtfp_t)((i * 79)  % 30000 - 15000);
+            }
+            m4t_mtfp_elementwise_mul_bx          (y,  a, a_bx, b, b_bx, target_bx, n);
+            m4t_mtfp_elementwise_mul_bx_scalar_ref(yr, a, a_bx, b, b_bx, target_bx, n);
+            for (int i = 0; i < n; i++) {
+                if (y[i] != yr[i]) {
+                    FAIL("ew_mul_bx unaligned shift_exp=%d n=%d i=%d: NEON=%d ref=%d",
+                         shift_exp, n, i, (int)y[i], (int)yr[i]);
+                    break;
+                }
+            }
+            free(a); free(b); free(y); free(yr);
+        }
+    }
+}
+
+static void test_elementwise_mul_bx_extreme(void) {
+    int n = 256;
+    int shifts[] = { 1, 5, 10, 19 };
+    for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
+        int shift_exp = shifts[k];
+        int a_bx = (shift_exp + 1) / 2 + 5;
+        int b_bx = (shift_exp / 2) + 5;
+        int target_bx = a_bx + b_bx - shift_exp;
+        m4t_mtfp_t* a = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* b = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            a[i] = (i & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+            b[i] = (i & 2) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+        }
+        m4t_mtfp_elementwise_mul_bx          (y,  a, a_bx, b, b_bx, target_bx, n);
+        m4t_mtfp_elementwise_mul_bx_scalar_ref(yr, a, a_bx, b, b_bx, target_bx, n);
+        for (int i = 0; i < n; i++) {
+            if (y[i] != yr[i]) {
+                FAIL("ew_mul_bx extreme shift_exp=%d i=%d: NEON=%d ref=%d",
+                     shift_exp, i, (int)y[i], (int)yr[i]);
+                break;
+            }
+        }
+        free(a); free(b); free(y); free(yr);
+    }
+}
+
 /* ── m4t_mtfp_attn_v_combine (V14.B) ───────────────────────────────────── */
 
 static void test_attn_v_combine_aligned(void) {
@@ -461,6 +644,14 @@ int main(void) {
     test_attn_v_combine_unaligned();
     test_attn_v_combine_clamps();
     test_attn_v_combine_zero();
+
+    test_relu2_bx_aligned();
+    test_relu2_bx_unaligned();
+    test_relu2_bx_extreme();
+
+    test_elementwise_mul_bx_aligned();
+    test_elementwise_mul_bx_unaligned();
+    test_elementwise_mul_bx_extreme();
 
     if (failures) {
         fprintf(stderr, "\n%d assertion(s) failed\n", failures);

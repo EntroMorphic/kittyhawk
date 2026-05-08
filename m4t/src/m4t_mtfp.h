@@ -633,12 +633,29 @@ void m4t_mtfp_rmsnorm_bx(
 
 /* relu² with explicit input bx → target bx rescale. Squaring doubles
  * the bx; the rescale brings it back. y_real[i] = max(0, x_real[i])²
- * preserved; mantissas land at target_bx. */
+ * preserved; mantissas land at target_bx.
+ *
+ * V14.D: NEON-only production. ReLU + squared (vmull_s32) + iterated
+ * /3 (mulhi by 0xAAAA...AAAB) + clamp + saturating narrow. */
 void m4t_mtfp_relu2_inplace_bx(
     m4t_mtfp_t* x, int x_bx, int target_bx, int n);
 
-/* Elementwise multiply with bx tracking. y_m_target = a_m × b_m / 3^(a_bx+b_bx-target_bx). */
+/* Scalar test oracle for m4t_mtfp_relu2_inplace_bx. Production must not call. */
+void m4t_mtfp_relu2_inplace_bx_scalar_ref(
+    m4t_mtfp_t* x, int x_bx, int target_bx, int n);
+
+/* Elementwise multiply with bx tracking. y_m_target = a_m × b_m / 3^(a_bx+b_bx-target_bx).
+ *
+ * V14.E: NEON-only production. vmull_s32 + sign-aware divide
+ * (vabsq_s64 / vbslq_s64 re-sign around the iterated /3). */
 void m4t_mtfp_elementwise_mul_bx(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n);
+
+/* Scalar test oracle for m4t_mtfp_elementwise_mul_bx. Production must not call. */
+void m4t_mtfp_elementwise_mul_bx_scalar_ref(
     m4t_mtfp_t* y,
     const m4t_mtfp_t* a, int a_bx,
     const m4t_mtfp_t* b, int b_bx,
