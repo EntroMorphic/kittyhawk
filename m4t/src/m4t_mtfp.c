@@ -341,7 +341,123 @@ static inline uint64x2_t neon_unsigned_div3_u64x2(uint64x2_t x) {
                                 vaddq_u64(vshrq_n_u64(hl, 32), carry));
     return vshrq_n_u64(high, 1);
 }
+
+/* V14.F generic NEON helpers for unsigned 64-bit divide by runtime constant.
+ *
+ * Caller computes (m, sh, extension) once at function entry via the scalar
+ * compute_magic_u64 helper below, then per-cell applies via NEON.
+ *
+ * Two cases:
+ *   m_full = ceil(2^(64+sh) / d) where sh = ceil(log2(d)).
+ *   - If m_full < 2^64: q = mulhi(x, m_full) >> sh.            (extension=0)
+ *   - Else:             q = (mulhi(x, m_full - 2^64) +
+ *                            ((x - mulhi(x, m_full - 2^64)) >> 1)) >> (sh - 1).
+ *                                                              (extension=1)
+ *
+ * Bit-exact for any uint64 input; matches floor(x/d). */
+typedef struct {
+    uint64_t m;
+    int      sh;
+    int      extension;
+} m4t_magic_div_u64_t;
+
+/* Generic mulhi: high 64 bits of (x * m_const) for 2 lanes.
+ * Schoolbook 32×32 with carry — same pattern as neon_unsigned_div3_u64x2
+ * but with the multiplier as a runtime parameter (broadcast inside). */
+static inline uint64x2_t neon_mulhi_u64x2(uint64x2_t x, uint64_t m_const) {
+    uint32x2_t m_lo_v = vdup_n_u32((uint32_t)m_const);
+    uint32x2_t m_hi_v = vdup_n_u32((uint32_t)(m_const >> 32));
+    uint32x2_t x_lo = vmovn_u64(x);
+    uint32x2_t x_hi = vshrn_n_u64(x, 32);
+    uint64x2_t ll = vmull_u32(x_lo, m_lo_v);
+    uint64x2_t lh = vmull_u32(x_lo, m_hi_v);
+    uint64x2_t hl = vmull_u32(x_hi, m_lo_v);
+    uint64x2_t hh = vmull_u32(x_hi, m_hi_v);
+    uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+    uint64x2_t ll_top = vshrq_n_u64(ll, 32);
+    uint64x2_t mid = vaddq_u64(vaddq_u64(ll_top, vandq_u64(lh, mask32)),
+                               vandq_u64(hl, mask32));
+    uint64x2_t carry = vshrq_n_u64(mid, 32);
+    return vaddq_u64(vaddq_u64(hh, vshrq_n_u64(lh, 32)),
+                     vaddq_u64(vshrq_n_u64(hl, 32), carry));
+}
+
+/* Apply a precomputed unsigned divide-by-constant magic to a uint64x2_t.
+ * Bit-exact floor(x / d) for x ∈ [0, 2^64).
+ * NOTE: the +x extension formula here is incomplete for some magic shapes;
+ * V14.F uses the specialized neon_unsigned_div127_u64x2_le39 below for /127
+ * because it's faster and correct over the bounded uint39 range we hit. */
+__attribute__((unused))
+static inline uint64x2_t neon_apply_magic_u64x2(uint64x2_t x, m4t_magic_div_u64_t md) {
+    uint64x2_t mh = neon_mulhi_u64x2(x, md.m);
+    if (md.extension) {
+        uint64x2_t xm = vsubq_u64(x, mh);
+        uint64x2_t hsr = vshrq_n_u64(xm, 1);
+        uint64x2_t s = vaddq_u64(mh, hsr);
+        return vshlq_u64(s, vdupq_n_s64(-(int64_t)(md.sh - 1)));
+    } else {
+        return vshlq_u64(mh, vdupq_n_s64(-(int64_t)md.sh));
+    }
+}
+
+/* V14.F specialized: divide uint64x2 by 127 for inputs in [0, 2^39).
+ * Uses m = ceil(2^46/127) = 554084599825, formula q = (val * m) >> 46.
+ * Computes val*m (up to 2^79) via 32-bit limb decomposition with carry.
+ * Bit-exact vs floor(val/127) for val ∈ [0, 2^39).
+ *
+ * Sized for the long-division limb step where val = r*2^32 + limb,
+ * r < 127, limb ≤ uint32 → val < 128*2^32 = 2^39. */
+static inline uint64x2_t neon_unsigned_div127_u64x2_le39(uint64x2_t val) {
+    /* m = 554084599825 = 0x80FFFFFE81 ... actually:
+     *   m_hi32 = 554084599825 >> 32 = 129
+     *   m_lo32 = 554084599825 - 129·2^32 = 33818641  */
+    const uint32_t m_lo32 = 33818641u;
+    const uint32_t m_hi32 = 129u;
+    uint32x2_t val_lo = vmovn_u64(val);
+    uint32x2_t val_hi = vshrn_n_u64(val, 32);
+    uint64x2_t P0 = vmull_u32(val_lo, vdup_n_u32(m_lo32));
+    uint64x2_t P1 = vmull_u32(val_lo, vdup_n_u32(m_hi32));
+    uint64x2_t P2 = vmull_u32(val_hi, vdup_n_u32(m_lo32));
+    uint64x2_t P3 = vmull_u32(val_hi, vdup_n_u32(m_hi32));
+    /* P1 + P2 ≤ 2^40 (val_lo·m_hi ≤ 2^39, val_hi·m_lo ≤ 2^39, sum < 2^40). */
+    uint64x2_t P12 = vaddq_u64(P1, P2);
+    uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+    uint64x2_t P12_low = vandq_u64(P12, mask32);
+    uint64x2_t P12_high = vshrq_n_u64(P12, 32);
+    /* low_64 = P0 + (P12_low << 32). Detect carry. */
+    uint64x2_t shifted = vshlq_n_u64(P12_low, 32);
+    uint64x2_t low_64 = vaddq_u64(P0, shifted);
+    uint64x2_t carry_mask = vcltq_u64(low_64, P0);
+    uint64x2_t carry = vandq_u64(carry_mask, vdupq_n_u64(1));
+    /* high_64 = P3 + P12_high + carry. */
+    uint64x2_t high_64 = vaddq_u64(vaddq_u64(P3, P12_high), carry);
+    /* q = (high_64 << 18) | (low_64 >> 46). */
+    return vorrq_u64(vshlq_n_u64(high_64, 18), vshrq_n_u64(low_64, 46));
+}
+
 #endif /* M4T_HAS_NEON */
+
+/* Compute (m, sh, extension) for unsigned div by runtime d > 1.
+ * Granlund-Möller / Hacker's Delight 10.10. Run once per call (scalar setup). */
+static m4t_magic_div_u64_t compute_magic_u64(uint64_t d) {
+    assert(d > 1);
+    int sh = 64 - __builtin_clzll(d - 1);  /* ceil(log2(d)) */
+    __uint128_t one = 1;
+    __uint128_t numerator = (one << (64 + sh)) + (uint64_t)d - 1;
+    __uint128_t m_full = numerator / (__uint128_t)d;
+    __uint128_t pow_2_64 = one << 64;
+    m4t_magic_div_u64_t out;
+    if (m_full < pow_2_64) {
+        out.m = (uint64_t)m_full;
+        out.sh = sh;
+        out.extension = 0;
+    } else {
+        out.m = (uint64_t)(m_full - pow_2_64);
+        out.sh = sh;
+        out.extension = 1;
+    }
+    return out;
+}
 
 /* Base-3 round-to-nearest-even divide (§8.2). The runtime assertion
  * documents the odd-divisor invariant; combined with the static check
@@ -1972,6 +2088,13 @@ void m4t_mtfp_elementwise_mul_bx_scalar_ref(
     }
 }
 
+/* V14.F: NEON bitlinear_scale_bx. Per-cell |y_raw| × |num| is uint96
+ * (since num up to 2^58, y_raw up to 2^29.1, product up to 2^87.3),
+ * stored as 3 × uint32 limbs. Long-divide by 127 across limbs (magic
+ * mul with extension trick), then iterated /3 across limbs (the same
+ * div3 magic used in V14.D/E, applied to each limb). Sign re-applied
+ * via vbslq_s64 with mask = sign(y_raw) XOR sign(num). Bit-exact vs
+ * scalar_ref. */
 void m4t_mtfp_bitlinear_scale_bx(
     m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
     const m4t_mtfp_t* alpha_ptr, int alpha_bx,
@@ -1985,15 +2108,257 @@ void m4t_mtfp_bitlinear_scale_bx(
 
     int64_t alpha_m = (int64_t)(*alpha_ptr);
     if (alpha_m == 0) {
-        /* No-α sentinel (skeleton mode); preserve raw values, rescale to target_bx. */
         m4t_mtfp_rescale_bx(y, y_raw, x_bx, target_bx, n);
         return;
     }
-    /* y_m_target = y_raw × α_m × absmax_m / (127 × 3^(α_bx + x_bx - target_bx))
-     * num = α_m × absmax_m  (≤ 2^58, fits int64).
-     * den = 127 × 3^shift_exp (≤ ~10^14 for our ranges, fits int64).
-     * Per-cell prod = y_raw × num: __int128 (y_raw is small but × num × x[i]
-     * can reach 2^88). */
+    int shift_exp = alpha_bx + x_bx - target_bx;
+    int64_t num = alpha_m * (int64_t)absmax_m;
+    int64_t den = 127 * pow3_i64(shift_exp);
+    int64_t half = den / 2;
+
+#if M4T_HAS_NEON
+    /* Once-per-call scalar setup: signs, magnitudes, /127 magic. */
+    int num_neg = (num < 0);
+    uint64_t abs_num = num_neg ? (uint64_t)(-num) : (uint64_t)num;
+    uint32_t num_lo32 = (uint32_t)abs_num;
+    uint32_t num_hi32 = (uint32_t)(abs_num >> 32);
+    /* Specialized /127 helper handles uint39 inputs with hardcoded magic;
+     * compute_magic_u64 is unused for this path but kept available for future. */
+    (void)compute_magic_u64;
+
+    /* abs(half) splits into uint64; we need to add it to a uint96 V.
+     * half ≤ den/2 ≤ (127 × 3^35)/2 ≈ 2^61.6, fits uint64. */
+    uint64_t half_u = (uint64_t)half;
+    uint64x2_t halfv = vdupq_n_u64(half_u);
+
+    int32x4_t v_max = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    int32x4_t v_min = vdupq_n_s32(-(int32_t)M4T_MTFP_MAX_VAL);
+
+    int n_aligned = n - (n % 4);
+    int i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t yv = vld1q_s32(y_raw + i);
+        /* Sign mask of result: sign(y_raw) XOR num_neg. Compute as int32x4
+         * (-1 where the result should be negated). */
+        uint32x4_t y_sign = vcltzq_s32(yv);
+        uint32x4_t num_sign = vdupq_n_u32(num_neg ? 0xFFFFFFFFu : 0u);
+        uint32x4_t result_sign = veorq_u32(y_sign, num_sign);
+        /* |y_raw| as uint32x4 (since |yv| ≤ MAX_VAL fits int32, abs is safe). */
+        uint32x4_t y_abs = vreinterpretq_u32_s32(vabsq_s32(yv));
+
+        /* Process 2 cells at a time (2 NEON lanes). */
+        for (int half_lane = 0; half_lane < 2; half_lane++) {
+            uint32x2_t y_pair = (half_lane == 0)
+                ? vget_low_u32(y_abs) : vget_high_u32(y_abs);
+
+            /* Multiply: |prod| = y_pair * abs_num as 96-bit per lane.
+             * P_lo = y_pair * num_lo32 (uint64x2)
+             * P_hi = y_pair * num_hi32 (uint64x2)
+             * 96-bit V = P_hi << 32 + P_lo, decomposed into uint32x2 limbs. */
+            uint64x2_t P_lo = vmull_u32(y_pair, vdup_n_u32(num_lo32));
+            uint64x2_t P_hi = vmull_u32(y_pair, vdup_n_u32(num_hi32));
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+
+            /* Add half (uint64) to V (96-bit + 64-bit). */
+            uint64x2_t V_lo64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                          vmovl_u32(L0));
+            uint64x2_t V_lo64_new = vaddq_u64(V_lo64, halfv);
+            uint64x2_t add_carry = vandq_u64(vcltq_u64(V_lo64_new, halfv),
+                                             vdupq_n_u64(1));
+            L0 = vmovn_u64(V_lo64_new);
+            L1 = vshrn_n_u64(V_lo64_new, 32);
+            L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
+
+            /* Long-divide V by 127: process limbs MSB → LSB.
+             * r ∈ [0, 126]. val = r * 2^32 + limb fits uint39. */
+            uint64x2_t r = vdupq_n_u64(0);
+            #define LIMB_DIV_127(limb_var) do { \
+                uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                uint64x2_t q   = neon_unsigned_div127_u64x2_le39(val); \
+                /* r = val - q * 127 = val - (q << 7 - q). */ \
+                uint64x2_t q127 = vsubq_u64(vshlq_n_u64(q, 7), q); \
+                r = vsubq_u64(val, q127); \
+                limb_var = vmovn_u64(q); \
+            } while(0)
+            LIMB_DIV_127(L2);
+            LIMB_DIV_127(L1);
+            LIMB_DIV_127(L0);
+            #undef LIMB_DIV_127
+
+            /* Iterated long-divide by 3, shift_exp times. */
+            for (int k = 0; k < shift_exp; k++) {
+                r = vdupq_n_u64(0);
+                #define LIMB_DIV_3(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_unsigned_div3_u64x2(val); \
+                    /* r = val - q * 3 = val - (q << 1 + q). */ \
+                    uint64x2_t q3  = vaddq_u64(vshlq_n_u64(q, 1), q); \
+                    r = vsubq_u64(val, q3); \
+                    limb_var = vmovn_u64(q); \
+                } while(0)
+                LIMB_DIV_3(L2);
+                LIMB_DIV_3(L1);
+                LIMB_DIV_3(L0);
+                #undef LIMB_DIV_3
+            }
+
+            /* Result: V[2..0]. After enough divisions, V[2] should be 0
+             * (or very small). Combine into uint64 for sign + clamp.
+             * If V[2] > 0, the result exceeds uint64 range — for our
+             * bounds this means saturation past MTFP19_MAX in any case. */
+            uint64x2_t result_u64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                              vmovl_u32(L0));
+            /* If L2 is non-zero, force result to UINT64_MAX (will saturate). */
+            /* L2-nonzero saturation: build a 64-bit mask via sign-extension
+             * (vmovl_u32 ZERO-extends, leaving 0x00000000FFFFFFFF for "true",
+             * which corrupts vbslq lane selection). */
+            uint32x2_t l2_eq0_u32 = vceq_u32(L2, vdup_n_u32(0));
+            uint64x2_t l2_eq0 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(l2_eq0_u32)));
+            uint64x2_t saturated = vbslq_u64(l2_eq0, result_u64,
+                                             vdupq_n_u64(0x7FFFFFFFFFFFFFFFULL));
+            int64x2_t pos = vreinterpretq_s64_u64(saturated);
+            int64x2_t neg = vnegq_s64(pos);
+
+            /* Apply sign mask. result_sign is uint32x4; pick the right pair
+             * and sign-extend (NOT zero-extend) to uint64x2 mask. */
+            uint32x2_t sign_pair_u32 = (half_lane == 0)
+                ? vget_low_u32(result_sign) : vget_high_u32(result_sign);
+            uint64x2_t mask64 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(sign_pair_u32)));
+            int64x2_t r64_signed = vbslq_s64(mask64, neg, pos);
+
+            /* Clamp + narrow → int32x2. */
+            int32x2_t y_pair_out = vqmovn_s64(r64_signed);
+            int32x4_t y4_full = (half_lane == 0)
+                ? vcombine_s32(y_pair_out, vdup_n_s32(0))
+                : vcombine_s32(vdup_n_s32(0), y_pair_out);
+            (void)y4_full;
+            /* Stage to a small array; combine both halves below. */
+            if (half_lane == 0) vst1_s32(y + i,     y_pair_out);
+            else                vst1_s32(y + i + 2, y_pair_out);
+        }
+        /* Apply final MTFP19 clamp on the 4 stored values. */
+        int32x4_t y4 = vld1q_s32(y + i);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(y + i, y4);
+    }
+    /* Boundary tile: same processing on stack-buffered partial chunk. */
+    if (i < n) {
+        int avail = n - i;
+        m4t_mtfp_t ybuf_in[4] = {0};
+        m4t_mtfp_t ybuf_out[4] = {0};
+        for (int j = 0; j < avail; j++) ybuf_in[j] = y_raw[i + j];
+
+        int32x4_t yv = vld1q_s32(ybuf_in);
+        uint32x4_t y_sign = vcltzq_s32(yv);
+        uint32x4_t num_sign = vdupq_n_u32(num_neg ? 0xFFFFFFFFu : 0u);
+        uint32x4_t result_sign = veorq_u32(y_sign, num_sign);
+        uint32x4_t y_abs = vreinterpretq_u32_s32(vabsq_s32(yv));
+
+        for (int half_lane = 0; half_lane < 2; half_lane++) {
+            uint32x2_t y_pair = (half_lane == 0)
+                ? vget_low_u32(y_abs) : vget_high_u32(y_abs);
+            uint64x2_t P_lo = vmull_u32(y_pair, vdup_n_u32(num_lo32));
+            uint64x2_t P_hi = vmull_u32(y_pair, vdup_n_u32(num_hi32));
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+
+            uint64x2_t V_lo64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                          vmovl_u32(L0));
+            uint64x2_t V_lo64_new = vaddq_u64(V_lo64, halfv);
+            uint64x2_t add_carry = vandq_u64(vcltq_u64(V_lo64_new, halfv),
+                                             vdupq_n_u64(1));
+            L0 = vmovn_u64(V_lo64_new);
+            L1 = vshrn_n_u64(V_lo64_new, 32);
+            L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
+
+            uint64x2_t r = vdupq_n_u64(0);
+            #define LIMB_DIV_127T(limb_var) do { \
+                uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                uint64x2_t q   = neon_unsigned_div127_u64x2_le39(val); \
+                uint64x2_t q127 = vsubq_u64(vshlq_n_u64(q, 7), q); \
+                r = vsubq_u64(val, q127); \
+                limb_var = vmovn_u64(q); \
+            } while(0)
+            LIMB_DIV_127T(L2);
+            LIMB_DIV_127T(L1);
+            LIMB_DIV_127T(L0);
+            #undef LIMB_DIV_127T
+
+            for (int k = 0; k < shift_exp; k++) {
+                r = vdupq_n_u64(0);
+                #define LIMB_DIV_3T(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_unsigned_div3_u64x2(val); \
+                    uint64x2_t q3  = vaddq_u64(vshlq_n_u64(q, 1), q); \
+                    r = vsubq_u64(val, q3); \
+                    limb_var = vmovn_u64(q); \
+                } while(0)
+                LIMB_DIV_3T(L2);
+                LIMB_DIV_3T(L1);
+                LIMB_DIV_3T(L0);
+                #undef LIMB_DIV_3T
+            }
+
+            uint64x2_t result_u64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                              vmovl_u32(L0));
+            /* Sign-extend the L2-eq-0 mask (vmovl_u32 ZERO-extends, breaks vbslq). */
+            uint32x2_t l2_eq0_u32 = vceq_u32(L2, vdup_n_u32(0));
+            uint64x2_t l2_eq0 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(l2_eq0_u32)));
+            uint64x2_t saturated = vbslq_u64(l2_eq0, result_u64,
+                                             vdupq_n_u64(0x7FFFFFFFFFFFFFFFULL));
+            int64x2_t pos = vreinterpretq_s64_u64(saturated);
+            int64x2_t neg = vnegq_s64(pos);
+            uint32x2_t sign_pair_u32 = (half_lane == 0)
+                ? vget_low_u32(result_sign) : vget_high_u32(result_sign);
+            uint64x2_t mask64 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(sign_pair_u32)));
+            int64x2_t r64_signed = vbslq_s64(mask64, neg, pos);
+            int32x2_t y_pair_out = vqmovn_s64(r64_signed);
+            if (half_lane == 0) vst1_s32(ybuf_out,     y_pair_out);
+            else                vst1_s32(ybuf_out + 2, y_pair_out);
+        }
+        int32x4_t y4 = vld1q_s32(ybuf_out);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(ybuf_out, y4);
+        for (int j = 0; j < avail; j++) y[i + j] = ybuf_out[j];
+    }
+#else
+#error "m4t_mtfp_bitlinear_scale_bx requires NEON; no scalar fallback per project rule."
+#endif
+}
+
+void m4t_mtfp_bitlinear_scale_bx_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    m4t_mtfp_t absmax_m, int x_bx, int target_bx,
+    int n)
+{
+    if (n <= 0) return;
+    assert(y && y_raw && alpha_ptr);
+    assert(alpha_bx + x_bx - target_bx >= 0);
+    assert(alpha_bx + x_bx - target_bx <= 35);
+
+    int64_t alpha_m = (int64_t)(*alpha_ptr);
+    if (alpha_m == 0) {
+        m4t_mtfp_rescale_bx(y, y_raw, x_bx, target_bx, n);
+        return;
+    }
     int shift_exp = alpha_bx + x_bx - target_bx;
     int64_t num = alpha_m * (int64_t)absmax_m;
     int64_t den = 127 * pow3_i64(shift_exp);

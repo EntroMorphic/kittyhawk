@@ -667,8 +667,20 @@ void m4t_mtfp_elementwise_mul_bx_scalar_ref(
  *   y_m_target = y_raw[i] × α_m × absmax_m / (127 × 3^(α_bx + x_bx - target_bx))
  *
  * Constraint: α_bx + x_bx - target_bx ≤ 35 to keep den in int64.
- * For BitNet (α_bx ≤ 18, x_bx ≤ 21, target_bx = 14): max shift = 25. */
+ * For BitNet (α_bx ≤ 18, x_bx ≤ 21, target_bx = 14): max shift = 25.
+ *
+ * V14.F: NEON-only production. Per-cell |y_raw| × |num| is uint96
+ * (3 × uint32 limbs); long-divided by 127 (magic mul with extension)
+ * then iterated /3 (same div3 magic as V14.D/E). Sign re-applied via
+ * vbslq_s64. Clamp to MTFP19. */
 void m4t_mtfp_bitlinear_scale_bx(
+    m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    m4t_mtfp_t absmax_m, int x_bx, int target_bx,
+    int n);
+
+/* Scalar test oracle for m4t_mtfp_bitlinear_scale_bx. Production must not call. */
+void m4t_mtfp_bitlinear_scale_bx_scalar_ref(
     m4t_mtfp_t* y, const m4t_mtfp_t* y_raw,
     const m4t_mtfp_t* alpha_ptr, int alpha_bx,
     m4t_mtfp_t absmax_m, int x_bx, int target_bx,

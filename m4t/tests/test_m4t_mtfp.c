@@ -517,6 +517,126 @@ static void test_elementwise_mul_bx_extreme(void) {
     }
 }
 
+/* ── m4t_mtfp_bitlinear_scale_bx (V14.F) ───────────────────────────────── */
+
+static void test_bitlinear_scale_bx_aligned(void) {
+    /* (alpha_bx, x_bx, target_bx, alpha_m, absmax_m) parameter sweep.
+     * Cover both num signs, several shift_exp ∈ [0, 25] (BitNet practical). */
+    int sizes[] = { 4, 16, 64, 256, 2560 };
+    struct { int a_bx, x_bx, t_bx; int alpha_m; int absmax_m; } cases[] = {
+        { 0, 0, 0,  100,  100 },     /* shift_exp=0; small */
+        { 1, 1, 1,  500, -500 },     /* shift_exp=1; mixed sign */
+        { 4, 5, 5, 1234,  4567 },    /* shift_exp=4 */
+        { 8, 10, 6, -7777, 8888 },   /* shift_exp=12 */
+        { 12, 13, 5, 30000, -30000 },/* shift_exp=20 */
+        { 14, 17, 6, -50000, 50000 },/* shift_exp=25 */
+    };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+            m4t_mtfp_t alpha = (m4t_mtfp_t)cases[c].alpha_m;
+            m4t_mtfp_t* yraw = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* y    = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* yr   = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                yraw[i] = (m4t_mtfp_t)((i * 311) % 60000 - 30000);
+            }
+            m4t_mtfp_bitlinear_scale_bx          (y,  yraw, &alpha,
+                cases[c].a_bx, (m4t_mtfp_t)cases[c].absmax_m,
+                cases[c].x_bx, cases[c].t_bx, n);
+            m4t_mtfp_bitlinear_scale_bx_scalar_ref(yr, yraw, &alpha,
+                cases[c].a_bx, (m4t_mtfp_t)cases[c].absmax_m,
+                cases[c].x_bx, cases[c].t_bx, n);
+            for (int i = 0; i < n; i++) {
+                if (y[i] != yr[i]) {
+                    FAIL("bitlinear_scale aligned case=%zu n=%d i=%d alpha=%d am=%d shifts=(%d,%d,%d): NEON=%d ref=%d",
+                         c, n, i, (int)alpha, cases[c].absmax_m,
+                         cases[c].a_bx, cases[c].x_bx, cases[c].t_bx,
+                         (int)y[i], (int)yr[i]);
+                    break;
+                }
+            }
+            free(yraw); free(y); free(yr);
+        }
+    }
+}
+
+static void test_bitlinear_scale_bx_unaligned(void) {
+    int sizes[] = { 1, 2, 3, 5, 7, 11, 17, 33, 129 };
+    int alpha_m = 12345, absmax_m = -6789;
+    int a_bx = 4, x_bx = 6, t_bx = 5;  /* shift_exp = 5 */
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        m4t_mtfp_t alpha = (m4t_mtfp_t)alpha_m;
+        m4t_mtfp_t* yraw = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y    = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* yr   = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            yraw[i] = (m4t_mtfp_t)((i * 191) % 50000 - 25000);
+        }
+        m4t_mtfp_bitlinear_scale_bx          (y,  yraw, &alpha, a_bx,
+            (m4t_mtfp_t)absmax_m, x_bx, t_bx, n);
+        m4t_mtfp_bitlinear_scale_bx_scalar_ref(yr, yraw, &alpha, a_bx,
+            (m4t_mtfp_t)absmax_m, x_bx, t_bx, n);
+        for (int i = 0; i < n; i++) {
+            if (y[i] != yr[i]) {
+                FAIL("bitlinear_scale unaligned n=%d i=%d: NEON=%d ref=%d",
+                     n, i, (int)y[i], (int)yr[i]);
+                break;
+            }
+        }
+        free(yraw); free(y); free(yr);
+    }
+}
+
+static void test_bitlinear_scale_bx_extreme(void) {
+    /* MAX_VAL inputs to exercise the uint96 multiply at full scale. */
+    int n = 256;
+    int shift_exps[] = { 0, 1, 5, 10, 25, 35 };
+    for (size_t k = 0; k < sizeof(shift_exps)/sizeof(shift_exps[0]); k++) {
+        int sh = shift_exps[k];
+        int a_bx = sh, x_bx = 0, t_bx = 0;
+        if (a_bx > 18) { a_bx = 18; x_bx = sh - 18; }
+        m4t_mtfp_t alpha = M4T_MTFP_MAX_VAL;
+        m4t_mtfp_t absmax = M4T_MTFP_MAX_VAL;
+        m4t_mtfp_t* yraw = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y    = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* yr   = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            yraw[i] = (i & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+        }
+        m4t_mtfp_bitlinear_scale_bx          (y,  yraw, &alpha, a_bx,
+            absmax, x_bx, t_bx, n);
+        m4t_mtfp_bitlinear_scale_bx_scalar_ref(yr, yraw, &alpha, a_bx,
+            absmax, x_bx, t_bx, n);
+        for (int i = 0; i < n; i++) {
+            if (y[i] != yr[i]) {
+                FAIL("bitlinear_scale extreme sh=%d i=%d: NEON=%d ref=%d",
+                     sh, i, (int)y[i], (int)yr[i]);
+                break;
+            }
+        }
+        free(yraw); free(y); free(yr);
+    }
+}
+
+static void test_bitlinear_scale_bx_alpha_zero(void) {
+    /* alpha = 0 → fall through to m4t_mtfp_rescale_bx; NEON and scalar_ref
+     * should match. */
+    int n = 16;
+    m4t_mtfp_t alpha = 0;
+    m4t_mtfp_t* yraw = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* y    = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* yr   = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    for (int i = 0; i < n; i++) yraw[i] = (m4t_mtfp_t)((i * 41) % 1000 - 500);
+    m4t_mtfp_bitlinear_scale_bx          (y,  yraw, &alpha, 4, 100, 4, 4, n);
+    m4t_mtfp_bitlinear_scale_bx_scalar_ref(yr, yraw, &alpha, 4, 100, 4, 4, n);
+    for (int i = 0; i < n; i++) {
+        if (y[i] != yr[i]) FAIL("bitlinear_scale alpha=0 i=%d: NEON=%d ref=%d", i, (int)y[i], (int)yr[i]);
+    }
+    free(yraw); free(y); free(yr);
+}
+
 /* ── m4t_mtfp_attn_v_combine (V14.B) ───────────────────────────────────── */
 
 static void test_attn_v_combine_aligned(void) {
@@ -654,6 +774,11 @@ int main(void) {
     test_elementwise_mul_bx_aligned();
     test_elementwise_mul_bx_unaligned();
     test_elementwise_mul_bx_extreme();
+
+    test_bitlinear_scale_bx_aligned();
+    test_bitlinear_scale_bx_unaligned();
+    test_bitlinear_scale_bx_extreme();
+    test_bitlinear_scale_bx_alpha_zero();
 
     if (failures) {
         fprintf(stderr, "\n%d assertion(s) failed\n", failures);
