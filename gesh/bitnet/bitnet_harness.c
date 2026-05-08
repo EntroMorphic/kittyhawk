@@ -391,12 +391,11 @@ void bitnet_forward_block(
         memcpy(s->x, s->attn_sub_norm, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
 
-    /* x = residual + x. */
-    for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
-        int64_t v = (int64_t)s->residual[i] + (int64_t)s->x[i];
-        s->x[i] = (int32_t)((v > 581130733) ? 581130733 :
-                            (v < -581130733) ? -581130733 : v);
-    }
+    /* x = residual + x (V13.A: NEON via libm4t's saturating-add
+     * primitive — same MTFP19 clamp semantics as the previous scalar
+     * loop, no scalar production code per condition (5) of the
+     * pure-ternary directive). */
+    m4t_mtfp_vec_add_inplace(s->x, s->residual, BITNET_HIDDEN_SIZE);
 
     /* ── FFN sub-block ────────────────────────────────────────────── */
 
@@ -468,12 +467,11 @@ void bitnet_forward_block(
         memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
 
-    /* x = residual + x. */
-    for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
-        int64_t v = (int64_t)s->residual[i] + (int64_t)s->x[i];
-        s->x[i] = (int32_t)((v > 581130733) ? 581130733 :
-                            (v < -581130733) ? -581130733 : v);
-    }
+    /* x = residual + x (V13.A: NEON via libm4t's saturating-add
+     * primitive — same MTFP19 clamp semantics as the previous scalar
+     * loop, no scalar production code per condition (5) of the
+     * pure-ternary directive). */
+    m4t_mtfp_vec_add_inplace(s->x, s->residual, BITNET_HIDDEN_SIZE);
 
     /* Copy back to caller's buffer. */
     memcpy(x_io, s->x, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
@@ -580,13 +578,14 @@ static void bitnet_lm_head(
     int top_n)
 {
     /* For comparison purposes we only need logits[0..top_n) — full vocab
-     * (128256) is dumped to file by the comparison driver if needed. */
+     * (128256) is dumped to file by the comparison driver if needed.
+     *
+     * V13.B of pure-ternary audit: dot product via libm4t's NEON
+     * helper (vmlal_s32 chain), no scalar production code per
+     * condition (5) of the directive. */
     for (int v = 0; v < top_n; v++) {
         const m4t_mtfp_t* row = lm_head + (size_t)v * BITNET_HIDDEN_SIZE;
-        int64_t acc = 0;
-        for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
-            acc += (int64_t)x[i] * (int64_t)row[i];
-        }
+        int64_t acc = m4t_mtfp_vec_dot_i64(x, row, BITNET_HIDDEN_SIZE);
         /* Crude scale-down to fit MTFP19; the comparison driver consumes
          * raw acc values for ε measurement so we expose them at int64
          * in a separate accumulator buffer (caller supplied). */
@@ -605,12 +604,11 @@ static int bitnet_argmax_full_vocab(
     if (lm_head == NULL) return -1;
     int64_t best_acc = INT64_MIN;
     int     best_v   = 0;
+    /* V13.B of pure-ternary audit: per-vocab dot product via libm4t's
+     * NEON helper. No scalar production code per condition (5). */
     for (int v = 0; v < BITNET_VOCAB_SIZE; v++) {
         const m4t_mtfp_t* row = lm_head + (size_t)v * BITNET_HIDDEN_SIZE;
-        int64_t acc = 0;
-        for (int i = 0; i < BITNET_HIDDEN_SIZE; i++) {
-            acc += (int64_t)x[i] * (int64_t)row[i];
-        }
+        int64_t acc = m4t_mtfp_vec_dot_i64(x, row, BITNET_HIDDEN_SIZE);
         if (acc > best_acc) { best_acc = acc; best_v = v; }
     }
     return best_v;

@@ -264,6 +264,74 @@ static void test_vec_sub_saturation(void) {
             FAIL("NEON/scalar sub-saturation disagree at [%d]: got %d", i, (int)dst[i]);
 }
 
+/* V13.B: bit-exact NEON vs scalar_ref for the int32×int32 → int64 dot.
+ * Coverage: aligned (n%4=0), unaligned tail (n%4 ∈ {1,2,3}), n=0,
+ * n=1, large n typical of BitNet usage (HIDDEN_SIZE), edge magnitudes. */
+static void test_vec_dot_i64_empty(void) {
+    int64_t a = m4t_mtfp_vec_dot_i64(NULL, NULL, 0);
+    if (a != 0) FAIL("dot_i64 n=0 should be 0, got %lld", (long long)a);
+}
+
+static void test_vec_dot_i64_aligned(void) {
+    /* Use small distinct values; verify against scalar_ref.
+     * Cover: 4, 8, 12, 16, 80, 256, 2560 — covers n%4=0 cases. */
+    int sizes[] = { 4, 8, 12, 16, 80, 256, 2560 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            x[i] = (m4t_mtfp_t)((i * 37) % 2000 - 1000);
+            y[i] = (m4t_mtfp_t)((i * 23) % 2000 - 1000);
+        }
+        int64_t neon = m4t_mtfp_vec_dot_i64(x, y, n);
+        int64_t ref  = m4t_mtfp_vec_dot_i64_scalar_ref(x, y, n);
+        if (neon != ref) {
+            FAIL("dot_i64 aligned n=%d: NEON=%lld ref=%lld",
+                 n, (long long)neon, (long long)ref);
+        }
+        free(x); free(y);
+    }
+}
+
+static void test_vec_dot_i64_unaligned(void) {
+    /* n%4 ∈ {1, 2, 3} cases — boundary tile fires. */
+    int sizes[] = { 1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 81, 257, 2561, 2563 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            x[i] = (m4t_mtfp_t)((i * 41) % 2000 - 1000);
+            y[i] = (m4t_mtfp_t)((i * 19) % 2000 - 1000);
+        }
+        int64_t neon = m4t_mtfp_vec_dot_i64(x, y, n);
+        int64_t ref  = m4t_mtfp_vec_dot_i64_scalar_ref(x, y, n);
+        if (neon != ref) {
+            FAIL("dot_i64 unaligned n=%d: NEON=%lld ref=%lld",
+                 n, (long long)neon, (long long)ref);
+        }
+        free(x); free(y);
+    }
+}
+
+static void test_vec_dot_i64_extreme(void) {
+    /* High-magnitude inputs to exercise the int64 widening. */
+    int n = 2560;
+    m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* y = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    for (int i = 0; i < n; i++) {
+        x[i] = (i & 1) ? 1000000 : -1000000;
+        y[i] = (i & 2) ? 1000000 : -1000000;
+    }
+    int64_t neon = m4t_mtfp_vec_dot_i64(x, y, n);
+    int64_t ref  = m4t_mtfp_vec_dot_i64_scalar_ref(x, y, n);
+    if (neon != ref) {
+        FAIL("dot_i64 extreme: NEON=%lld ref=%lld", (long long)neon, (long long)ref);
+    }
+    free(x); free(y);
+}
+
 int main(void) {
     test_clamp64();
 
@@ -292,6 +360,11 @@ int main(void) {
     test_vec_sub_aliasing_to_zero();
     test_vec_sub_neon_and_tail();
     test_vec_sub_saturation();
+
+    test_vec_dot_i64_empty();
+    test_vec_dot_i64_aligned();
+    test_vec_dot_i64_unaligned();
+    test_vec_dot_i64_extreme();
 
     if (failures) {
         fprintf(stderr, "\n%d assertion(s) failed\n", failures);

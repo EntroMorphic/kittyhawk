@@ -85,6 +85,56 @@ void m4t_mtfp_vec_sub_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n) {
     }
 }
 
+/* V13.B of pure-ternary audit: NEON int32 × int32 → int64 dot product.
+ * Replaces scalar loops in bitnet_lm_head and bitnet_argmax_full_vocab.
+ * Boundary handled via stack-local zero-padded 4-element buffers
+ * (no scalar tail per condition (5)). */
+int64_t m4t_mtfp_vec_dot_i64(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n) {
+    assert(n >= 0);
+    if (n == 0) return 0;
+    assert(x && y);
+
+#if M4T_HAS_NEON
+    int64x2_t acc_lo = vdupq_n_s64(0);
+    int64x2_t acc_hi = vdupq_n_s64(0);
+    int i = 0;
+    int n_aligned = n - (n % 4);
+    for (; i < n_aligned; i += 4) {
+        int32x4_t xv = vld1q_s32(x + i);
+        int32x4_t yv = vld1q_s32(y + i);
+        acc_lo = vmlal_s32(acc_lo, vget_low_s32(xv),  vget_low_s32(yv));
+        acc_hi = vmlal_s32(acc_hi, vget_high_s32(xv), vget_high_s32(yv));
+    }
+    if (i < n) {
+        int avail = n - i;
+        m4t_mtfp_t xbuf[4] = {0}, ybuf[4] = {0};
+        for (int j = 0; j < avail; j++) {
+            xbuf[j] = x[i + j];
+            ybuf[j] = y[i + j];
+        }
+        int32x4_t xv = vld1q_s32(xbuf);
+        int32x4_t yv = vld1q_s32(ybuf);
+        acc_lo = vmlal_s32(acc_lo, vget_low_s32(xv),  vget_low_s32(yv));
+        acc_hi = vmlal_s32(acc_hi, vget_high_s32(xv), vget_high_s32(yv));
+    }
+    return vgetq_lane_s64(acc_lo, 0) + vgetq_lane_s64(acc_lo, 1)
+         + vgetq_lane_s64(acc_hi, 0) + vgetq_lane_s64(acc_hi, 1);
+#else
+#error "m4t_mtfp_vec_dot_i64 requires NEON; no scalar fallback per project rule."
+#endif
+}
+
+int64_t m4t_mtfp_vec_dot_i64_scalar_ref(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n) {
+    assert(n >= 0);
+    if (n == 0) return 0;
+    assert(x && y);
+    int64_t acc = 0;
+    for (int i = 0; i < n; i++) {
+        acc += (int64_t)x[i] * (int64_t)y[i];
+    }
+    return acc;
+}
+
 /* ── Cross-exponent accumulator (§14.2 named opt-in) ────────────────────── */
 
 /* Powers of 3 up to 3^19, defined as compile-time integer constants so

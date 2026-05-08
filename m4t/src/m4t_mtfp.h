@@ -118,6 +118,32 @@ void m4t_mtfp_vec_add_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n);
 /* dst[i] -= a[i] for i in [0, n), saturated per cell. */
 void m4t_mtfp_vec_sub_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n);
 
+/* int32 × int32 → int64 dot product. NEON-only production
+ * (vmlal_s32 chain). Returns sum_{i=0}^{n-1} x[i] * y[i] as int64.
+ *
+ * V13.B of pure-ternary audit: replaces scalar dot loops in
+ * bitnet_lm_head and bitnet_argmax_full_vocab. No scalar tail —
+ * boundary handled via stack-local zero-padded 4-element buffers.
+ *
+ * Bound analysis: per product fits int64 (max |MTFP19_MAX|² ≈ 3.4e17).
+ * Sum fits int64 for n × 3.4e17 < 9.2e18, i.e. n ≤ 27 in the
+ * worst-case-saturated sense. In practice activations are well
+ * below MTFP19 max so larger n is fine; the substrate doesn't
+ * verify this. Caller responsible if both operands hover near
+ * MTFP19_MAX over very large n (matches the prior scalar
+ * implementation's overflow behavior).
+ *
+ * Preconditions:
+ *   n >= 0 (n==0 returns 0)
+ *   x, y non-NULL when n > 0
+ *   x and y point to disjoint or aliasing memory (no aliasing
+ *     constraint — operation is read-only on both inputs) */
+int64_t m4t_mtfp_vec_dot_i64(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n);
+
+/* Scalar-only reference. Test oracle for m4t_mtfp_vec_dot_i64.
+ * Production code MUST NOT call this. */
+int64_t m4t_mtfp_vec_dot_i64_scalar_ref(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n);
+
 /* ── Cross-exponent accumulator (§14.2 named opt-in) ──────────────────────
  *
  * The cross-block-exponent add policy from §14.2 of the substrate spec,
