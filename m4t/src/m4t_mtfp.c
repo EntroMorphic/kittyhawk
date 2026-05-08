@@ -1838,6 +1838,21 @@ void m4t_mtfp_rescale_bx(
     }
 }
 
+/* V14.C: NEON rmsnorm_bx. Two halves:
+ *
+ *   1. SoS via NEON int128 (synthesized from int64 + carry tracking).
+ *      vmull_s32 produces x[i]² (always non-negative ≤ 2^58.3); we
+ *      accumulate into int64 lanes, detect uint64 overflow via
+ *      vcltq_u64, and propagate carries to a parallel high-half
+ *      accumulator. Final 4-lane reduction is scalar __int128 (once
+ *      per call — same kind as a NEON kernel's lane extraction).
+ *
+ *   2. Per-cell γ × x × inv >> total_shift: |γ*x| (int64 via vmull_s32 +
+ *      vabsq_s64) × inv (uint32) → uint96 (3 × uint32 limbs, same
+ *      pattern as V14.F). Right-shift by total_shift across limbs,
+ *      apply sign(γ*x), clamp + narrow to MTFP19.
+ *
+ * Bit-exact vs scalar_ref. */
 void m4t_mtfp_rmsnorm_bx(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     const m4t_mtfp_t* gamma,
@@ -1847,28 +1862,55 @@ void m4t_mtfp_rmsnorm_bx(
     assert(n >= 0);
     if (n == 0) return;
     assert(y && x && gamma);
-    (void)x_bx;  /* informational only; output bx is gamma_bx mod the rescale */
+    (void)x_bx;
+#if M4T_HAS_NEON
+    /* Stage 1: NEON SoS with int128-via-carry-tracking. */
+    int64x2_t acc_lo_lo = vdupq_n_s64(0);
+    int64x2_t acc_lo_hi = vdupq_n_s64(0);
+    int64x2_t acc_hi_lo = vdupq_n_s64(0);
+    int64x2_t acc_hi_hi = vdupq_n_s64(0);
 
-    /* Phase 2 wu1.5: precision-preserving variant. The implicit
-     * m4t_mtfp_rmsnorm uses SOS_SHIFT=4 to keep the int64 SoS sum from
-     * overflowing — but for small-mantissa inputs (e.g., GATE_ACT_BX=2
-     * where typical |x_m| < 16), that shift wipes out most cells'
-     * contribution to mean(x²). The outlier-dominated mean produces a
-     * normalization factor wrong for the small cells.
-     *
-     * Fix: use __int128 for the SoS sum (no shift needed). With
-     * |x_m| ≤ MTFP19_MAX < 2^29.1 and n ≤ 6912, Σx² ≤ n × 2^58 ≈ 2^71 —
-     * fits __int128 cleanly. */
-    __int128 sum_sq = 0;
-    for (int i = 0; i < n; i++) {
-        int64_t xv = (int64_t)x[i];
-        sum_sq += (__int128)(xv * xv);
+    int n_aligned = n - (n % 4);
+    int i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t xv = vld1q_s32(x + i);
+        int64x2_t sq_lo = vmull_s32(vget_low_s32(xv),  vget_low_s32(xv));
+        int64x2_t sq_hi = vmull_s32(vget_high_s32(xv), vget_high_s32(xv));
+        /* Add to acc_lo with carry detection. */
+        int64x2_t prev_lo = acc_lo_lo;
+        acc_lo_lo = vaddq_s64(acc_lo_lo, sq_lo);
+        uint64x2_t carry_lo = vcltq_u64(vreinterpretq_u64_s64(acc_lo_lo),
+                                        vreinterpretq_u64_s64(prev_lo));
+        acc_lo_hi = vreinterpretq_s64_u64(
+            vaddq_u64(vreinterpretq_u64_s64(acc_lo_hi),
+                      vandq_u64(carry_lo, vdupq_n_u64(1))));
+        /* Same for acc_hi. */
+        int64x2_t prev_hi = acc_hi_lo;
+        acc_hi_lo = vaddq_s64(acc_hi_lo, sq_hi);
+        uint64x2_t carry_hi = vcltq_u64(vreinterpretq_u64_s64(acc_hi_lo),
+                                        vreinterpretq_u64_s64(prev_hi));
+        acc_hi_hi = vreinterpretq_s64_u64(
+            vaddq_u64(vreinterpretq_u64_s64(acc_hi_hi),
+                      vandq_u64(carry_hi, vdupq_n_u64(1))));
     }
-    /* mean = sum_sq / n + eps. Reduce to int64-fitting for rsqrt. */
+    /* Boundary tile: scalar tail for n%4 (small). */
+    __int128 sum_sq_tail = 0;
+    for (; i < n; i++) {
+        int64_t xv = (int64_t)x[i];
+        sum_sq_tail += (__int128)(xv * xv);
+    }
+
+    /* Reduce 4 lanes to __int128 (once-per-call setup, like a NEON
+     * kernel's lane extraction at end). */
+    __int128 sum_sq = sum_sq_tail;
+    sum_sq += ((__int128)vgetq_lane_s64(acc_lo_hi, 0) << 64) | (__int128)(uint64_t)vgetq_lane_s64(acc_lo_lo, 0);
+    sum_sq += ((__int128)vgetq_lane_s64(acc_lo_hi, 1) << 64) | (__int128)(uint64_t)vgetq_lane_s64(acc_lo_lo, 1);
+    sum_sq += ((__int128)vgetq_lane_s64(acc_hi_hi, 0) << 64) | (__int128)(uint64_t)vgetq_lane_s64(acc_hi_lo, 0);
+    sum_sq += ((__int128)vgetq_lane_s64(acc_hi_hi, 1) << 64) | (__int128)(uint64_t)vgetq_lane_s64(acc_hi_lo, 1);
+
+    /* Stage 1 setup (scalar, once per call). */
     __int128 mean_full = sum_sq / (__int128)n + (__int128)eps_mantissa;
     if (mean_full < 1) mean_full = 1;
-
-    /* Pre-shift to fit int31 for m4t_int32_rsqrt. */
     int extra_k = 0;
     __int128 mean_passed = mean_full;
     while (mean_passed > (__int128)0x7FFFFFFF) {
@@ -1876,22 +1918,194 @@ void m4t_mtfp_rmsnorm_bx(
         extra_k++;
     }
     if (mean_passed < 1) mean_passed = 1;
-
     m4t_mtfp_t inv = m4t_int32_rsqrt((m4t_mtfp_t)mean_passed);
-    /* y_real = γ_real × x_real × rsqrt(mean(x_real²)). All x_bx terms
-     * cancel in the rsqrt, so output bx = gamma_bx (mod the per-cell
-     * arithmetic). Total shift: 30 (rsqrt scale) + 2*extra_k (mean
-     * pre-shift). */
     int total_shift = 30 + extra_k;
+    assert(inv >= 0);
 
-    /* Per-cell: y_m_at_gamma_bx = γ × x × inv >> total_shift. */
+    /* Stage 2: NEON per-cell γ × x × inv >> total_shift, clamp.
+     * Compute |γ*x| × inv as uint96 (3 × uint32 limbs), right-shift
+     * by total_shift, re-sign, clamp. */
+    uint32_t inv_u32 = (uint32_t)inv;  /* inv ≥ 0 from m4t_int32_rsqrt */
+    int32x4_t v_max  = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    int32x4_t v_min  = vdupq_n_s32(-(int32_t)M4T_MTFP_MAX_VAL);
+
+    i = 0;
+    for (; i < n_aligned; i += 4) {
+        int32x4_t gv = vld1q_s32(gamma + i);
+        int32x4_t xv = vld1q_s32(x + i);
+        /* gx = γ[i] * x[i] as int64x2, two halves of the int32x4 input. */
+        int64x2_t gx_lo = vmull_s32(vget_low_s32(gv),  vget_low_s32(xv));
+        int64x2_t gx_hi = vmull_s32(vget_high_s32(gv), vget_high_s32(xv));
+        /* sign of gx, |gx|. */
+        uint64x2_t s_lo = vcltzq_s64(gx_lo);
+        uint64x2_t s_hi = vcltzq_s64(gx_hi);
+        uint64x2_t a_lo = vreinterpretq_u64_s64(vabsq_s64(gx_lo));
+        uint64x2_t a_hi = vreinterpretq_u64_s64(vabsq_s64(gx_hi));
+
+        /* Compute |gx| × inv as uint96 = 3 × uint32 limbs.
+         * a (uint64) × inv (uint32) decomposed:
+         *   a_lo32 × inv → uint64 (P0).
+         *   a_hi32 × inv → uint64 (P1, ≤ uint32 × uint32 = uint64).
+         * Combined: result = P1 << 32 + P0. */
+        for (int half = 0; half < 2; half++) {
+            uint64x2_t a = (half == 0) ? a_lo : a_hi;
+            uint64x2_t s = (half == 0) ? s_lo : s_hi;
+
+            uint32x2_t a_lo32 = vmovn_u64(a);
+            uint32x2_t a_hi32 = vshrn_n_u64(a, 32);
+            uint32x2_t inv_v  = vdup_n_u32(inv_u32);
+            uint64x2_t P0 = vmull_u32(a_lo32, inv_v);
+            uint64x2_t P1 = vmull_u32(a_hi32, inv_v);
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P0);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P0, 32),
+                                       vandq_u64(P1, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P1, 32),
+                                                 vshrq_n_u64(mid, 32)));
+
+            /* Right-shift uint96 V[2..0] by total_shift to get the
+             * scaled result. total_shift ∈ [30, 30+something].
+             * Treat V as 3 × uint32 limbs:
+             *   bits 0-31  = V[0]
+             *   bits 32-63 = V[1]
+             *   bits 64-95 = V[2]
+             * After >> total_shift, result fits uint64 in our bounds
+             * (|γ*x*inv| ≤ 2^89, >> 30 = 2^59, fits int64 + signed). */
+            int64x2_t cnt = vdupq_n_s64(-(int64_t)total_shift);
+            uint64x2_t V_low = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                         vmovl_u32(L0));
+            uint64x2_t V_high = vmovl_u32(L2);
+            int64x2_t high_part = vshlq_s64(vreinterpretq_s64_u64(V_high),
+                                            vdupq_n_s64((int64_t)(64 - total_shift)));
+            int64x2_t low_part  = vreinterpretq_s64_u64(vshlq_u64(V_low, cnt));
+            int64x2_t r_pos = vaddq_s64(high_part, low_part);
+
+            /* Arithmetic-shift correction: scalar uses (int128)prod >> shift
+             * which floors toward -inf for negative. abs+shift+negate gives
+             * truncate-toward-zero. For negative prod with non-zero remainder
+             * in the discarded low bits, increment magnitude before negating.
+             * total_shift ≤ 63 in our range; remainder is V_low's low bits. */
+            assert(total_shift > 0 && total_shift < 64);
+            uint64x2_t mask = vdupq_n_u64((1ULL << total_shift) - 1);
+            uint64x2_t rem  = vandq_u64(V_low, mask);
+            uint64x2_t has_rem = vcgtq_u64(rem, vdupq_n_u64(0));
+            uint64x2_t adj_bit = vandq_u64(vandq_u64(s, has_rem),
+                                           vdupq_n_u64(1));
+            int64x2_t r_pos_for_neg = vaddq_s64(r_pos,
+                vreinterpretq_s64_u64(adj_bit));
+            int64x2_t r_neg = vnegq_s64(r_pos_for_neg);
+            int64x2_t r_signed = vbslq_s64(s, r_neg, r_pos);
+
+            /* Clamp + narrow. vqmovn_s64 saturates to int32; vminq/vmaxq
+             * to MTFP19. */
+            int32x2_t y_pair = vqmovn_s64(r_signed);
+            if (half == 0) vst1_s32(y + i,     y_pair);
+            else           vst1_s32(y + i + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(y + i);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(y + i, y4);
+    }
+    /* Boundary tile for n%4 != 0: process tail cells using stack bufs. */
+    if (i < n) {
+        int avail = n - i;
+        m4t_mtfp_t gbuf[4] = {0}, xbuf[4] = {0}, ybuf[4] = {0};
+        for (int j = 0; j < avail; j++) { gbuf[j] = gamma[i + j]; xbuf[j] = x[i + j]; }
+        int32x4_t gv = vld1q_s32(gbuf);
+        int32x4_t xv = vld1q_s32(xbuf);
+        int64x2_t gx_lo = vmull_s32(vget_low_s32(gv),  vget_low_s32(xv));
+        int64x2_t gx_hi = vmull_s32(vget_high_s32(gv), vget_high_s32(xv));
+        uint64x2_t s_lo = vcltzq_s64(gx_lo);
+        uint64x2_t s_hi = vcltzq_s64(gx_hi);
+        uint64x2_t a_lo = vreinterpretq_u64_s64(vabsq_s64(gx_lo));
+        uint64x2_t a_hi = vreinterpretq_u64_s64(vabsq_s64(gx_hi));
+        for (int half = 0; half < 2; half++) {
+            uint64x2_t a = (half == 0) ? a_lo : a_hi;
+            uint64x2_t s = (half == 0) ? s_lo : s_hi;
+            uint32x2_t a_lo32 = vmovn_u64(a);
+            uint32x2_t a_hi32 = vshrn_n_u64(a, 32);
+            uint32x2_t inv_v  = vdup_n_u32(inv_u32);
+            uint64x2_t P0 = vmull_u32(a_lo32, inv_v);
+            uint64x2_t P1 = vmull_u32(a_hi32, inv_v);
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P0);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P0, 32),
+                                       vandq_u64(P1, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P1, 32),
+                                                 vshrq_n_u64(mid, 32)));
+            int64x2_t cnt = vdupq_n_s64(-(int64_t)total_shift);
+            uint64x2_t V_low = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                         vmovl_u32(L0));
+            uint64x2_t V_high = vmovl_u32(L2);
+            int64x2_t high_part = vshlq_s64(vreinterpretq_s64_u64(V_high),
+                                            vdupq_n_s64((int64_t)(64 - total_shift)));
+            int64x2_t low_part  = vreinterpretq_s64_u64(vshlq_u64(V_low, cnt));
+            int64x2_t r_pos = vaddq_s64(high_part, low_part);
+            /* Arithmetic-shift correction (boundary tile). */
+            assert(total_shift > 0 && total_shift < 64);
+            uint64x2_t mask = vdupq_n_u64((1ULL << total_shift) - 1);
+            uint64x2_t rem  = vandq_u64(V_low, mask);
+            uint64x2_t has_rem = vcgtq_u64(rem, vdupq_n_u64(0));
+            uint64x2_t adj_bit = vandq_u64(vandq_u64(s, has_rem),
+                                           vdupq_n_u64(1));
+            int64x2_t r_pos_for_neg = vaddq_s64(r_pos,
+                vreinterpretq_s64_u64(adj_bit));
+            int64x2_t r_neg = vnegq_s64(r_pos_for_neg);
+            int64x2_t r_signed = vbslq_s64(s, r_neg, r_pos);
+            int32x2_t y_pair = vqmovn_s64(r_signed);
+            if (half == 0) vst1_s32(ybuf,     y_pair);
+            else           vst1_s32(ybuf + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(ybuf);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(ybuf, y4);
+        for (int j = 0; j < avail; j++) y[i + j] = ybuf[j];
+    }
+
+    /* Rescale gamma_bx → target_bx (existing function). */
+    if (gamma_bx != target_bx) {
+        m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
+    }
+#else
+#error "m4t_mtfp_rmsnorm_bx requires NEON; no scalar fallback per project rule."
+#endif
+}
+
+void m4t_mtfp_rmsnorm_bx_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    int x_bx, int gamma_bx, int target_bx,
+    m4t_mtfp_t eps_mantissa, int n)
+{
+    assert(n >= 0);
+    if (n == 0) return;
+    assert(y && x && gamma);
+    (void)x_bx;
+    __int128 sum_sq = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t xv = (int64_t)x[i];
+        sum_sq += (__int128)(xv * xv);
+    }
+    __int128 mean_full = sum_sq / (__int128)n + (__int128)eps_mantissa;
+    if (mean_full < 1) mean_full = 1;
+    int extra_k = 0;
+    __int128 mean_passed = mean_full;
+    while (mean_passed > (__int128)0x7FFFFFFF) {
+        mean_passed >>= 2;
+        extra_k++;
+    }
+    if (mean_passed < 1) mean_passed = 1;
+    m4t_mtfp_t inv = m4t_int32_rsqrt((m4t_mtfp_t)mean_passed);
+    int total_shift = 30 + extra_k;
     for (int i = 0; i < n; i++) {
         __int128 prod = (__int128)gamma[i] * (__int128)x[i] * (__int128)inv;
         int64_t scaled = (int64_t)(prod >> total_shift);
         y[i] = m4t_mtfp_clamp64(scaled);
     }
-
-    /* Rescale gamma_bx → target_bx. */
     if (gamma_bx != target_bx) {
         m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
     }

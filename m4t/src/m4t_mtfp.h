@@ -631,6 +631,13 @@ void m4t_mtfp_rmsnorm_bx(
     int x_bx, int gamma_bx, int target_bx,
     m4t_mtfp_t eps_mantissa, int n);
 
+/* Scalar test oracle for m4t_mtfp_rmsnorm_bx (V14.C). Production must not call. */
+void m4t_mtfp_rmsnorm_bx_scalar_ref(
+    m4t_mtfp_t* y, const m4t_mtfp_t* x,
+    const m4t_mtfp_t* gamma,
+    int x_bx, int gamma_bx, int target_bx,
+    m4t_mtfp_t eps_mantissa, int n);
+
 /* relu² with explicit input bx → target bx rescale. Squaring doubles
  * the bx; the rescale brings it back. y_real[i] = max(0, x_real[i])²
  * preserved; mantissas land at target_bx.

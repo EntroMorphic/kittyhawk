@@ -517,6 +517,92 @@ static void test_elementwise_mul_bx_extreme(void) {
     }
 }
 
+/* ── m4t_mtfp_rmsnorm_bx (V14.C) ───────────────────────────────────────── */
+
+static void test_rmsnorm_bx_aligned(void) {
+    /* Cover several n × bx combinations. */
+    int sizes[]  = { 4, 16, 64, 256, 2560 };
+    struct { int x_bx, g_bx, t_bx; } cases[] = {
+        { 4, 4, 4 },     /* gamma_bx == target_bx, no rescale */
+        { 6, 8, 8 },     /* same */
+        { 4, 4, 6 },     /* gamma_bx != target_bx, triggers rescale */
+        { 8, 12, 14 },
+    };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+            m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* g = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+            for (int i = 0; i < n; i++) {
+                x[i] = (m4t_mtfp_t)((i * 547) % 30000 - 15000);
+                g[i] = (m4t_mtfp_t)((i * 311) % 4000 + 100);
+            }
+            m4t_mtfp_rmsnorm_bx          (y,  x, g, cases[c].x_bx, cases[c].g_bx,
+                                          cases[c].t_bx, 1, n);
+            m4t_mtfp_rmsnorm_bx_scalar_ref(yr, x, g, cases[c].x_bx, cases[c].g_bx,
+                                          cases[c].t_bx, 1, n);
+            for (int i = 0; i < n; i++) {
+                if (y[i] != yr[i]) {
+                    FAIL("rmsnorm_bx aligned case=%zu n=%d i=%d: NEON=%d ref=%d",
+                         c, n, i, (int)y[i], (int)yr[i]);
+                    break;
+                }
+            }
+            free(x); free(g); free(y); free(yr);
+        }
+    }
+}
+
+static void test_rmsnorm_bx_unaligned(void) {
+    int sizes[] = { 1, 2, 3, 5, 7, 11, 17, 33, 129, 6911 };
+    for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+        int n = sizes[s];
+        m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* g = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+        for (int i = 0; i < n; i++) {
+            x[i] = (m4t_mtfp_t)((i * 191) % 25000 - 12500);
+            g[i] = (m4t_mtfp_t)((i * 79)  %  3000 + 50);
+        }
+        m4t_mtfp_rmsnorm_bx          (y,  x, g, 4, 4, 4, 1, n);
+        m4t_mtfp_rmsnorm_bx_scalar_ref(yr, x, g, 4, 4, 4, 1, n);
+        for (int i = 0; i < n; i++) {
+            if (y[i] != yr[i]) {
+                FAIL("rmsnorm_bx unaligned n=%d i=%d: NEON=%d ref=%d",
+                     n, i, (int)y[i], (int)yr[i]);
+                break;
+            }
+        }
+        free(x); free(g); free(y); free(yr);
+    }
+}
+
+static void test_rmsnorm_bx_extreme(void) {
+    /* MAX_VAL inputs — exercises the SoS overflow tracking and the
+     * total_shift varying due to large mean. */
+    int n = 256;
+    m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* g = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    for (int i = 0; i < n; i++) {
+        x[i] = (i & 1) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+        g[i] = (i & 2) ? M4T_MTFP_MAX_VAL : -M4T_MTFP_MAX_VAL;
+    }
+    m4t_mtfp_rmsnorm_bx          (y,  x, g, 4, 4, 4, 1, n);
+    m4t_mtfp_rmsnorm_bx_scalar_ref(yr, x, g, 4, 4, 4, 1, n);
+    for (int i = 0; i < n; i++) {
+        if (y[i] != yr[i]) {
+            FAIL("rmsnorm_bx extreme i=%d: NEON=%d ref=%d", i, (int)y[i], (int)yr[i]);
+            break;
+        }
+    }
+    free(x); free(g); free(y); free(yr);
+}
+
 /* ── m4t_mtfp_bitlinear_scale_bx (V14.F) ───────────────────────────────── */
 
 static void test_bitlinear_scale_bx_aligned(void) {
@@ -779,6 +865,10 @@ int main(void) {
     test_bitlinear_scale_bx_unaligned();
     test_bitlinear_scale_bx_extreme();
     test_bitlinear_scale_bx_alpha_zero();
+
+    test_rmsnorm_bx_aligned();
+    test_rmsnorm_bx_unaligned();
+    test_rmsnorm_bx_extreme();
 
     if (failures) {
         fprintf(stderr, "\n%d assertion(s) failed\n", failures);
