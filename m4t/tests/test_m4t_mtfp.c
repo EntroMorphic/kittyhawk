@@ -336,7 +336,8 @@ static void test_vec_dot_i64_extreme(void) {
 
 static void test_relu2_bx_aligned(void) {
     int sizes[]  = { 4, 16, 64, 256, 6912 };
-    int shifts[] = { 0, 1, 2, 3, 4, 8, 16, 19 };
+    /* Cover the full assertion range [0, 39], not just BitNet practical values. */
+    int shifts[] = { 0, 1, 2, 3, 4, 8, 16, 19, 20, 25, 30, 35, 39 };
     for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
         int n = sizes[s];
         for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
@@ -366,7 +367,7 @@ static void test_relu2_bx_aligned(void) {
 
 static void test_relu2_bx_unaligned(void) {
     int sizes[]  = { 1, 2, 3, 5, 7, 11, 17, 33, 65, 129 };
-    int shifts[] = { 0, 1, 3, 7 };
+    int shifts[] = { 0, 1, 3, 7, 19, 25, 39 };
     for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
         int n = sizes[s];
         for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
@@ -396,7 +397,8 @@ static void test_relu2_bx_unaligned(void) {
 
 static void test_relu2_bx_extreme(void) {
     int n = 256;
-    int shifts[] = { 1, 2, 5, 10, 19 };
+    /* MAX_VAL squared = 2^58.3 — exercise iterated /3 across full assert range. */
+    int shifts[] = { 1, 2, 5, 10, 19, 25, 30, 39 };
     for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
         int shift_exp = shifts[k];
         int xb = (shift_exp + 1) / 2 + 5;
@@ -424,7 +426,7 @@ static void test_relu2_bx_extreme(void) {
 
 static void test_elementwise_mul_bx_aligned(void) {
     int sizes[]  = { 4, 16, 64, 256, 6912 };
-    int shifts[] = { 0, 1, 2, 3, 5, 10, 19 };
+    int shifts[] = { 0, 1, 2, 3, 5, 10, 19, 25, 30, 35, 39 };
     for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
         int n = sizes[s];
         for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
@@ -456,7 +458,7 @@ static void test_elementwise_mul_bx_aligned(void) {
 
 static void test_elementwise_mul_bx_unaligned(void) {
     int sizes[]  = { 1, 2, 3, 5, 7, 11, 17, 33, 129 };
-    int shifts[] = { 0, 1, 3, 8 };
+    int shifts[] = { 0, 1, 3, 8, 19, 25, 39 };
     for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
         int n = sizes[s];
         for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
@@ -488,7 +490,7 @@ static void test_elementwise_mul_bx_unaligned(void) {
 
 static void test_elementwise_mul_bx_extreme(void) {
     int n = 256;
-    int shifts[] = { 1, 5, 10, 19 };
+    int shifts[] = { 1, 5, 10, 19, 25, 30, 39 };
     for (size_t k = 0; k < sizeof(shifts)/sizeof(shifts[0]); k++) {
         int shift_exp = shifts[k];
         int a_bx = (shift_exp + 1) / 2 + 5;
