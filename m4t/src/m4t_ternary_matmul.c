@@ -343,11 +343,15 @@ void m4t_ternary_dot_matmul_bt(
 {
     _Static_assert(sizeof(m4t_trit_t) == sizeof(m4t_mtfp4_t),
                    "m4t_trit_t and m4t_mtfp4_t must share underlying width "
-                   "for the SDOT delegation to be bit-safe");
-    /* Both inputs are int8 at the bit level; SDOT applies. The cast
-     * is identity at runtime; the kernel's int8 × int8 → int32 path
-     * is bit-exact for values in {-1, 0, +1}. */
-    m4t_mtfp4_sdot_matmul_bt(Y, (const m4t_mtfp4_t*)X, W, M, K, N);
+                   "for the dispatch delegation to be bit-safe");
+    /* Both inputs are int8 at the bit level. The cast is identity at
+     * runtime; the kernel's per-cell mask+select dispatch is bit-exact
+     * for ternary values {-1, 0, +1}.
+     *
+     * V5 of pure-ternary audit: delegates to the architecture-conformant
+     * route kernel (no SDOT, no multiplication). gesh consumers
+     * (gesh_project) inherit conformance via this wrapper. */
+    m4t_mtfp4_sdot_matmul_bt_route(Y, (const m4t_mtfp4_t*)X, W, M, K, N);
 }
 
 void m4t_mtfp_ternary_matmul_bt(

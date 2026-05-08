@@ -218,19 +218,19 @@ void bitnet_forward_block(
         s->q_absmax = m4t_a8_quantize(s->q_int8, s->x_norm,
                                        BITNET_HIDDEN_SIZE);
         /* Q = x_int8 @ W_q^T → raw mantissas → scale apply. */
-        m4t_ternary_5in8_matmul_bt(s->q, (const m4t_trit_t*)s->q_int8, w->w_q,
+        m4t_ternary_5in8_matmul_bt_route(s->q, (const m4t_trit_t*)s->q_int8, w->w_q,
                                     /*M=*/1, BITNET_HIDDEN_SIZE,
                                     /*N=*/BITNET_HIDDEN_SIZE);
         bitnet_apply_bitlinear_scale(s->q, s->q,
                                       w->alpha_q, w->alpha_q_block_exp,
                                       s->q_absmax, BITNET_HIDDEN_SIZE);
         /* K, V projections (smaller output dim due to GQA). */
-        m4t_ternary_5in8_matmul_bt(s->k, (const m4t_trit_t*)s->q_int8, w->w_k,
+        m4t_ternary_5in8_matmul_bt_route(s->k, (const m4t_trit_t*)s->q_int8, w->w_k,
                                     1, BITNET_HIDDEN_SIZE, BITNET_KV_PROJ_DIM);
         bitnet_apply_bitlinear_scale(s->k, s->k,
                                       w->alpha_k, w->alpha_k_block_exp,
                                       s->q_absmax, BITNET_KV_PROJ_DIM);
-        m4t_ternary_5in8_matmul_bt(s->v, (const m4t_trit_t*)s->q_int8, w->w_v,
+        m4t_ternary_5in8_matmul_bt_route(s->v, (const m4t_trit_t*)s->q_int8, w->w_v,
                                     1, BITNET_HIDDEN_SIZE, BITNET_KV_PROJ_DIM);
         bitnet_apply_bitlinear_scale(s->v, s->v,
                                       w->alpha_v, w->alpha_v_block_exp,
@@ -382,7 +382,7 @@ void bitnet_forward_block(
     if (w->w_o != NULL) {
         s->q_absmax = m4t_a8_quantize(s->q_int8, s->attn_sub_norm,
                                        BITNET_HIDDEN_SIZE);
-        m4t_ternary_5in8_matmul_bt(s->x, (const m4t_trit_t*)s->q_int8, w->w_o,
+        m4t_ternary_5in8_matmul_bt_route(s->x, (const m4t_trit_t*)s->q_int8, w->w_o,
                                     1, BITNET_HIDDEN_SIZE, BITNET_HIDDEN_SIZE);
         bitnet_apply_bitlinear_scale(s->x, s->x,
                                       w->alpha_o, w->alpha_o_block_exp,
@@ -416,14 +416,14 @@ void bitnet_forward_block(
         /* gate, up are FFN intermediate signals — typical real values
          * ~80 (per HF trace), well above ACT_BX's max ~35. Output at
          * FFN_BX (wider headroom). */
-        m4t_ternary_5in8_matmul_bt(s->gate, (const m4t_trit_t*)s->q_int8, w->w_gate,
+        m4t_ternary_5in8_matmul_bt_route(s->gate, (const m4t_trit_t*)s->q_int8, w->w_gate,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
         m4t_mtfp_bitlinear_scale_bx(s->gate, s->gate,
                                      w->alpha_gate, w->alpha_gate_block_exp,
                                      s->q_absmax,
                                      BITNET_ACT_BX, BITNET_FFN_BX,
                                      BITNET_INTERMEDIATE_SIZE);
-        m4t_ternary_5in8_matmul_bt(s->up,   (const m4t_trit_t*)s->q_int8, w->w_up,
+        m4t_ternary_5in8_matmul_bt_route(s->up,   (const m4t_trit_t*)s->q_int8, w->w_up,
                                     1, BITNET_HIDDEN_SIZE, BITNET_INTERMEDIATE_SIZE);
         m4t_mtfp_bitlinear_scale_bx(s->up, s->up,
                                      w->alpha_up, w->alpha_up_block_exp,
@@ -459,7 +459,7 @@ void bitnet_forward_block(
     if (w->w_down != NULL) {
         s->q_absmax = m4t_a8_quantize(s->q_int8, s->ffn_sub_norm,
                                        BITNET_INTERMEDIATE_SIZE);
-        m4t_ternary_5in8_matmul_bt(s->x, (const m4t_trit_t*)s->q_int8, w->w_down,
+        m4t_ternary_5in8_matmul_bt_route(s->x, (const m4t_trit_t*)s->q_int8, w->w_down,
                                     1, BITNET_INTERMEDIATE_SIZE, BITNET_HIDDEN_SIZE);
         bitnet_apply_bitlinear_scale(s->x, s->x,
                                       w->alpha_down, w->alpha_down_block_exp,
