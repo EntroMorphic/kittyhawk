@@ -557,6 +557,109 @@ static int test_sdot_matmul_k16_sweep(void) {
     return 0;
 }
 
+/* V3 (pure-ternary audit): route variant bit-exact vs the int64
+ * reference. Mirrors the random-K and K%16-sweep coverage. */
+static int test_sdot_matmul_route_bit_exact(void) {
+    g_rng = 0x0007E2A0u;
+    /* Random shapes */
+    for (int trial = 0; trial < 100; trial++) {
+        int M = rand_int(1, 4);
+        int N = rand_int(1, 4);
+        int K = rand_int(16, 1024);
+        int8_t* X = malloc((size_t)M * K);
+        int8_t* W = malloc((size_t)N * K);
+        int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+        int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+        for (int i = 0; i < M * K; i++) X[i] = rand_mtfp4();
+        for (int i = 0; i < N * K; i++) W[i] = rand_trit();
+
+        m4t_mtfp4_sdot_matmul_bt_route(Y, X, W, M, K, N);
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < N; j++) {
+                int64_t acc = 0;
+                for (int k = 0; k < K; k++)
+                    acc += (int64_t)X[i*K+k] * (int64_t)W[j*K+k];
+                Yref[i*N+j] = (int32_t)acc;
+            }
+        }
+        for (int i = 0; i < M*N; i++) {
+            if (Y[i] != Yref[i]) {
+                printf("FAIL route trial %d cell %d: got=%d ref=%d (M=%d K=%d N=%d)\n",
+                       trial, i, Y[i], Yref[i], M, K, N);
+                free(X); free(W); free(Y); free(Yref); return 1;
+            }
+        }
+        free(X); free(W); free(Y); free(Yref);
+    }
+    /* K%16 sweep on route. */
+    for (int km = 1; km < 16; km++) {
+        for (int K_base = 16; K_base <= 64; K_base += 16) {
+            int K = K_base + km;
+            int M = 2, N = 5;
+            int8_t* X = malloc((size_t)M * K);
+            int8_t* W = malloc((size_t)N * K);
+            int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+            int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+            for (int i = 0; i < M * K; i++) X[i] = rand_mtfp4();
+            for (int i = 0; i < N * K; i++) W[i] = rand_trit();
+            m4t_mtfp4_sdot_matmul_bt_route(Y, X, W, M, K, N);
+            for (int i = 0; i < M; i++) for (int j = 0; j < N; j++) {
+                int64_t acc = 0;
+                for (int k = 0; k < K; k++)
+                    acc += (int64_t)X[i*K+k] * (int64_t)W[j*K+k];
+                Yref[i*N+j] = (int32_t)acc;
+            }
+            for (int i = 0; i < M*N; i++) {
+                if (Y[i] != Yref[i]) {
+                    printf("FAIL route k16 sweep K=%d cell %d: got=%d ref=%d\n",
+                           K, i, Y[i], Yref[i]);
+                    free(X); free(W); free(Y); free(Yref); return 1;
+                }
+            }
+            free(X); free(W); free(Y); free(Yref);
+        }
+    }
+    /* K=0 explicit. */
+    {
+        int M = 4, N = 4;
+        int32_t Y[16];
+        for (int i = 0; i < 16; i++) Y[i] = 0xCAFEBABE;
+        m4t_mtfp4_sdot_matmul_bt_route(Y, NULL, NULL, M, 0, N);
+        for (int i = 0; i < 16; i++) {
+            if (Y[i] != 0) {
+                printf("FAIL route K=0 expected 0, got %d at %d\n", Y[i], i);
+                return 1;
+            }
+        }
+    }
+    /* Extreme X = ±40 (MTFP4 max magnitude). */
+    {
+        int K = 80, M = 2, N = 4;
+        int8_t* X = malloc((size_t)M * K);
+        int8_t* W = malloc((size_t)N * K);
+        int32_t* Y = malloc((size_t)M * N * sizeof(int32_t));
+        int32_t* Yref = malloc((size_t)M * N * sizeof(int32_t));
+        for (int i = 0; i < M * K; i++) X[i] = (i & 1) ? 40 : -40;
+        for (int i = 0; i < N * K; i++) W[i] = rand_trit();
+        m4t_mtfp4_sdot_matmul_bt_route(Y, X, W, M, K, N);
+        for (int i = 0; i < M; i++) for (int j = 0; j < N; j++) {
+            int64_t acc = 0;
+            for (int k = 0; k < K; k++)
+                acc += (int64_t)X[i*K+k] * (int64_t)W[j*K+k];
+            Yref[i*N+j] = (int32_t)acc;
+        }
+        for (int i = 0; i < M*N; i++) {
+            if (Y[i] != Yref[i]) {
+                printf("FAIL route extreme X=±40 cell %d: got=%d ref=%d\n",
+                       i, Y[i], Yref[i]);
+                free(X); free(W); free(Y); free(Yref); return 1;
+            }
+        }
+        free(X); free(W); free(Y); free(Yref);
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_clamp_basic())                return 1;
     if (test_sdot_matmul_small())          return 1;
@@ -564,6 +667,7 @@ int main(void) {
     if (test_sdot_matmul_high_mag())       return 1;
     if (test_sdot_matmul_long_k())         return 1;
     if (test_sdot_matmul_k16_sweep())      return 1;
+    if (test_sdot_matmul_route_bit_exact()) return 1;
     if (test_sdot_zero_dim())              return 1;
     if (test_widen_exact())                return 1;
     if (test_narrow_round())               return 1;
@@ -572,6 +676,6 @@ int main(void) {
     if (test_narrow_property())            return 1;
     if (test_roundtrip_widen_narrow())     return 1;
     if (test_conversions_neon_vs_scalar_ref()) return 1;
-    printf("m4t_mtfp4: all 14 tests passed\n");
+    printf("m4t_mtfp4: all 15 tests passed\n");
     return 0;
 }

@@ -203,6 +203,146 @@ void m4t_mtfp4_sdot_matmul_bt(
     }
 }
 
+/* ── Routing-shaped MTFP4 SDOT matmul (V3 of pure-ternary audit) ─────────
+ *
+ * Same I/O and bit-exact output as m4t_mtfp4_sdot_matmul_bt; inner compute
+ * is dispatch-shaped (mask + select on W trit value). No vdotq_s32.
+ *
+ * X is m4t_mtfp4_t (int8, [-40, +40]). W is m4t_trit_t (int8, {-1, 0, +1}).
+ * Per lane: pos_sel = X & (W==+1), neg_sel = X & (W==-1), diff = pos - neg.
+ * Masks are mutually exclusive so |diff| ≤ |X| ≤ 40 — fits int8 with
+ * margin (no INT8_MIN concern; X is bounded by MTFP4 contract).
+ *
+ * K%16 boundary tile uses 16-byte stack-local zero-padded W and X. */
+void m4t_mtfp4_sdot_matmul_bt_route(
+    m4t_mtfp_t* Y,
+    const m4t_mtfp4_t* X,
+    const m4t_trit_t* W,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    int j_tile_end = N - (N % 4);
+    int K_aligned = K - (K % 16);
+    int K_padded  = ((K + 15) / 16) * 16;
+
+    const int8x16_t pos_one = vdupq_n_s8( 1);
+    const int8x16_t neg_one = vdupq_n_s8(-1);
+
+    for (int i = 0; i < M; i++) {
+        const int8_t* xi = (const int8_t*)(X + (size_t)i * K);
+
+        for (int j = 0; j < j_tile_end; j += 4) {
+            const int8_t* wj0 = (const int8_t*)(W + (size_t)(j + 0) * K);
+            const int8_t* wj1 = (const int8_t*)(W + (size_t)(j + 1) * K);
+            const int8_t* wj2 = (const int8_t*)(W + (size_t)(j + 2) * K);
+            const int8_t* wj3 = (const int8_t*)(W + (size_t)(j + 3) * K);
+
+            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+
+            #define M4T_MTFP4_ROUTE_TILE(va, vw0, vw1, vw2, vw3) do {           \
+                uint8x16_t pm0 = vceqq_s8(vw0, pos_one), nm0 = vceqq_s8(vw0, neg_one); \
+                uint8x16_t pm1 = vceqq_s8(vw1, pos_one), nm1 = vceqq_s8(vw1, neg_one); \
+                uint8x16_t pm2 = vceqq_s8(vw2, pos_one), nm2 = vceqq_s8(vw2, neg_one); \
+                uint8x16_t pm3 = vceqq_s8(vw3, pos_one), nm3 = vceqq_s8(vw3, neg_one); \
+                int8x16_t d0 = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm0)), \
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm0))); \
+                int8x16_t d1 = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm1)), \
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm1))); \
+                int8x16_t d2 = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm2)), \
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm2))); \
+                int8x16_t d3 = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm3)), \
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm3))); \
+                acc0 += (int32_t)vaddlvq_s8(d0);                                \
+                acc1 += (int32_t)vaddlvq_s8(d1);                                \
+                acc2 += (int32_t)vaddlvq_s8(d2);                                \
+                acc3 += (int32_t)vaddlvq_s8(d3);                                \
+            } while (0)
+
+            for (int k = 0; k < K_aligned; k += 16) {
+                int8x16_t va  = vld1q_s8(xi + k);
+                int8x16_t vw0 = vld1q_s8(wj0 + k);
+                int8x16_t vw1 = vld1q_s8(wj1 + k);
+                int8x16_t vw2 = vld1q_s8(wj2 + k);
+                int8x16_t vw3 = vld1q_s8(wj3 + k);
+                M4T_MTFP4_ROUTE_TILE(va, vw0, vw1, vw2, vw3);
+            }
+
+            if (K_padded > K_aligned) {
+                int avail = K - K_aligned;
+                assert(avail >= 1 && avail <= 15);
+                int8_t xbuf[16] = {0};
+                int8_t wb0[16] = {0}, wb1[16] = {0}, wb2[16] = {0}, wb3[16] = {0};
+                memcpy(xbuf, xi + K_aligned, (size_t)avail);
+                memcpy(wb0, wj0 + K_aligned, (size_t)avail);
+                memcpy(wb1, wj1 + K_aligned, (size_t)avail);
+                memcpy(wb2, wj2 + K_aligned, (size_t)avail);
+                memcpy(wb3, wj3 + K_aligned, (size_t)avail);
+                int8x16_t va  = vld1q_s8(xbuf);
+                int8x16_t vw0 = vld1q_s8(wb0);
+                int8x16_t vw1 = vld1q_s8(wb1);
+                int8x16_t vw2 = vld1q_s8(wb2);
+                int8x16_t vw3 = vld1q_s8(wb3);
+                M4T_MTFP4_ROUTE_TILE(va, vw0, vw1, vw2, vw3);
+            }
+
+            #undef M4T_MTFP4_ROUTE_TILE
+
+            Y[i * N + j + 0] = (m4t_mtfp_t)acc0;
+            Y[i * N + j + 1] = (m4t_mtfp_t)acc1;
+            Y[i * N + j + 2] = (m4t_mtfp_t)acc2;
+            Y[i * N + j + 3] = (m4t_mtfp_t)acc3;
+        }
+
+        for (int j = j_tile_end; j < N; j++) {
+            const int8_t* wj = (const int8_t*)(W + (size_t)j * K);
+            int32_t acc = 0;
+
+            for (int k = 0; k < K_aligned; k += 16) {
+                int8x16_t va = vld1q_s8(xi + k);
+                int8x16_t vw = vld1q_s8(wj + k);
+                uint8x16_t pm = vceqq_s8(vw, pos_one);
+                uint8x16_t nm = vceqq_s8(vw, neg_one);
+                int8x16_t d = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm)),
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm)));
+                acc += (int32_t)vaddlvq_s8(d);
+            }
+
+            if (K_padded > K_aligned) {
+                int avail = K - K_aligned;
+                assert(avail >= 1 && avail <= 15);
+                int8_t xbuf[16] = {0}, wbuf[16] = {0};
+                memcpy(xbuf, xi + K_aligned, (size_t)avail);
+                memcpy(wbuf, wj + K_aligned, (size_t)avail);
+                int8x16_t va = vld1q_s8(xbuf);
+                int8x16_t vw = vld1q_s8(wbuf);
+                uint8x16_t pm = vceqq_s8(vw, pos_one);
+                uint8x16_t nm = vceqq_s8(vw, neg_one);
+                int8x16_t d = vsubq_s8(vandq_s8(va, vreinterpretq_s8_u8(pm)),
+                                        vandq_s8(va, vreinterpretq_s8_u8(nm)));
+                acc += (int32_t)vaddlvq_s8(d);
+            }
+
+            Y[i * N + j] = (m4t_mtfp_t)acc;
+        }
+    }
+#else
+#error "m4t_mtfp4_sdot_matmul_bt_route requires NEON + ARM_FEATURE_DOTPROD; \
+no scalar fallback per project rule."
+#endif
+}
+
 /* ── Cell-width conversion ──────────────────────────────────────────────── */
 
 /* Per project rule (feedback_function_over_speed_no_scalar): production

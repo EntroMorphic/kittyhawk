@@ -1,0 +1,7 @@
+mtfp4_sdot route vs dense — n_iter=200
+
+  K=2560 K%%16=0                 K= 2560 N= 2560   dense 0.084±0.010  route 0.199±0.022  ratio 0.421×  diff=0
+  K=2575 K%%16=15                K= 2575 N= 2560   dense 0.083±0.005  route 0.172±0.005  ratio 0.483×  diff=0
+  K=6912 K%%16=0                 K= 6912 N= 2560   dense 0.215±0.029  route 0.459±0.032  ratio 0.468×  diff=0
+  K=6925 K%%16=13                K= 6925 N= 2560   dense 0.234±0.018  route 0.474±0.020  ratio 0.493×  diff=0
+  K=80 small                     K=   80 N=  256   dense 0.000±0.000  route 0.001±0.000  ratio 0.310×  diff=0

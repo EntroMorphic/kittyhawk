@@ -121,6 +121,34 @@ void m4t_mtfp4_sdot_matmul_bt(
     int M, int K, int N
 );
 
+/* Routing-shaped sibling (V3 of the pure-ternary audit). Same I/O and
+ * bit-exact output as m4t_mtfp4_sdot_matmul_bt; inner compute is
+ * dispatch-shaped (mask + select), no SDOT.
+ *
+ * Per cell: dispatch on W trit value via vceqq + vandq + vsubq; reduce
+ * via vaddlvq. K%16 boundary tile uses stack-local zero-padded W and X.
+ *
+ * Architecture compliance per
+ * memory/feedback_pure_ternary_routed_architecture.md:
+ *   (1) pure ternary, (2) routed, (3) non-dense, (4) no binary
+ *   structures, (5) no scalar ops.
+ *
+ * X = m4t_mtfp4_t (int8, range [-40, +40] per MTFP4 contract). W is
+ * ternary {-1, 0, +1}. Per-lane diff = pos_sel - neg_sel ∈ [-40, +40]
+ * (mutually exclusive masks), so int8 is sufficient — no INT8_MIN
+ * concern as in the 5-in-8 _bt_route case.
+ *
+ * Speed: bench-uncertain — the K%16 fix in the original kernel showed
+ * the boundary-tile rewrite was wash for mtfp4_sdot. Whether the
+ * dispatch path delivers proportional cost depends on the same
+ * factors. Bench in journal/v3_mtfp4_sdot_route_bench.txt. */
+void m4t_mtfp4_sdot_matmul_bt_route(
+    m4t_mtfp_t*       Y,
+    const m4t_mtfp4_t* X,
+    const m4t_trit_t* W,
+    int M, int K, int N
+);
+
 /* ── Cell-width conversion ──────────────────────────────────────────────── */
 
 /* MTFP19 → MTFP4. Narrowing conversion under the default-block-exponent
