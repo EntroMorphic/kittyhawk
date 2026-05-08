@@ -1337,6 +1337,229 @@ no scalar fallback per project rule. See CONTRIBUTING.md no-scalar audit."
 #endif
 }
 
+/* §20 X-packed routing-shaped sibling. V2 of the pure-ternary audit:
+ * dispatch-shaped compute on the X-packed kernel. Bit-exact output;
+ * structurally distinct operation per
+ * memory/feedback_pure_ternary_routed_architecture.md.
+ *
+ * Both X and W decode to ternary {-1, 0, +1}. The dispatch path's
+ * vsubq_s8(pos_sel, neg_sel) operates on values in {-1, 0, +1} per
+ * lane, with pos_sel and neg_sel mutually exclusive — max
+ * |pos - neg| = 1 per lane, well within int8. The X = -128
+ * precondition of _bt_route does not apply here (X is ternary by
+ * construction). */
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+#define M4T_5IN8_XP_ROUTE_TILE(WJ_PTR, ACC) do {                       \
+    uint8x16_t b = vld1q_u8(WJ_PTR);                                    \
+    uint16x8_t lo16 = vshrq_n_u16(                                      \
+        vmulq_n_u16(vmovl_u8(vget_low_u8(b)), 57), 9);                  \
+    uint16x8_t hi16 = vshrq_n_u16(                                      \
+        vmulq_n_u16(vmovl_u8(vget_high_u8(b)), 57), 9);                 \
+    uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));    \
+    uint8x16_t low  = vsubq_u8(b, vmulq_u8(high, nine_v_xp));           \
+    int8x16_t s0 = vqtbl1q_s8(lut_d0_xp, low);                          \
+    int8x16_t s1 = vqtbl1q_s8(lut_d1_xp, low);                          \
+    int8x16_t s2 = vqtbl2q_s8(lut_d2_xp, high);                         \
+    int8x16_t s3 = vqtbl2q_s8(lut_d3_xp, high);                         \
+    int8x16_t s4 = vqtbl2q_s8(lut_d4_xp, high);                         \
+    uint8x16_t pm0 = vceqq_s8(s0, pos_one_xp), nm0 = vceqq_s8(s0, neg_one_xp); \
+    uint8x16_t pm1 = vceqq_s8(s1, pos_one_xp), nm1 = vceqq_s8(s1, neg_one_xp); \
+    uint8x16_t pm2 = vceqq_s8(s2, pos_one_xp), nm2 = vceqq_s8(s2, neg_one_xp); \
+    uint8x16_t pm3 = vceqq_s8(s3, pos_one_xp), nm3 = vceqq_s8(s3, neg_one_xp); \
+    uint8x16_t pm4 = vceqq_s8(s4, pos_one_xp), nm4 = vceqq_s8(s4, neg_one_xp); \
+    int8x16_t d0_diff = vsubq_s8(vandq_s8(xv0, vreinterpretq_s8_u8(pm0)), \
+                                 vandq_s8(xv0, vreinterpretq_s8_u8(nm0))); \
+    int8x16_t d1_diff = vsubq_s8(vandq_s8(xv1, vreinterpretq_s8_u8(pm1)), \
+                                 vandq_s8(xv1, vreinterpretq_s8_u8(nm1))); \
+    int8x16_t d2_diff = vsubq_s8(vandq_s8(xv2, vreinterpretq_s8_u8(pm2)), \
+                                 vandq_s8(xv2, vreinterpretq_s8_u8(nm2))); \
+    int8x16_t d3_diff = vsubq_s8(vandq_s8(xv3, vreinterpretq_s8_u8(pm3)), \
+                                 vandq_s8(xv3, vreinterpretq_s8_u8(nm3))); \
+    int8x16_t d4_diff = vsubq_s8(vandq_s8(xv4, vreinterpretq_s8_u8(pm4)), \
+                                 vandq_s8(xv4, vreinterpretq_s8_u8(nm4))); \
+    (ACC) += (int32_t)vaddlvq_s8(d0_diff)                               \
+          +  (int32_t)vaddlvq_s8(d1_diff)                               \
+          +  (int32_t)vaddlvq_s8(d2_diff)                               \
+          +  (int32_t)vaddlvq_s8(d3_diff)                               \
+          +  (int32_t)vaddlvq_s8(d4_diff);                              \
+} while (0)
+#endif
+
+void m4t_ternary_5in8_matmul_xpacked_bt_route(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    assert(K <= M4T_SDOT_K_MAX_EXACT);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X_packed && W_packed)));
+    assert((const void*)Y != (const void*)X_packed);
+    assert((const void*)Y != (const void*)W_packed);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(m4t_mtfp_t));
+        return;
+    }
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+    int Kp = (K + 4) / 5;
+    int K_aligned = K - (K % 80);
+    int K_padded  = ((K + 79) / 80) * 80;
+    int K5_padded = K_padded / 5;
+    int j_tile_end = N - (N % 4);
+    int kp_tile = Kp - (Kp % 16);
+
+    static const uint8_t POW3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+    const uint8x16_t nine_v_xp = vdupq_n_u8(9);
+    const int8x16_t  pos_one_xp = vdupq_n_s8( 1);
+    const int8x16_t  neg_one_xp = vdupq_n_s8(-1);
+    const int8x16_t  lut_d0_xp = vld1q_s8(M4T_5IN8_LUT_LOW_D0);
+    const int8x16_t  lut_d1_xp = vld1q_s8(M4T_5IN8_LUT_LOW_D1);
+    const int8x16x2_t lut_d2_xp = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D2 + 16),
+    } };
+    const int8x16x2_t lut_d3_xp = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D3 + 16),
+    } };
+    const int8x16x2_t lut_d4_xp = { {
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 +  0),
+        vld1q_s8(M4T_5IN8_LUT_HIGH_D4 + 16),
+    } };
+
+    int alloc_size = K5_padded * 5;
+    int8_t* X_strided = (alloc_size > 0) ? (int8_t*)calloc((size_t)alloc_size, 1) : NULL;
+    if (alloc_size > 0 && !X_strided) return;
+    int8_t* X_d[5];
+    for (int d = 0; d < 5; d++) X_d[d] = X_strided + (size_t)d * K5_padded;
+
+    for (int i = 0; i < M; i++) {
+        const uint8_t* xi_p = X_packed + (size_t)i * Kp;
+
+        /* Decode X_packed[i, :] → 5 stride-aligned arrays. */
+        for (int b = 0; b < kp_tile; b += 16) {
+            uint8x16_t bv = vld1q_u8(xi_p + b);
+            uint16x8_t lo16 = vshrq_n_u16(
+                vmulq_n_u16(vmovl_u8(vget_low_u8(bv)), 57), 9);
+            uint16x8_t hi16 = vshrq_n_u16(
+                vmulq_n_u16(vmovl_u8(vget_high_u8(bv)), 57), 9);
+            uint8x16_t high = vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16));
+            uint8x16_t low  = vsubq_u8(bv, vmulq_u8(high, nine_v_xp));
+            vst1q_s8(X_d[0] + b, vqtbl1q_s8(lut_d0_xp, low));
+            vst1q_s8(X_d[1] + b, vqtbl1q_s8(lut_d1_xp, low));
+            vst1q_s8(X_d[2] + b, vqtbl2q_s8(lut_d2_xp, high));
+            vst1q_s8(X_d[3] + b, vqtbl2q_s8(lut_d3_xp, high));
+            vst1q_s8(X_d[4] + b, vqtbl2q_s8(lut_d4_xp, high));
+        }
+        for (int b = kp_tile; b < Kp; b++) {
+            uint8_t byte = xi_p[b];
+            for (int d = 0; d < 5; d++) {
+                uint8_t u = (uint8_t)((byte / POW3[d]) % 3u);
+                X_d[d][b] = (u == 1u) ? 1 : (u == 2u) ? -1 : 0;
+            }
+        }
+
+        for (int j = 0; j < j_tile_end; j += 4) {
+            const uint8_t* wj0 = W_packed + (size_t)(j + 0) * Kp;
+            const uint8_t* wj1 = W_packed + (size_t)(j + 1) * Kp;
+            const uint8_t* wj2 = W_packed + (size_t)(j + 2) * Kp;
+            const uint8_t* wj3 = W_packed + (size_t)(j + 3) * Kp;
+
+            int32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                M4T_5IN8_XP_ROUTE_TILE(wj0 + k / 5, acc0);
+                M4T_5IN8_XP_ROUTE_TILE(wj1 + k / 5, acc1);
+                M4T_5IN8_XP_ROUTE_TILE(wj2 + k / 5, acc2);
+                M4T_5IN8_XP_ROUTE_TILE(wj3 + k / 5, acc3);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb0[16] = {0}, bb1[16] = {0}, bb2[16] = {0}, bb3[16] = {0};
+                memcpy(bb0, wj0 + byte_off, (size_t)avail);
+                memcpy(bb1, wj1 + byte_off, (size_t)avail);
+                memcpy(bb2, wj2 + byte_off, (size_t)avail);
+                memcpy(bb3, wj3 + byte_off, (size_t)avail);
+                M4T_5IN8_XP_ROUTE_TILE(bb0, acc0);
+                M4T_5IN8_XP_ROUTE_TILE(bb1, acc1);
+                M4T_5IN8_XP_ROUTE_TILE(bb2, acc2);
+                M4T_5IN8_XP_ROUTE_TILE(bb3, acc3);
+            }
+
+            Y[(size_t)i * N + j + 0] = (m4t_mtfp_t)acc0;
+            Y[(size_t)i * N + j + 1] = (m4t_mtfp_t)acc1;
+            Y[(size_t)i * N + j + 2] = (m4t_mtfp_t)acc2;
+            Y[(size_t)i * N + j + 3] = (m4t_mtfp_t)acc3;
+        }
+
+        for (int j = j_tile_end; j < N; j++) {
+            const uint8_t* wj = W_packed + (size_t)j * Kp;
+            int32_t acc = 0;
+
+            for (int k = 0; k < K_aligned; k += 80) {
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+                M4T_5IN8_XP_ROUTE_TILE(wj + k / 5, acc);
+            }
+
+            if (K_padded > K_aligned) {
+                int k = K_aligned;
+                int x_idx = k / 5;
+                int8x16_t xv0 = vld1q_s8(X_d[0] + x_idx);
+                int8x16_t xv1 = vld1q_s8(X_d[1] + x_idx);
+                int8x16_t xv2 = vld1q_s8(X_d[2] + x_idx);
+                int8x16_t xv3 = vld1q_s8(X_d[3] + x_idx);
+                int8x16_t xv4 = vld1q_s8(X_d[4] + x_idx);
+
+                int byte_off = k / 5;
+                int avail = Kp - byte_off;
+                assert(avail >= 1 && avail <= 16);
+                uint8_t bb[16] = {0};
+                memcpy(bb, wj + byte_off, (size_t)avail);
+                M4T_5IN8_XP_ROUTE_TILE(bb, acc);
+            }
+
+            Y[(size_t)i * N + j] = (m4t_mtfp_t)acc;
+        }
+    }
+
+    if (X_strided) free(X_strided);
+#else
+#error "m4t_ternary_5in8_matmul_xpacked_bt_route requires NEON + ARM_FEATURE_DOTPROD; \
+no scalar fallback per project rule."
+#endif
+}
+
+#if M4T_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+#undef M4T_5IN8_XP_ROUTE_TILE
+#endif
+
 /* Scalar reference for the X-packed variant. Test-only. */
 void m4t_ternary_5in8_matmul_xpacked_bt_scalar_ref(
     m4t_mtfp_t* Y,

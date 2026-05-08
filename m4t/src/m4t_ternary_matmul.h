@@ -303,6 +303,31 @@ void m4t_ternary_5in8_matmul_xpacked_bt(
     int M, int K, int N
 );
 
+/* §20 X-packed routing-shaped sibling (V2 of pure-ternary audit).
+ * Same I/O and bit-exact output as m4t_ternary_5in8_matmul_xpacked_bt;
+ * inner compute is dispatch-shaped (mask + select), not multiplicative.
+ *
+ * Architecture compliance per
+ * memory/feedback_pure_ternary_routed_architecture.md (2026-05-08):
+ * pure ternary, routed, non-dense, no binary structures, no scalar ops.
+ *
+ * Both X and W are 5-in-8 packed ternary (decoded values in {-1, 0, +1}).
+ * Because X is decoded to ternary, the X = -128 precondition that
+ * applies to m4t_ternary_5in8_matmul_bt_route is automatically
+ * satisfied — no caller-side range issue exists for this kernel.
+ *
+ * Speed: ~3× slower than m4t_ternary_5in8_matmul_xpacked_bt at
+ * typical BitNet shapes (same dispatch-vs-SDOT trade as V1).
+ *
+ * Preconditions: same shape preconditions as the multiplicative
+ * sibling. */
+void m4t_ternary_5in8_matmul_xpacked_bt_route(
+    m4t_mtfp_t* Y,
+    const uint8_t* X_packed,
+    const uint8_t* W_packed,
+    int M, int K, int N
+);
+
 /* Scalar-only reference oracle for the X-packed variant. Test-only. */
 void m4t_ternary_5in8_matmul_xpacked_bt_scalar_ref(
     m4t_mtfp_t* Y,
