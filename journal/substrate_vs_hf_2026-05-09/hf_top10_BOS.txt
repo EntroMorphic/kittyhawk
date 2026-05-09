@@ -1,0 +1,13 @@
+Single-token forward (input = [128000] = BOS).
+HF top-10 logits, descending:
+  rank  token_id  decoded
+   1       11    ','
+   2      279    ' the'
+   3      311    ' to'
+   4      220    ' '
+   5      304    ' in'
+   6      264    ' a'
+   7      323    ' and'
+   8      369    ' for'
+   9      374    ' is'
+  10      512    '\n'
