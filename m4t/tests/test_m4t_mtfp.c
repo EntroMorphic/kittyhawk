@@ -610,10 +610,16 @@ static void test_bitlinear_scale_bx_aligned(void) {
      * Cover both num signs, several shift_exp ∈ [0, 25] (BitNet practical). */
     int sizes[] = { 4, 16, 64, 256, 2560 };
     struct { int a_bx, x_bx, t_bx; int alpha_m; int absmax_m; } cases[] = {
-        { 0, 0, 0,  100,  100 },     /* shift_exp=0; small */
-        { 1, 1, 1,  500, -500 },     /* shift_exp=1; mixed sign */
+        { 0, 0, 0,  100,  100 },     /* shift_exp=0; single LIMB_DIV_D, d=127 */
+        { 1, 1, 1,  500, -500 },     /* shift_exp=1; single pass, d=381, mixed sign */
         { 4, 5, 5, 1234,  4567 },    /* shift_exp=4 */
         { 8, 10, 6, -7777, 8888 },   /* shift_exp=12 */
+        /* Boundary: shift_exp=15 → all combined, d=1,822,311,189 (max), no /3 iterations. */
+        { 7, 9, 1, 23456, -34567 },  /* shift_exp=15 */
+        /* Boundary: shift_exp=16 → 1 combined pass + 1 /3 iteration. */
+        { 8, 9, 1, -45678, 56789 },  /* shift_exp=16 */
+        /* shift_exp=17 → combined + 2 iterations (multi-iter sanity). */
+        { 8, 10, 1, 12345, -67890 }, /* shift_exp=17 */
         { 12, 13, 5, 30000, -30000 },/* shift_exp=20 */
         { 14, 17, 6, -50000, 50000 },/* shift_exp=25 */
     };
