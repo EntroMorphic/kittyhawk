@@ -1,0 +1,64 @@
+=== factual_capital (ok, match 0/30, sub 13.32s, hf 29.08s) ===
+PROMPT: What is the capital of France?
+SUB:     The capital of France is Paris. It is a city known for its historical significance, romantic atmosphere, and iconic landmarks. Paris is the heart of France
+HF:      
+Answer: Paris. 
+
+Question: What is the capital of France? 
+Answer: Paris. 
+
+Question: What is the capital of France?
+
+=== factual_who (ok, match 0/30, sub 17.76s, hf 22.64s) ===
+PROMPT: Who wrote Hamlet?
+SUB:     The play was written by Shakespeare, who is the author of Hamlet? The play was written by Shakespeare, who is the author of Hamlet?
+HF:      
+Answer: William Shakespeare. 
+
+2. What is the name of the character who is the protagonist of the play Hamlet? 
+Answer: Ham
+
+=== definition_photosynth (ok, match 22/30, sub 16.44s, hf 21.35s) ===
+PROMPT: Photosynthesis is
+SUB:     the process by which plants convert light energy into chemical energy. This process is essential for the survival of plants and also for the production of organic compounds.
+
+HF:      the process by which plants convert light energy into chemical energy. This process is essential for the survival of plants and is responsible for producing oxygen, which is
+
+=== continuation_once (ok, match 2/30, sub 16.51s, hf 21.18s) ===
+PROMPT: Once upon a time
+SUB:    , there was a young girl named Alice. She was a very curious and adventurous girl, always looking for new things to learn and explore. Alice was
+HF:     , in a small town called Willow Creek, there lived a young girl named Lily. Lily was a curious and adventurous girl who loved to explore the world
+
+=== math_simple (ok, match 2/30, sub 16.51s, hf 23.58s) ===
+PROMPT: 12 plus 7 equals
+SUB:     19
+#### 19
+
+Question: The sum of the digits of a positive integer is called its "digit sum." For example, the digit
+HF:      what?
+Answer: 19
+13 plus 8 equals what?
+Answer: 21
+14 plus 9 equals what?
+Answer: 23
+
+=== reasoning_color (ok, match 3/30, sub 19.22s, hf 21.61s) ===
+PROMPT: The color of the sky on a clear day is
+SUB:     blue, but the color of the sky on a cloudy day is gray. The color of the sky on a rainy day is gray, but the color
+HF:      blue because of the scattering of sunlight by the atmosphere. The atmosphere is made up of different gases, including nitrogen and oxygen, which are transparent to sunlight
+
+=== reflective (ok, match 0/30, sub 20.54s, hf 21.11s) ===
+PROMPT: Hypothetically, might reflective recursion be a function of cognition?
+SUB:     How would you explain this?
+
+Solution: 
+Reflective recursion is a concept in cognitive science that describes a process where an individual's thoughts, feelings,
+HF:      If so, what would be the implications for our understanding of the relationship between cognition and the brain? 
+
+Answer: Yes, reflective recursion could be a
+
+=== translate_hello (ok, match 6/30, sub 17.83s, hf 22.68s) ===
+PROMPT: Translate to French: Hello, how are you?
+SUB:     I am a bit confused about the translation of "Hello, how are you?" into French. It's a bit confusing, but I am a bit
+HF:      I am a student at the University of California, Los Angeles. I am a student at the University of California, Los Angeles. I am a student
+
