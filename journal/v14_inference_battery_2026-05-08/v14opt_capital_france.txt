@@ -1,0 +1,7 @@
+label=capital_france
+desc=Capital of France →
+argmax=284
+gen=284 330 7063 1 1665 280 9099 1735 284 330 7063 1 1665 280 9099 1735
+x=-671 -170 -333 547
+logits=-113 16 19 -208
+time_ms=2834

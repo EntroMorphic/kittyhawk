@@ -1,0 +1,7 @@
+label=pos32_no_gen
+desc=p=32 (bench shape)
+argmax=374
+gen=
+x=326 -79 408 200
+logits=637 678 460 363
+time_ms=2962
