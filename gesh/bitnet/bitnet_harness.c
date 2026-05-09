@@ -784,7 +784,7 @@ int main(int argc, char** argv) {
     }
 
     /* Generated tokens accumulator. */
-    int generated_tokens[256];
+    int generated_tokens[2048];
     int n_generated = 0;
 
     /* Phase 2: greedy generation (--gen N). After each forward, take
