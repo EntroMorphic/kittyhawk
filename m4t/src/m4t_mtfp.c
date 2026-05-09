@@ -20,6 +20,7 @@
 #include "m4t_pow3_magic.h"   /* divide-by-3^k magic-multiply table (shift3 NEON path) */
 
 #include <math.h>             /* sqrt/cos/sin — _scalar_ref oracles + RoPE LUT init */
+#include <stdio.h>            /* fprintf — OOM diagnostics in rmsnorm γ rescale */
 #include <stdlib.h>           /* realloc — RoPE LUT lifecycle */
 #include <string.h>
 
@@ -2056,7 +2057,11 @@ void m4t_mtfp_rmsnorm_bx(
     int compute_bx = gamma_bx;
     if (gamma_bx > target_bx) {
         gamma_resc_buf = (m4t_mtfp_t*)malloc((size_t)n * sizeof(m4t_mtfp_t));
-        assert(gamma_resc_buf && "rmsnorm_bx: gamma rescale buffer malloc failed");
+        if (!gamma_resc_buf) {
+            fprintf(stderr, "m4t_mtfp_rmsnorm_bx: malloc(%zu) failed for γ rescale buffer\n",
+                    (size_t)n * sizeof(m4t_mtfp_t));
+            abort();
+        }
         m4t_mtfp_rescale_bx(gamma_resc_buf, gamma, gamma_bx, target_bx, n);
         gamma_use = gamma_resc_buf;
         compute_bx = target_bx;
@@ -2293,7 +2298,11 @@ void m4t_mtfp_rmsnorm_bx_scalar_ref(
     int compute_bx = gamma_bx;
     if (gamma_bx > target_bx) {
         gamma_resc_buf = (m4t_mtfp_t*)malloc((size_t)n * sizeof(m4t_mtfp_t));
-        assert(gamma_resc_buf && "rmsnorm_bx_scalar_ref: malloc failed");
+        if (!gamma_resc_buf) {
+            fprintf(stderr, "m4t_mtfp_rmsnorm_bx_scalar_ref: malloc(%zu) failed\n",
+                    (size_t)n * sizeof(m4t_mtfp_t));
+            abort();
+        }
         m4t_mtfp_rescale_bx(gamma_resc_buf, gamma, gamma_bx, target_bx, n);
         gamma_use = gamma_resc_buf;
         compute_bx = target_bx;
