@@ -1,16 +1,61 @@
 # gesh/bitnet — BitNet b1.58-2B-4T inference on the m4t substrate
 
-Per `journal/bitnet_phase1_*.md`. This is **Phase 1** of the four-phase ternary-ML arc (inference → fine-tune → train-from-scratch → productize). The harness validates that the substrate's kernel surface composes into a real ternary LLM running in its native numeric system.
+A C harness that runs the official Microsoft BitNet b1.58-2B-4T model end-to-end
+in the substrate's native MTFP19 / packed-ternary numeric system. No floating
+point in the runtime kernel path — `bf16` only at weight-conversion time
+(Python helper, runs once per checkpoint).
 
-## What this directory will contain (when work-unit 1 closes)
+This is **Phase 1** of the four-phase ternary-ML arc (inference → fine-tune →
+train-from-scratch → productize). The harness validates that the substrate's
+kernel surface composes into a real ternary LLM.
 
-- **C harness** (`bitnet_harness.c`) — main driver that loads converted BitNet weights, runs forward pass through one or more transformer blocks, dumps per-layer activations to disk for comparison.
-- **Config + data structures** (`bitnet_config.h`, `bitnet_block.{h,c}`) — model dimensions, per-block scratch layouts, weight pointers.
-- **Weight loader** (`bitnet_weights.{h,c}`) — reads the substrate-native binary blob produced by `scripts/convert_weights.py` (Python intermediary).
-- **Stubs for missing primitives** (`bitnet_stubs.{h,c}`) — temporary scalar implementations of rsqrt, RoPE, softmax, A8 quantize/dequantize. Replaced by NEON primitives in work-units 2-5.
-- **Python scripts** (`scripts/`) — weight conversion (HF safetensors → substrate format), HF reference forward pass + activation dump.
+## Status (2026-05-08)
 
-## Architecture (verified per `bitnet_phase1_o1_findings.md`)
+- **Forward pass: 30 layers × any prompt length, KV cache, greedy generation.**
+- **Coherent end-to-end output verified across an 8-prompt battery.** Zero
+  degenerate loops. Token-level divergence from HF bf16 is the expected
+  artifact of greedy decoding under MTFP19 vs bf16 logit ε — both paths
+  produce coherent English. See
+  [`journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md`](../../journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md).
+- **Substrate-vs-HF investigation closed.** A latent silent-saturation bug in
+  `m4t_mtfp_rmsnorm_bx` at `gamma_bx > target_bx` (BitNet's typical regime)
+  collapsed `post_attention_layernorm` outputs by 6.5× and produced
+  degenerate loops; fixed in commit `4d4c917`. See
+  [`journal/substrate_vs_hf_2026-05-09/RESOLVED.md`](../../journal/substrate_vs_hf_2026-05-09/RESOLVED.md).
+- **Two BitLinear paths shipped:**
+  - Default (work-units 1-7): A8 per-token activation quantization + 5-in-8
+    SDOT matmul.
+  - **No-A8 / bit-faithful** (work-unit 8 follow-on): bypasses A8 quantization
+    and runs MTFP19 × packed-ternary matmul (4-in-8 repacked at load time;
+    +496 MB residency). Used during the substrate-vs-HF investigation to
+    isolate quantization noise.
+
+## Files
+
+- `bitnet_harness.c` — main driver: load weights, forward pass over N layers
+  × P positions, optional greedy generation. CLI flags: `--prompt-tokens`,
+  `--positions`, `--gen`, `--dump`, `--token`, `--layers`. Two debug-dump
+  env hooks: `DEBUG_DUMP_OPROJ`, `DEBUG_DUMP_PREPN` (off by default).
+- `bitnet_config.h` — model dimensions (hidden=2560, intermediate=6912, 30
+  layers, GQA 4:1, etc.).
+- `bitnet_weights.{h,c}` — mmaps the substrate-format weights blob produced
+  by `scripts/convert_weights.py`. At load time, repacks ternary weights
+  from 5-in-8 (compact, used by the SDOT BitLinear) to 4-in-8 (used by the
+  MTFP19 × packed-ternary kernel for the no-A8 path).
+- `bitnet_kv_cache.{h,c}` — per-layer K/V cache for incremental decode.
+- `bitnet_stubs.{h,c}` — historical (work-unit 1) scalar stubs for primitives
+  that were later promoted to libm4t (rsqrt, RoPE, softmax, A8 quantize). Now
+  contains only what the harness still calls directly; production paths use
+  libm4t kernels.
+- `scripts/` — Python helpers (run once per checkpoint):
+  - `convert_weights.py` — HF `safetensors` → substrate blob (MTFP19 norms,
+    embeddings, α scales; 5-in-8 ternary weights). Per-tensor `block_exp`
+    chosen to maximize precision without overflowing MTFP19_MAX.
+  - `dump_reference.py` — runs HF's BitNet via `transformers`, captures
+    per-layer activations for the substrate-vs-HF comparison gate.
+  - `inspect_blob.py`, `compare_activations.py`, etc. — diagnostic helpers.
+
+## Architecture (per `bitnet_phase1_o1_findings.md`)
 
 ```
 30 × BitNetDecoderLayer:
@@ -57,47 +102,54 @@ Per `journal/bitnet_phase1_*.md`. This is **Phase 1** of the four-phase ternary-
 | rope_theta | 500000.0 |
 | hidden_act | relu² |
 
-**All BitLinear layers**: ternary weights via absmean rule; A8 (per-token absmax) activation inputs. **No bias** anywhere.
+**All BitLinear layers**: ternary weights via absmean rule; A8 (per-token
+absmax) activation inputs in the default path. **No bias** anywhere.
 
-## Substrate primitives this harness needs
+## Substrate primitives in use
 
-**Already in libm4t:**
-- Ternary @ ternary matmul (`m4t_ternary_5in8_matmul_*` for the four `W_q/W_k/W_v/W_o`, three `W_gate/W_up/W_down` per layer)
-- Cross-exp accumulator (for the residual additions across layers)
-- Pack/unpack 5-in-8 (for weight conversion at load time; activations are A8 not packed)
-- Width conversions (MTFP19 ↔ MTFP4 may be useful for some intermediate buffers; TBD)
-- shift3 (for any positional scaling that surfaces; TBD)
+All NEON-only in production (`feedback_function_over_speed_no_scalar`).
 
-**NEW — added in work-units 2-5:**
-- `m4t_mtfp_rsqrt` — rsqrt for RMSNorm (work-unit 2)
-- `m4t_rope_apply` — RoPE rotation (work-unit 3)
-- `m4t_softmax` — LUT-backed softmax with subtract-max for stability (work-unit 4)
-- A8 family (`m4t_a8_quantize`, `m4t_a8_dequantize`) — per-token absmax quantization (work-unit 5)
+- **Matmul:**
+  - `m4t_ternary_5in8_matmul_xpacked_bt` — A8 BitLinear path (default).
+  - `m4t_mtfp_ternary_matmul_bt_route_i64` — no-A8 bit-faithful path
+    (MTFP19 × packed-ternary, int64 output before α scale).
+- **RMSNorm:** `m4t_mtfp_rmsnorm_bx` (bx-aware variant; pre-rescales γ when
+  `gamma_bx > target_bx`, see header docstring).
+- **BitLinear scale:** `m4t_mtfp_bitlinear_scale_bx` (default), or
+  `m4t_mtfp_bitlinear_scale_no_a8_bx` (no-A8 path; combined-divisor magic
+  to avoid 7%-CPU bottleneck).
+- **Activation:** `m4t_mtfp_relu2_inplace`, `m4t_mtfp_vec_mul_inplace`.
+- **Cross-exp / vec primitives:** `m4t_mtfp_vec_add_inplace`,
+  `m4t_mtfp_rescale_bx`.
+- **Attention:** `m4t_rope_apply_neon`, `m4t_softmax_exp_poly_neon` (V14.G v2),
+  `m4t_mtfp_a8_vec_scale_neon`.
 
-**Stubbed in work-unit 1**: scalar reference implementations of all four "new" primitives, expressed as `static` functions in `bitnet_stubs.c`. The harness calls these via the same signatures the eventual NEON paths will use; substituting the substrate primitives later requires no harness change.
-
-## Work-unit 1 gate
-
-Layer 0 forward pass produces *some* output. Per-layer comparison driver runs (even if the values diverge from HF). The substrate-gap list is concrete: we know exactly which primitives the harness called, with what shapes, and the empirical input ranges (so work-units 2-5 can characterize their LUTs / Newton-Raphson bounds without guessing).
-
-**Out of scope for work-unit 1:**
-- Bit-precision agreement with HF (may differ; that's what work-unit 6 measures)
-- All 30 layers (work-unit 6)
-- KV cache (work-unit 7)
-- Generation loop (work-unit 8)
-- Performance comparison with bitnet.cpp (Phase 1's nice-to-have, not required for the gate)
-
-## Build
-
-This subdirectory is **not** in ctest. It's a consumer-side harness, comparable to the audit binaries — built by the main CMake but invoked manually.
+## Running the harness
 
 ```bash
 cmake --build build --target bitnet_harness
-build/gesh/bitnet/bitnet_harness <weights.bin> <prompt-token-ids>
+
+# Greedy decode 30 tokens after a 15-token prompt:
+./build/gesh/bitnet_harness data/bitnet_b158_2b4t.bin \
+    --prompt-tokens 128000,3923,374,279,6864,315,9822,30 \
+    --gen 30
+
+# BOS-only single forward pass with per-layer activation dump:
+./build/gesh/bitnet_harness data/bitnet_b158_2b4t.bin \
+    --prompt-tokens 128000 --dump /tmp/sub_dump
 ```
+
+The `--dump` output uses the `ACTV2` format documented in
+`scripts/compare_activations.py`. The harness writes to **stderr**, not stdout.
+
+This subdirectory is **not** in ctest. It's a consumer-side harness, comparable
+to the audit binaries — built by the main CMake but invoked manually.
 
 ## Cross-references
 
-- LMM cycle: `journal/bitnet_phase1_{raw,nodes,reflect,synthesize,paper_digest,o1_findings}.md`
-- Source of truth for architecture: `huggingface.co/microsoft/bitnet-b1.58-2B-4T` model card + `config.json` + `transformers/models/bitnet/modeling_bitnet.py`
-- Original paper: arxiv 2504.12285
+- LMM cycle: `journal/bitnet_phase1_*` (raw → nodes → reflect → synthesize → closeout).
+- RMSNorm fix: `journal/substrate_vs_hf_2026-05-09/RESOLVED.md`.
+- End-to-end battery: `journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md`.
+- Source of truth for architecture: `huggingface.co/microsoft/bitnet-b1.58-2B-4T`
+  model card + `config.json` + `transformers/models/bitnet/modeling_bitnet.py`.
+- Original paper: arxiv 2504.12285.

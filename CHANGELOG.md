@@ -4,6 +4,68 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Fixed — RMSNorm `gamma_bx > target_bx` silent saturation (2026-05-08)
+Per `journal/substrate_vs_hf_2026-05-09/RESOLVED.md` (commits `4d4c917`, `8bb78d2`).
+
+`m4t_mtfp_rmsnorm_bx` computed the per-cell `γ × x × inv >> total_shift` at
+gamma_bx scale, clamped to MTFP19_MAX, then rescaled to target_bx. For BitNet's
+`post_attention_layernorm` (gamma_bx=17, target_bx=8), the per-cell intermediate
+reached ~3.8e9 — past MAX_VAL = 5.81e8 — and silently clamped. The subsequent
+÷3^9 hid the clamp by returning values that fit MTFP19 again, but now capped at
+`MAX_VAL/19683 = 29524`, a 6.5× magnitude collapse. ε at layer 0 was 0.41 vs
+fp32 reference; the 80×-per-layer amplification through 30 layers produced
+degenerate generation loops on prompts whose post-attn residuals had any
+meaningful magnitude.
+
+**Fix:** when `gamma_bx > target_bx`, pre-rescale γ to target_bx into a
+malloc'd buffer FIRST, compute per-cell at target_bx, skip the final rescale.
+Saturation now triggers only on genuine output overflow. Applied to both NEON
+and scalar_ref (bit-exact). When `gamma_bx ≤ target_bx`, existing behavior is
+preserved (upscaling at the end can't introduce silent saturation). Layer-0
+post_attn_norm ε dropped 0.41 → 0.0066 (60× improvement, matches Python
+prediction).
+
+Regression test `test_rmsnorm_bx_gamma_gt_target` covers BitNet's full
+`gamma_bx ∈ {16, 17, 18, 21}` range (k = gamma_bx − target_bx ∈ {8, 9, 10, 13}),
+threshold ε > 0.02 (4× safety margin vs measured ~0.005). Red-team remediation
+also hardened the malloc OOM path (`fprintf+abort` instead of an `assert` that
+compiles out under `-DNDEBUG`).
+
+End-to-end battery (`journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md`):
+8 diverse prompts × 30 greedy-decoded tokens, substrate vs HF bf16. **All 8
+prompts produce coherent English; zero degenerate loops.** Mean token agreement
+14.58% with high variance (0%–73%); top-K overlap at BOS = 7/10 with HF.
+
+### Added — Bit-faithful BitLinear path (no-A8) (2026-05-08)
+Per commit `47c7e53`. A second BitLinear kernel that bypasses A8 per-token
+quantization and runs MTFP19 × packed-ternary matmul directly:
+- `m4t_mtfp_ternary_matmul_bt_route_i64` — int64 outputs, no MTFP19 clamp at
+  the matmul boundary.
+- `m4t_mtfp_bitlinear_scale_no_a8_bx` — uint96 multiply (|y_raw| × |α_m|
+  decomposed into 3 × uint32 limbs), combined-divisor magic for `127 × 3^k`
+  divisor.
+- Weight loader (`gesh/bitnet/bitnet_weights.{h,c}`) repacks ternary weights
+  from 5-in-8 (used by SDOT) to 4-in-8 (used by the int32 matmul kernel) at
+  load time. ~496 MB extra residency.
+
+Used during the substrate-vs-HF investigation to isolate whether quantization
+noise was the root cause; concluded the gap was localized to RMSNorm, not
+BitLinear (substrate o_proj output ε = 1.5% vs HF — within reasonable noise).
+
+### Changed — V14.G v2 softmax: NEON-gather LUT (2026-05-07)
+Per commits `4507bc9`, `724abc3`, `5753b5b`, `466e8ff`.
+
+V14.G v1 replaced the softmax exp LUT with a polynomial; this restored speed
+but cost end-to-end inference quality. V14.G v2 keeps the LUT but routes
+lookup through NEON per-lane gather (`vld1q_lane_s32`) — bit-exact vs V13
+quality, NEON throughput. Companion red-team caught a `vshlq_s32` UB
+(shift > 31) in the polynomial branch (`724abc3`); now-removed.
+
+V14.F also landed in this window: profile-driven optimization of
+`m4t_mtfp_bitlinear_scale_bx` via combined-divisor magic divide, dropping CPU
+share from 22% → 7%. Boundary tests for shift_exp ∈ {15, 16, 17} guard the
+magic constant edges.
+
 ### Added — bitnet_phase1 work-unit 1 part 2: Python conversion + reference scripts (2026-05-06)
 Per `journal/bitnet_phase1_*` and `gesh/bitnet/scripts/README.md`. Three Python helpers landed:
 - `inspect.py` — lists tensor names/shapes/dtypes from BitNet's `model.safetensors`. Used to ground the conversion script against actual storage rather than assumed names.

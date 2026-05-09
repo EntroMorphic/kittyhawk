@@ -624,14 +624,29 @@ void m4t_mtfp_rescale_bx(
  *
  * eps_mantissa is interpreted at the SAME scale as the SoS-shifted mean
  * (same contract as the existing m4t_mtfp_rmsnorm) — caller picks a
- * small positive value. */
+ * small positive value.
+ *
+ * gamma_bx vs target_bx (load-bearing — see journal/substrate_vs_hf_2026-05-09/RESOLVED.md):
+ *   When gamma_bx > target_bx, this kernel internally rescales γ DOWN to
+ *   target_bx BEFORE the per-cell γ × x × inv multiply. This is required
+ *   for correctness: at gamma_bx scale the per-cell intermediate can exceed
+ *   M4T_MTFP_MAX_VAL even when the correct output at target_bx fits, and a
+ *   naive compute-then-rescale would silently saturate at the intermediate
+ *   and produce a magnitude-collapsed output (≤ MAX_VAL/3^(gamma_bx−target_bx)).
+ *   Cost: γ loses up to (gamma_bx − target_bx) trits of precision per cell;
+ *   for BitNet's gamma_input_norm at bx=21 → target_bx=8 (k=13), this leaves
+ *   ~17 mantissa bits of headroom, which has been measured to keep ε < 0.01
+ *   vs an fp32 reference. When gamma_bx ≤ target_bx, no pre-rescale; the
+ *   final output is upscaled at the end (no silent-saturation hazard for
+ *   that direction). Allocates an n-element scratch buffer when pre-rescaling. */
 void m4t_mtfp_rmsnorm_bx(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     const m4t_mtfp_t* gamma,
     int x_bx, int gamma_bx, int target_bx,
     m4t_mtfp_t eps_mantissa, int n);
 
-/* Scalar test oracle for m4t_mtfp_rmsnorm_bx (V14.C). Production must not call. */
+/* Scalar test oracle for m4t_mtfp_rmsnorm_bx (V14.C). Production must not call.
+ * Bit-exact vs the NEON path (same pre-rescale logic). */
 void m4t_mtfp_rmsnorm_bx_scalar_ref(
     m4t_mtfp_t* y, const m4t_mtfp_t* x,
     const m4t_mtfp_t* gamma,

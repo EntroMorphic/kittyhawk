@@ -94,6 +94,35 @@ Both have `_scalar_ref` test oracles (`m4t_ternary_5in8_matmul_bt_scalar_ref`, `
 - Batched inference / training → unpacked dot (`m4t_ternary_dot_matmul_bt`); xp/dot ≈ 1.05-1.5×.
 - Storage- or memory-bandwidth-bound → §20-xp (5× X savings × 5× W savings = 25× total bandwidth reduction).
 
+### BitNet inference primitives (`m4t_mtfp.h`) — Phase 2
+
+Driven by the BitNet b1.58-2B-4T inference harness (`gesh/bitnet/`); each
+primitive earned its place by being on the per-token forward path.
+
+- `m4t_mtfp_rmsnorm` / `m4t_mtfp_rmsnorm_bx` — block-int128 SoS, m4t_int32_rsqrt,
+  per-cell γ × x × inv >> total_shift with NEON uint96 multiply-and-shift. The
+  `_bx` variant is bx-aware: when `gamma_bx > target_bx` it pre-rescales γ to
+  target_bx to avoid silent intermediate saturation (per
+  `journal/substrate_vs_hf_2026-05-09/RESOLVED.md`).
+- `m4t_mtfp_softmax` — exp LUT (z ∈ [-30, 0], 4096 cells) + reciprocal-of-sum
+  via `m4t_int32_recip`. V14.G v2 NEON gather restored bit-exactness vs V13.
+- `m4t_a8_quantize` / `m4t_a8_dequantize` — per-tensor absmax + int8 quantize
+  (matches BitNet W1.58A8 spec).
+- `m4t_mtfp_vec_scale` / `m4t_mtfp_bitlinear_scale_bx` — BitLinear output scale
+  (`y · α · activation_absmax / 127`). Combined-divisor magic dropped CPU from
+  22% → 7% (per `journal/v14f_profile_opt_*`).
+- `m4t_mtfp_bitlinear_scale_no_a8_bx` — variant for the bit-faithful path
+  (skip A8 quantize, accept int64 raw matmul outputs).
+- `m4t_mtfp_relu2_inplace`, `m4t_mtfp_vec_mul_inplace` — FFN sub-pieces.
+- `m4t_rope_apply` — RoPE rotation, NEON tile.
+- `m4t_mtfp_rescale_bx` — explicit between-bx rescale (consumer composition;
+  also used internally by `_bx` kernels).
+
+The `_bx` variants accept explicit per-tensor `block_exp` parameters and
+produce output at a caller-chosen `target_bx`, so consumers that store
+weights and activations at different precisions (e.g., BitNet's γ at bx=17–21
+vs activations at bx=8) can compose without manual rescale stitching.
+
 ### Routing primitives (`m4t_route.h`) — Tier 2
 
 Five primitives composing into a k-of-T ternary routing pass:
