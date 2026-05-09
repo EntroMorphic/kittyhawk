@@ -118,7 +118,9 @@ All NEON-only in production (`feedback_function_over_speed_no_scalar`).
 - **BitLinear scale:** `m4t_mtfp_bitlinear_scale_bx` (default), or
   `m4t_mtfp_bitlinear_scale_no_a8_bx` (no-A8 path; combined-divisor magic
   to avoid 7%-CPU bottleneck).
-- **Activation:** `m4t_mtfp_relu2_inplace`, `m4t_mtfp_vec_mul_inplace`.
+- **Activation:** `m4t_mtfp_relu2_inplace_bx`, `m4t_mtfp_elementwise_mul_bx`
+  (both `_bx` variants — divide-before-clamp at int64; non-`_bx` legacy
+  forms are not on the harness path).
 - **Cross-exp / vec primitives:** `m4t_mtfp_vec_add_inplace`,
   `m4t_mtfp_rescale_bx`.
 - **Attention:** `m4t_rope_apply_neon`, `m4t_softmax_exp_poly_neon` (V14.G v2),
