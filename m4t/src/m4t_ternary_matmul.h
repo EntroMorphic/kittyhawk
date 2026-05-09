@@ -97,6 +97,22 @@ void m4t_mtfp_ternary_matmul_bt_route(
     int M, int K, int N
 );
 
+/* Same as m4t_mtfp_ternary_matmul_bt_route but writes int64 accumulator
+ * outputs WITHOUT clamping to MTFP19. Used by bit-faithful BitLinear
+ * inference (no a8 quantization), where the per-cell accumulator can
+ * exceed MTFP19_MAX (up to K × MAX_VAL ≈ 2^40 for K = 6912) and we
+ * preserve full precision into a downstream scale-apply step that
+ * applies α × sign / 3^shift_exp and then clamps.
+ *
+ * Y must be int64[M*N]. Other args identical to the _route variant.
+ * No flags arg — saturation is impossible since we don't clamp. */
+void m4t_mtfp_ternary_matmul_bt_route_i64(
+    int64_t*        Y,
+    const m4t_mtfp_t* X,
+    const uint8_t*  W_packed,
+    int M, int K, int N
+);
+
 /* Scalar-only reference. Same semantics as m4t_mtfp_ternary_matmul_bt
  * above; never dispatches to NEON. Exposed for tests so the bit-exact
  * verification gate has a stable oracle even after productionization

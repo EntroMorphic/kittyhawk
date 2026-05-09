@@ -2783,6 +2783,286 @@ void m4t_mtfp_bitlinear_scale_bx_scalar_ref(
     }
 }
 
+/* Bit-faithful BitLinear scale (no a8 quantization). Input y_raw is int64
+ * (from m4t_mtfp_ternary_matmul_bt_route_i64); multiplier is α only (no
+ * absmax, no /127). Per-cell:
+ *   |prod| = |y_raw_i64| × |α_m|, decomposed as uint96 (3 × uint32 limbs).
+ *   add half = (3^shift_exp)/2 to |prod|.
+ *   long-divide by d_combined = 3^min(shift_exp, 19) (single pass),
+ *     then iterated /3 for max(0, shift_exp - 19) more steps.
+ *   re-sign by sign(y_raw) XOR sign(α), clamp to MTFP19. */
+void m4t_mtfp_bitlinear_scale_no_a8_bx(
+    m4t_mtfp_t* y, const int64_t* y_raw_i64,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    int x_bx, int target_bx,
+    int n)
+{
+    if (n <= 0) return;
+    assert(y && y_raw_i64 && alpha_ptr);
+    assert(alpha_bx + x_bx - target_bx >= 0);
+    assert(alpha_bx + x_bx - target_bx <= 35);
+
+    int64_t alpha_m = (int64_t)(*alpha_ptr);
+    if (alpha_m == 0) {
+        memset(y, 0, (size_t)n * sizeof(m4t_mtfp_t));
+        return;
+    }
+    int shift_exp = alpha_bx + x_bx - target_bx;
+    int64_t den = pow3_i64(shift_exp);
+    int64_t half = den / 2;
+
+#if M4T_HAS_NEON
+    int alpha_neg = (alpha_m < 0);
+    uint32_t abs_alpha = alpha_neg ? (uint32_t)(-alpha_m) : (uint32_t)alpha_m;
+
+    /* Combined divisor for the long-divide. d_combined = 3^min(shift_exp, 19),
+     * which fits uint32 (3^19 ≈ 1.16e9 < 2^31). For shift_exp ≤ 19, single
+     * pass; remaining iterated /3 for shift_exp > 19. */
+    int combined_k = (shift_exp < 19) ? shift_exp : 19;
+    int remaining_3s = shift_exp - combined_k;
+    uint64_t d_combined;
+    if (combined_k == 0) {
+        d_combined = 1;  /* identity, handled specially below */
+    } else {
+        d_combined = (uint64_t)pow3_i64(combined_k);
+    }
+    uint32_t d_combined_u32 = (uint32_t)d_combined;
+    m4t_magic_div_u64_t magic_d;
+    if (combined_k > 0) {
+        magic_d = compute_magic_u64(d_combined);
+    } else {
+        memset(&magic_d, 0, sizeof(magic_d));
+    }
+
+    uint64_t half_u = (uint64_t)half;
+    uint64x2_t halfv = vdupq_n_u64(half_u);
+
+    int32x4_t v_max = vdupq_n_s32( M4T_MTFP_MAX_VAL);
+    int32x4_t v_min = vdupq_n_s32(-(int32_t)M4T_MTFP_MAX_VAL);
+    int32x4_t alpha_sign_v = vdupq_n_s32(alpha_neg ? 0xFFFFFFFFu : 0u);
+
+    int n_aligned = n - (n % 4);
+    int i = 0;
+    for (; i < n_aligned; i += 4) {
+        /* Sign of y_raw per lane (load 2 int64x2 vectors for 4 cells). */
+        int64x2_t y_lo = vld1q_s64(y_raw_i64 + i);
+        int64x2_t y_hi = vld1q_s64(y_raw_i64 + i + 2);
+        uint64x2_t s_lo = vcltzq_s64(y_lo);
+        uint64x2_t s_hi = vcltzq_s64(y_hi);
+        uint64x2_t a_lo = vreinterpretq_u64_s64(vabsq_s64(y_lo));
+        uint64x2_t a_hi = vreinterpretq_u64_s64(vabsq_s64(y_hi));
+
+        /* Process 2 cells at a time. */
+        for (int half_lane = 0; half_lane < 2; half_lane++) {
+            uint64x2_t a = (half_lane == 0) ? a_lo : a_hi;
+            uint64x2_t s = (half_lane == 0) ? s_lo : s_hi;
+
+            /* |y_raw_i64| × |α|: uint64 × uint32 = uint96.
+             * a split into a_lo32, a_hi32. Each multiplied by abs_alpha (uint32). */
+            uint32x2_t a_lo32 = vmovn_u64(a);
+            uint32x2_t a_hi32 = vshrn_n_u64(a, 32);
+            uint64x2_t P_lo = vmull_u32(a_lo32, vdup_n_u32(abs_alpha));
+            uint64x2_t P_hi = vmull_u32(a_hi32, vdup_n_u32(abs_alpha));
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+
+            /* Add half (uint64) to V. */
+            uint64x2_t V_lo64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                          vmovl_u32(L0));
+            uint64x2_t V_lo64_new = vaddq_u64(V_lo64, halfv);
+            uint64x2_t add_carry = vandq_u64(vcltq_u64(V_lo64_new, halfv),
+                                             vdupq_n_u64(1));
+            L0 = vmovn_u64(V_lo64_new);
+            L1 = vshrn_n_u64(V_lo64_new, 32);
+            L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
+
+            /* Combined long-divide by d_combined (single pass). Skip if
+             * shift_exp = 0 (d_combined = 1, identity). */
+            uint64x2_t r = vdupq_n_u64(0);
+            if (combined_k > 0) {
+                #define LIMB_DIV_D_NA8(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_apply_magic_u64x2(val, magic_d); \
+                    uint64x2_t qd  = vmull_u32(vmovn_u64(q), vdup_n_u32(d_combined_u32)); \
+                    r = vsubq_u64(val, qd); \
+                    limb_var = vmovn_u64(q); \
+                } while (0)
+                LIMB_DIV_D_NA8(L2);
+                LIMB_DIV_D_NA8(L1);
+                LIMB_DIV_D_NA8(L0);
+                #undef LIMB_DIV_D_NA8
+            }
+
+            /* Iterated /3 for remaining steps. */
+            for (int k = 0; k < remaining_3s; k++) {
+                r = vdupq_n_u64(0);
+                #define LIMB_DIV_3_NA8(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_unsigned_div3_u64x2(val); \
+                    uint64x2_t q3  = vaddq_u64(vshlq_n_u64(q, 1), q); \
+                    r = vsubq_u64(val, q3); \
+                    limb_var = vmovn_u64(q); \
+                } while (0)
+                LIMB_DIV_3_NA8(L2);
+                LIMB_DIV_3_NA8(L1);
+                LIMB_DIV_3_NA8(L0);
+                #undef LIMB_DIV_3_NA8
+            }
+
+            /* Combine result. If L2 != 0, force saturation (result exceeds uint64). */
+            uint64x2_t result_u64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                              vmovl_u32(L0));
+            uint32x2_t l2_eq0_u32 = vceq_u32(L2, vdup_n_u32(0));
+            uint64x2_t l2_eq0 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(l2_eq0_u32)));
+            uint64x2_t saturated = vbslq_u64(l2_eq0, result_u64,
+                                             vdupq_n_u64(0x7FFFFFFFFFFFFFFFULL));
+            int64x2_t pos = vreinterpretq_s64_u64(saturated);
+            int64x2_t neg = vnegq_s64(pos);
+
+            /* Apply sign mask: sign(y_raw) XOR sign(α). */
+            uint64x2_t sign_pair = veorq_u64(s,
+                vreinterpretq_u64_s64(vmovl_s32(
+                    vreinterpret_s32_u32(half_lane == 0
+                        ? vget_low_u32(vreinterpretq_u32_s32(alpha_sign_v))
+                        : vget_high_u32(vreinterpretq_u32_s32(alpha_sign_v))))));
+            int64x2_t r64_signed = vbslq_s64(sign_pair, neg, pos);
+
+            /* Clamp + narrow → int32x2. */
+            int32x2_t y_pair = vqmovn_s64(r64_signed);
+            if (half_lane == 0) vst1_s32(y + i,     y_pair);
+            else                vst1_s32(y + i + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(y + i);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(y + i, y4);
+    }
+    /* Boundary tile: same processing for n%4 != 0 cells. */
+    if (i < n) {
+        int avail = n - i;
+        int64_t  ybuf_in[4]  = {0, 0, 0, 0};
+        m4t_mtfp_t ybuf_out[4] = {0};
+        for (int j = 0; j < avail; j++) ybuf_in[j] = y_raw_i64[i + j];
+
+        int64x2_t y_lo = vld1q_s64(ybuf_in);
+        int64x2_t y_hi = vld1q_s64(ybuf_in + 2);
+        uint64x2_t s_lo = vcltzq_s64(y_lo);
+        uint64x2_t s_hi = vcltzq_s64(y_hi);
+        uint64x2_t a_lo = vreinterpretq_u64_s64(vabsq_s64(y_lo));
+        uint64x2_t a_hi = vreinterpretq_u64_s64(vabsq_s64(y_hi));
+        for (int half_lane = 0; half_lane < 2; half_lane++) {
+            uint64x2_t a = (half_lane == 0) ? a_lo : a_hi;
+            uint64x2_t s = (half_lane == 0) ? s_lo : s_hi;
+            uint32x2_t a_lo32 = vmovn_u64(a);
+            uint32x2_t a_hi32 = vshrn_n_u64(a, 32);
+            uint64x2_t P_lo = vmull_u32(a_lo32, vdup_n_u32(abs_alpha));
+            uint64x2_t P_hi = vmull_u32(a_hi32, vdup_n_u32(abs_alpha));
+            uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
+            uint32x2_t L0 = vmovn_u64(P_lo);
+            uint64x2_t mid = vaddq_u64(vshrq_n_u64(P_lo, 32),
+                                       vandq_u64(P_hi, mask32));
+            uint32x2_t L1 = vmovn_u64(mid);
+            uint32x2_t L2 = vmovn_u64(vaddq_u64(vshrq_n_u64(P_hi, 32),
+                                                 vshrq_n_u64(mid, 32)));
+            uint64x2_t V_lo64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                          vmovl_u32(L0));
+            uint64x2_t V_lo64_new = vaddq_u64(V_lo64, halfv);
+            uint64x2_t add_carry = vandq_u64(vcltq_u64(V_lo64_new, halfv),
+                                             vdupq_n_u64(1));
+            L0 = vmovn_u64(V_lo64_new);
+            L1 = vshrn_n_u64(V_lo64_new, 32);
+            L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
+
+            uint64x2_t r = vdupq_n_u64(0);
+            if (combined_k > 0) {
+                #define LIMB_DIV_D_NA8T(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_apply_magic_u64x2(val, magic_d); \
+                    uint64x2_t qd  = vmull_u32(vmovn_u64(q), vdup_n_u32(d_combined_u32)); \
+                    r = vsubq_u64(val, qd); \
+                    limb_var = vmovn_u64(q); \
+                } while (0)
+                LIMB_DIV_D_NA8T(L2);
+                LIMB_DIV_D_NA8T(L1);
+                LIMB_DIV_D_NA8T(L0);
+                #undef LIMB_DIV_D_NA8T
+            }
+            for (int k = 0; k < remaining_3s; k++) {
+                r = vdupq_n_u64(0);
+                #define LIMB_DIV_3_NA8T(limb_var) do { \
+                    uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
+                    uint64x2_t q   = neon_unsigned_div3_u64x2(val); \
+                    uint64x2_t q3  = vaddq_u64(vshlq_n_u64(q, 1), q); \
+                    r = vsubq_u64(val, q3); \
+                    limb_var = vmovn_u64(q); \
+                } while (0)
+                LIMB_DIV_3_NA8T(L2);
+                LIMB_DIV_3_NA8T(L1);
+                LIMB_DIV_3_NA8T(L0);
+                #undef LIMB_DIV_3_NA8T
+            }
+            uint64x2_t result_u64 = vorrq_u64(vshlq_n_u64(vmovl_u32(L1), 32),
+                                              vmovl_u32(L0));
+            uint32x2_t l2_eq0_u32 = vceq_u32(L2, vdup_n_u32(0));
+            uint64x2_t l2_eq0 = vreinterpretq_u64_s64(
+                vmovl_s32(vreinterpret_s32_u32(l2_eq0_u32)));
+            uint64x2_t saturated = vbslq_u64(l2_eq0, result_u64,
+                                             vdupq_n_u64(0x7FFFFFFFFFFFFFFFULL));
+            int64x2_t pos = vreinterpretq_s64_u64(saturated);
+            int64x2_t neg = vnegq_s64(pos);
+            uint64x2_t sign_pair = veorq_u64(s,
+                vreinterpretq_u64_s64(vmovl_s32(
+                    vreinterpret_s32_u32(half_lane == 0
+                        ? vget_low_u32(vreinterpretq_u32_s32(alpha_sign_v))
+                        : vget_high_u32(vreinterpretq_u32_s32(alpha_sign_v))))));
+            int64x2_t r64_signed = vbslq_s64(sign_pair, neg, pos);
+            int32x2_t y_pair = vqmovn_s64(r64_signed);
+            if (half_lane == 0) vst1_s32(ybuf_out,     y_pair);
+            else                vst1_s32(ybuf_out + 2, y_pair);
+        }
+        int32x4_t y4 = vld1q_s32(ybuf_out);
+        y4 = vminq_s32(y4, v_max);
+        y4 = vmaxq_s32(y4, v_min);
+        vst1q_s32(ybuf_out, y4);
+        for (int j = 0; j < avail; j++) y[i + j] = ybuf_out[j];
+    }
+#else
+#error "m4t_mtfp_bitlinear_scale_no_a8_bx requires NEON; no scalar fallback per project rule."
+#endif
+}
+
+void m4t_mtfp_bitlinear_scale_no_a8_bx_scalar_ref(
+    m4t_mtfp_t* y, const int64_t* y_raw_i64,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    int x_bx, int target_bx,
+    int n)
+{
+    if (n <= 0) return;
+    assert(y && y_raw_i64 && alpha_ptr);
+    int64_t alpha_m = (int64_t)(*alpha_ptr);
+    if (alpha_m == 0) { memset(y, 0, (size_t)n * sizeof(m4t_mtfp_t)); return; }
+    int shift_exp = alpha_bx + x_bx - target_bx;
+    int64_t den = pow3_i64(shift_exp);
+    __int128 half = (__int128)den / 2;
+    for (int i = 0; i < n; i++) {
+        __int128 prod = (__int128)y_raw_i64[i] * (__int128)alpha_m;
+        __int128 r;
+        if (prod >= 0) r = (prod + half) / den;
+        else           r = (prod - half) / den;
+        int64_t r64;
+        if (r >  (__int128)0x7FFFFFFFFFFFFFFFLL) r64 =  0x7FFFFFFFFFFFFFFFLL;
+        else if (r < -(__int128)0x7FFFFFFFFFFFFFFFLL) r64 = -0x7FFFFFFFFFFFFFFFLL;
+        else r64 = (int64_t)r;
+        y[i] = m4t_mtfp_clamp64(r64);
+    }
+}
+
 /* ── ReLU² + element-wise multiply ─────────────────────────────────────
  *
  * Pure-int. Saturating clamp on output (squared magnitudes exceed

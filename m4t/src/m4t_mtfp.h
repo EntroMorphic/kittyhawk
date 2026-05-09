@@ -693,6 +693,31 @@ void m4t_mtfp_bitlinear_scale_bx_scalar_ref(
     m4t_mtfp_t absmax_m, int x_bx, int target_bx,
     int n);
 
+/* Bit-faithful BitLinear scale apply (no a8 quantization).
+ *
+ *   y_m_target = y_raw_i64 × α_m / 3^(α_bx + x_bx - target_bx)
+ *
+ * y_raw_i64 comes from m4t_mtfp_ternary_matmul_bt_route_i64 (int64,
+ * unclamped int32 × ternary sum). |y_raw_i64| ≤ K × MAX_VAL ≈ 2^40
+ * for K ≤ 6912. Multiplied by α (int32 mantissa), the int128 product
+ * is decomposed as uint96 (3 × uint32 limbs) like V14.F. Sign is
+ * sign(y_raw_i64) XOR sign(α_m). Long-divided by 3^shift_exp using
+ * the combined-divisor magic; for shift_exp ≤ 19 single pass.
+ *
+ * Constraint: α_bx + x_bx - target_bx ≤ 35. */
+void m4t_mtfp_bitlinear_scale_no_a8_bx(
+    m4t_mtfp_t* y, const int64_t* y_raw_i64,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    int x_bx, int target_bx,
+    int n);
+
+/* Scalar test oracle. Production must not call. */
+void m4t_mtfp_bitlinear_scale_no_a8_bx_scalar_ref(
+    m4t_mtfp_t* y, const int64_t* y_raw_i64,
+    const m4t_mtfp_t* alpha_ptr, int alpha_bx,
+    int x_bx, int target_bx,
+    int n);
+
 /* ── ReLU² ──────────────────────────────────────────────────────────────
  *
  * In-place: x[i] = (max(0, x[i]))². Used by BitNet's FFN gated path.

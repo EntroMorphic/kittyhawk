@@ -33,6 +33,14 @@ typedef struct {
     /* Per-tensor block exponents (read at load time; pointer into mmap). */
     const int32_t*  block_exps;
     int32_t         n_tensors;
+    /* Re-packed weights for the bit-faithful BitLinear path (V14.no-a8).
+     * Source weights in the blob are 5-in-8 packed (compact base-3 for
+     * SDOT path); the int32×ternary matmul kernel uses 4-in-8 (2-bit)
+     * packing. This buffer holds the re-packed copies; weight pointers
+     * in bitnet_weights_t are remapped to point in here. NULL if not
+     * re-packed. */
+    void*   repacked_buffer;
+    size_t  repacked_size;
 } bitnet_weights_loaded_t;
 
 /* Load a weights blob. Populates `weights` with pointers into the

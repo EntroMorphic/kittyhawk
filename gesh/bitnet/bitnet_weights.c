@@ -12,6 +12,8 @@
  */
 
 #include "bitnet_weights.h"
+#include "bitnet_config.h"
+#include "../../m4t/src/m4t_trit_pack.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -194,11 +196,86 @@ int bitnet_weights_load(
         bitnet_weights_unload(handle); return 9;
     }
 
+    /* Re-pack ternary weights from 5-in-8 (compact base-3, source format)
+     * into 4-in-8 (2-bit-per-trit, target format) for the bit-faithful
+     * BitLinear path. The int32×ternary kernel
+     * `m4t_mtfp_ternary_matmul_bt_route_i64` consumes 4-in-8.
+     *
+     * Memory cost: ~+25% per ternary tensor. With 7 weights × 30 layers,
+     * total repack ≈ 500 MB (vs ~400 MB for the 5-in-8 originals). */
+    {
+        static const struct { int M; int K; } weight_dims[7] = {
+            { BITNET_HIDDEN_SIZE,       BITNET_HIDDEN_SIZE       },  /* W_q */
+            { BITNET_KV_PROJ_DIM,       BITNET_HIDDEN_SIZE       },  /* W_k */
+            { BITNET_KV_PROJ_DIM,       BITNET_HIDDEN_SIZE       },  /* W_v */
+            { BITNET_HIDDEN_SIZE,       BITNET_HIDDEN_SIZE       },  /* W_o */
+            { BITNET_INTERMEDIATE_SIZE, BITNET_HIDDEN_SIZE       },  /* W_gate */
+            { BITNET_INTERMEDIATE_SIZE, BITNET_HIDDEN_SIZE       },  /* W_up */
+            { BITNET_HIDDEN_SIZE,       BITNET_INTERMEDIATE_SIZE },  /* W_down */
+        };
+        size_t total = 0;
+        for (int slot = 0; slot < 7; slot++) {
+            int M = weight_dims[slot].M, K = weight_dims[slot].K;
+            size_t per_row_bytes_4in8 = (size_t)((K + 3) / 4);
+            total += (size_t)M * per_row_bytes_4in8;
+        }
+        total *= (size_t)layers_present;
+        handle->repacked_buffer = malloc(total);
+        if (!handle->repacked_buffer) {
+            fprintf(stderr, "[bitnet_weights] could not allocate %zu bytes for repack\n", total);
+            bitnet_weights_unload(handle); return 10;
+        }
+        handle->repacked_size = total;
+        size_t scratch_n = BITNET_INTERMEDIATE_SIZE;  /* worst-case K */
+        m4t_trit_t* scratch = (m4t_trit_t*)malloc(scratch_n);
+        if (!scratch) {
+            fprintf(stderr, "[bitnet_weights] scratch alloc failed\n");
+            bitnet_weights_unload(handle); return 11;
+        }
+        uint8_t* dst = (uint8_t*)handle->repacked_buffer;
+        for (int l = 0; l < layers_present; l++) {
+            bitnet_layer_weights_t* lw = &weights->layers[l];
+            const uint8_t* src_ptrs[7] = {
+                lw->w_q, lw->w_k, lw->w_v, lw->w_o,
+                lw->w_gate, lw->w_up, lw->w_down
+            };
+            for (int slot = 0; slot < 7; slot++) {
+                int M = weight_dims[slot].M, K = weight_dims[slot].K;
+                const uint8_t* src = src_ptrs[slot];
+                size_t src_per_row = (size_t)((K + 4) / 5);
+                size_t dst_per_row = (size_t)((K + 3) / 4);
+                uint8_t* slot_dst = dst;
+                for (int m = 0; m < M; m++) {
+                    m4t_unpack_trits_5in8_1d(scratch, src + (size_t)m * src_per_row, K);
+                    m4t_pack_trits_1d(dst + (size_t)m * dst_per_row, scratch, K);
+                }
+                /* Update layer's pointer to the repacked location. */
+                switch (slot) {
+                    case 0: lw->w_q    = slot_dst; break;
+                    case 1: lw->w_k    = slot_dst; break;
+                    case 2: lw->w_v    = slot_dst; break;
+                    case 3: lw->w_o    = slot_dst; break;
+                    case 4: lw->w_gate = slot_dst; break;
+                    case 5: lw->w_up   = slot_dst; break;
+                    case 6: lw->w_down = slot_dst; break;
+                }
+                dst += (size_t)M * dst_per_row;
+            }
+        }
+        free(scratch);
+        fprintf(stderr, "[bitnet_weights] re-packed ternary weights to 4-in-8 "
+                "(%zu MB) for bit-faithful BitLinear path\n",
+                (size_t)(total / (1024*1024)));
+    }
+
     return 0;
     #undef TENSOR_PTR
 }
 
 void bitnet_weights_unload(bitnet_weights_loaded_t* handle) {
+    if (handle->repacked_buffer) {
+        free(handle->repacked_buffer);
+    }
     if (handle->base && handle->base != MAP_FAILED) {
         munmap(handle->base, handle->size);
     }

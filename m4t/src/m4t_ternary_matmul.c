@@ -615,6 +615,40 @@ void m4t_mtfp_ternary_matmul_bt_route(
 #endif
 }
 
+/* Bit-faithful int64-output variant. Same per-cell math (ternary_dot_route)
+ * but stores raw int64 accumulator without MTFP19 clamp. Used by the
+ * no-a8 BitLinear path where the accumulator carries through to a
+ * scale-apply (α × sign / 3^shift_exp) before the final MTFP19 clamp. */
+void m4t_mtfp_ternary_matmul_bt_route_i64(
+    int64_t* Y, const m4t_mtfp_t* X, const uint8_t* W_packed,
+    int M, int K, int N)
+{
+    assert(M >= 0 && K >= 0 && N >= 0);
+    if (M == 0 || N == 0) return;
+    assert(Y && (K == 0 || (X && W_packed)));
+    assert((const void*)Y != (const void*)X);
+    assert((const void*)Y != (const void*)W_packed);
+
+    if (K == 0) {
+        memset(Y, 0, (size_t)M * (size_t)N * sizeof(int64_t));
+        return;
+    }
+
+    int Kp = M4T_TRIT_PACKED_BYTES(K);
+
+#if M4T_HAS_NEON
+    for (int i = 0; i < M; i++) {
+        const m4t_mtfp_t* X_row = X + (size_t)i * K;
+        int64_t*          Y_row = Y + (size_t)i * N;
+        for (int j = 0; j < N; j++) {
+            Y_row[j] = ternary_dot_route(X_row, W_packed + (size_t)j * Kp, K);
+        }
+    }
+#else
+#error "m4t_mtfp_ternary_matmul_bt_route_i64 requires NEON; no scalar fallback per project rule."
+#endif
+}
+
 /* Scalar-only reference. Same M·N outer loop; uses ternary_dot_scalar
  * for every cell regardless of M4T_HAS_NEON. Test-only oracle for
  * bit-exact verification gates. Per ternary_mac_routing T-G2. */
