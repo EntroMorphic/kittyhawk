@@ -2046,6 +2046,21 @@ void m4t_mtfp_rmsnorm_bx(
     if (n == 0) return;
     assert(y && x && gamma);
     (void)x_bx;
+    /* When gamma_bx > target_bx: pre-rescale γ to target_bx so per-cell
+     * intermediate is at target_bx scale (avoiding silent saturation when
+     * γ_real × normalized_x at gamma_bx exceeds MTFP19_MAX even though the
+     * correct output at target_bx fits). When gamma_bx ≤ target_bx: keep
+     * existing behavior (per-cell at gamma_bx, then upscale at end). */
+    m4t_mtfp_t* gamma_resc_buf = NULL;
+    const m4t_mtfp_t* gamma_use = gamma;
+    int compute_bx = gamma_bx;
+    if (gamma_bx > target_bx) {
+        gamma_resc_buf = (m4t_mtfp_t*)malloc((size_t)n * sizeof(m4t_mtfp_t));
+        assert(gamma_resc_buf && "rmsnorm_bx: gamma rescale buffer malloc failed");
+        m4t_mtfp_rescale_bx(gamma_resc_buf, gamma, gamma_bx, target_bx, n);
+        gamma_use = gamma_resc_buf;
+        compute_bx = target_bx;
+    }
 #if M4T_HAS_NEON
     /* Stage 1: NEON SoS with int128-via-carry-tracking. */
     int64x2_t acc_lo_lo = vdupq_n_s64(0);
@@ -2114,7 +2129,7 @@ void m4t_mtfp_rmsnorm_bx(
 
     i = 0;
     for (; i < n_aligned; i += 4) {
-        int32x4_t gv = vld1q_s32(gamma + i);
+        int32x4_t gv = vld1q_s32(gamma_use + i);
         int32x4_t xv = vld1q_s32(x + i);
         /* gx = γ[i] * x[i] as int64x2, two halves of the int32x4 input. */
         int64x2_t gx_lo = vmull_s32(vget_low_s32(gv),  vget_low_s32(xv));
@@ -2195,7 +2210,7 @@ void m4t_mtfp_rmsnorm_bx(
     if (i < n) {
         int avail = n - i;
         m4t_mtfp_t gbuf[4] = {0}, xbuf[4] = {0}, ybuf[4] = {0};
-        for (int j = 0; j < avail; j++) { gbuf[j] = gamma[i + j]; xbuf[j] = x[i + j]; }
+        for (int j = 0; j < avail; j++) { gbuf[j] = gamma_use[i + j]; xbuf[j] = x[i + j]; }
         int32x4_t gv = vld1q_s32(gbuf);
         int32x4_t xv = vld1q_s32(xbuf);
         int64x2_t gx_lo = vmull_s32(vget_low_s32(gv),  vget_low_s32(xv));
@@ -2249,13 +2264,16 @@ void m4t_mtfp_rmsnorm_bx(
         for (int j = 0; j < avail; j++) y[i + j] = ybuf[j];
     }
 
-    /* Rescale gamma_bx → target_bx (existing function). */
-    if (gamma_bx != target_bx) {
-        m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
+    /* Rescale compute_bx → target_bx. When gamma_bx > target_bx we already
+     * computed at target_bx (compute_bx == target_bx) — no rescale. When
+     * gamma_bx < target_bx, compute_bx == gamma_bx and we upscale here. */
+    if (compute_bx != target_bx) {
+        m4t_mtfp_rescale_bx(y, y, compute_bx, target_bx, n);
     }
 #else
 #error "m4t_mtfp_rmsnorm_bx requires NEON; no scalar fallback per project rule."
 #endif
+    free(gamma_resc_buf);
 }
 
 void m4t_mtfp_rmsnorm_bx_scalar_ref(
@@ -2268,6 +2286,18 @@ void m4t_mtfp_rmsnorm_bx_scalar_ref(
     if (n == 0) return;
     assert(y && x && gamma);
     (void)x_bx;
+    /* See m4t_mtfp_rmsnorm_bx for why we pre-rescale γ when gamma_bx >
+     * target_bx (avoid silent per-cell saturation at gamma_bx scale). */
+    m4t_mtfp_t* gamma_resc_buf = NULL;
+    const m4t_mtfp_t* gamma_use = gamma;
+    int compute_bx = gamma_bx;
+    if (gamma_bx > target_bx) {
+        gamma_resc_buf = (m4t_mtfp_t*)malloc((size_t)n * sizeof(m4t_mtfp_t));
+        assert(gamma_resc_buf && "rmsnorm_bx_scalar_ref: malloc failed");
+        m4t_mtfp_rescale_bx(gamma_resc_buf, gamma, gamma_bx, target_bx, n);
+        gamma_use = gamma_resc_buf;
+        compute_bx = target_bx;
+    }
     __int128 sum_sq = 0;
     for (int i = 0; i < n; i++) {
         int64_t xv = (int64_t)x[i];
@@ -2285,13 +2315,14 @@ void m4t_mtfp_rmsnorm_bx_scalar_ref(
     m4t_mtfp_t inv = m4t_int32_rsqrt((m4t_mtfp_t)mean_passed);
     int total_shift = 30 + extra_k;
     for (int i = 0; i < n; i++) {
-        __int128 prod = (__int128)gamma[i] * (__int128)x[i] * (__int128)inv;
+        __int128 prod = (__int128)gamma_use[i] * (__int128)x[i] * (__int128)inv;
         int64_t scaled = (int64_t)(prod >> total_shift);
         y[i] = m4t_mtfp_clamp64(scaled);
     }
-    if (gamma_bx != target_bx) {
-        m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);
+    if (compute_bx != target_bx) {
+        m4t_mtfp_rescale_bx(y, y, compute_bx, target_bx, n);
     }
+    free(gamma_resc_buf);
 }
 
 /* V14.D: NEON relu²_bx. ReLU + square (vmull_s32) + add half + iterated

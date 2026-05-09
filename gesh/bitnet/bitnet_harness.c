@@ -400,11 +400,30 @@ void bitnet_forward_block(
         memcpy(s->x, s->attn_sub_norm, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
 
+    /* DEBUG: dump o_proj output (pre-residual-add) for layer-by-layer
+     * substrate-vs-HF localization. Off by default; set DEBUG_DUMP_OPROJ env. */
+    {
+        const char* dbg = getenv("DEBUG_DUMP_OPROJ");
+        if (dbg && layer_idx == 0) {
+            FILE* f = fopen(dbg, "wb");
+            if (f) { fwrite(s->x, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f); fclose(f); }
+        }
+    }
+
     /* x = residual + x (V13.A: NEON via libm4t's saturating-add
      * primitive — same MTFP19 clamp semantics as the previous scalar
      * loop, no scalar production code per condition (5) of the
      * pure-ternary directive). */
     m4t_mtfp_vec_add_inplace(s->x, s->residual, BITNET_HIDDEN_SIZE);
+
+    /* DEBUG: dump post-residual-add (= input to post_attn_norm). */
+    {
+        const char* dbg = getenv("DEBUG_DUMP_PREPN");
+        if (dbg && layer_idx == 0) {
+            FILE* f = fopen(dbg, "wb");
+            if (f) { fwrite(s->x, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f); fclose(f); }
+        }
+    }
 
     /* ── FFN sub-block ────────────────────────────────────────────── */
 

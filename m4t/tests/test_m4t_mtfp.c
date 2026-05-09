@@ -12,6 +12,7 @@
 #include "m4t_mtfp.h"
 #include "m4t_types.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -580,6 +581,67 @@ static void test_rmsnorm_bx_unaligned(void) {
     }
 }
 
+/* Regression: gamma_bx > target_bx where per-cell intermediate at gamma_bx
+ * would exceed MTFP19_MAX even though the correct output at target_bx fits.
+ * Old kernel saturated the intermediate then divided down, silently producing
+ * a wrong answer (output magnitude clamped to MAX_VAL / 3^(gamma_bx-target_bx)).
+ * Verified via fp32-reference: ε must drop dramatically. */
+static void test_rmsnorm_bx_gamma_gt_target(void) {
+    int n = 256;
+    int gamma_bx = 17;   /* mirrors substrate's gamma_post_attn_norm scale */
+    int x_bx = 8;
+    int target_bx = 8;
+    m4t_mtfp_t* x = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* g = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* y  = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    m4t_mtfp_t* yr = (m4t_mtfp_t*)calloc((size_t)n, sizeof(m4t_mtfp_t));
+    /* x at scale 3^8 = 6561; magnitudes around ±15K are typical for BitNet. */
+    for (int i = 0; i < n; i++) {
+        x[i] = (m4t_mtfp_t)((i * 547) % 30000 - 15000);
+    }
+    /* γ at scale 3^17; max ~2.0 in real → m up to ~2.6e8 (< MAX_VAL = 5.81e8).
+     * γ_real × normalized_x at gamma_bx scale would exceed MAX_VAL → old
+     * kernel's intermediate clamp triggered. */
+    for (int i = 0; i < n; i++) {
+        double g_real = 0.7 + 1.5 * ((i * 311) % 1000) / 1000.0;  /* 0.7..2.2 */
+        g[i] = (m4t_mtfp_t)(g_real * 129140163.0);  /* 3^17 */
+    }
+    m4t_mtfp_rmsnorm_bx          (y,  x, g, x_bx, gamma_bx, target_bx, 1, n);
+    m4t_mtfp_rmsnorm_bx_scalar_ref(yr, x, g, x_bx, gamma_bx, target_bx, 1, n);
+    /* NEON ↔ scalar_ref bit-exact. */
+    for (int i = 0; i < n; i++) {
+        if (y[i] != yr[i]) {
+            FAIL("rmsnorm_bx gamma>target i=%d: NEON=%d ref=%d", i, (int)y[i], (int)yr[i]);
+            break;
+        }
+    }
+    /* Compute fp32 reference. y_real[i] = g_real[i] * x_real[i] / sqrt(mean(x_real²)). */
+    double sum_sq_real = 0.0;
+    for (int i = 0; i < n; i++) {
+        double xr = (double)x[i] / 6561.0;  /* 3^8 */
+        sum_sq_real += xr * xr;
+    }
+    double inv_real = 1.0 / sqrt(sum_sq_real / n);
+    double err_sq = 0.0, ref_sq = 0.0;
+    for (int i = 0; i < n; i++) {
+        double xr = (double)x[i] / 6561.0;
+        double gr = (double)g[i] / 129140163.0;
+        double yref_real = gr * xr * inv_real;
+        double yref_m = yref_real * 6561.0;  /* at target_bx = 8 */
+        double yk_m = (double)y[i];
+        err_sq += (yk_m - yref_m) * (yk_m - yref_m);
+        ref_sq += yref_m * yref_m;
+    }
+    double eps = sqrt(err_sq / ref_sq);
+    /* With pre-rescale fix, ε ~ 0.005 (rounding noise from γ rescale + fixed-point).
+     * Pre-fix, ε > 0.4 (saturation at gamma_bx then rescale). Threshold 0.05
+     * gives a wide margin while still catching regression. */
+    if (eps > 0.05) {
+        FAIL("rmsnorm_bx gamma>target eps too large: %g", eps);
+    }
+    free(x); free(g); free(y); free(yr);
+}
+
 static void test_rmsnorm_bx_extreme(void) {
     /* MAX_VAL inputs — exercises the SoS overflow tracking and the
      * total_shift varying due to large mean. */
@@ -874,6 +936,7 @@ int main(void) {
 
     test_rmsnorm_bx_aligned();
     test_rmsnorm_bx_unaligned();
+    test_rmsnorm_bx_gamma_gt_target();
     test_rmsnorm_bx_extreme();
 
     if (failures) {
