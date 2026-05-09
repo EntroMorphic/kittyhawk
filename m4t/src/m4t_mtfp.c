@@ -383,11 +383,12 @@ static inline uint64x2_t neon_mulhi_u64x2(uint64x2_t x, uint64_t m_const) {
 }
 
 /* Apply a precomputed unsigned divide-by-constant magic to a uint64x2_t.
- * Bit-exact floor(x / d) for x ∈ [0, 2^64).
- * NOTE: the +x extension formula here is incomplete for some magic shapes;
- * V14.F uses the specialized neon_unsigned_div127_u64x2_le39 below for /127
- * because it's faster and correct over the bounded uint39 range we hit. */
-__attribute__((unused))
+ * Bit-exact floor(x / d) for x ∈ [0, 2^64). Magic from compute_magic_u64.
+ *
+ * Granlund-Möller formulas:
+ *   NO_ADD: q = mulhi(x, m) >> sh         (where m = ceil(2^(64+sh)/d) ≤ 2^64)
+ *   ADD:    q = (mulhi(x, m) + ((x - mulhi(x, m)) >> 1)) >> (sh-1)
+ *           where m = ceil(2^(64+sh)/d) - 2^64 (the low 64 bits when m_full > 2^64). */
 static inline uint64x2_t neon_apply_magic_u64x2(uint64x2_t x, m4t_magic_div_u64_t md) {
     uint64x2_t mh = neon_mulhi_u64x2(x, md.m);
     if (md.extension) {
@@ -406,7 +407,11 @@ static inline uint64x2_t neon_apply_magic_u64x2(uint64x2_t x, m4t_magic_div_u64_
  * Bit-exact vs floor(val/127) for val ∈ [0, 2^39).
  *
  * Sized for the long-division limb step where val = r*2^32 + limb,
- * r < 127, limb ≤ uint32 → val < 128*2^32 = 2^39. */
+ * r < 127, limb ≤ uint32 → val < 128*2^32 = 2^39.
+ *
+ * No longer used by V14.F (superseded by combined-divisor magic) but
+ * kept for reference / potential future callers. */
+__attribute__((unused))
 static inline uint64x2_t neon_unsigned_div127_u64x2_le39(uint64x2_t val) {
     /* m = 554084599825 = 0x80FFFFFE81 ... actually:
      *   m_hi32 = 554084599825 >> 32 = 129
@@ -438,16 +443,25 @@ static inline uint64x2_t neon_unsigned_div127_u64x2_le39(uint64x2_t val) {
 #endif /* M4T_HAS_NEON */
 
 /* Compute (m, sh, extension) for unsigned div by runtime d > 1.
- * Granlund-Möller / Hacker's Delight 10.10. Run once per call (scalar setup). */
+ * Granlund-Möller. Runs once per call (scalar setup; allowed by project rule).
+ *
+ *   sh = ceil(log2(d))
+ *   m_full = ceil(2^(64+sh) / d).
+ *   if m_full ≤ 2^64: NO_ADD path.  m = m_full, q = mulhi(x, m) >> sh.
+ *   else:             ADD path.     m = m_full - 2^64,
+ *                                   q = (mulhi(x, m) + ((x - mulhi(x, m)) >> 1)) >> (sh-1).
+ *
+ * Bit-exact for any uint64 input. Caller must reject d that's a power of 2. */
 static m4t_magic_div_u64_t compute_magic_u64(uint64_t d) {
     assert(d > 1);
+    assert((d & (d - 1)) != 0);
     int sh = 64 - __builtin_clzll(d - 1);  /* ceil(log2(d)) */
     __uint128_t one = 1;
     __uint128_t numerator = (one << (64 + sh)) + (uint64_t)d - 1;
     __uint128_t m_full = numerator / (__uint128_t)d;
     __uint128_t pow_2_64 = one << 64;
     m4t_magic_div_u64_t out;
-    if (m_full < pow_2_64) {
+    if (m_full <= pow_2_64) {
         out.m = (uint64_t)m_full;
         out.sh = sh;
         out.extension = 0;
@@ -2486,9 +2500,19 @@ void m4t_mtfp_bitlinear_scale_bx(
     uint64_t abs_num = num_neg ? (uint64_t)(-num) : (uint64_t)num;
     uint32_t num_lo32 = (uint32_t)abs_num;
     uint32_t num_hi32 = (uint32_t)(abs_num >> 32);
-    /* Specialized /127 helper handles uint39 inputs with hardcoded magic;
-     * compute_magic_u64 is unused for this path but kept available for future. */
-    (void)compute_magic_u64;
+
+    /* Profile-driven optimization: combine /127 with as many /3s as fit in
+     * a single uint32 divisor (d ≤ 2^31). 127 × 3^15 = 1,822,311,189 < 2^31;
+     * 127 × 3^16 > 2^31. So combine /127 with up to 15 /3 steps in ONE
+     * limb-divide pass; iterate /3 for any remaining shift_exp - 15 steps.
+     *
+     * For typical BitNet shift_exp ≤ 15: ~16x reduction in long-divide work
+     * (1 pass of 3 limb-divides, vs 1 + shift_exp passes previously). */
+    int combined_k = (shift_exp < 15) ? shift_exp : 15;
+    int remaining_3s = shift_exp - combined_k;
+    uint64_t d_combined = 127ULL * (uint64_t)pow3_i64(combined_k);
+    uint32_t d_combined_u32 = (uint32_t)d_combined;
+    m4t_magic_div_u64_t magic_d = compute_magic_u64(d_combined);
 
     /* abs(half) splits into uint64; we need to add it to a uint96 V.
      * half ≤ den/2 ≤ (127 × 3^35)/2 ≈ 2^61.6, fits uint64. */
@@ -2539,29 +2563,29 @@ void m4t_mtfp_bitlinear_scale_bx(
             L1 = vshrn_n_u64(V_lo64_new, 32);
             L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
 
-            /* Long-divide V by 127: process limbs MSB → LSB.
-             * r ∈ [0, 126]. val = r * 2^32 + limb fits uint39. */
+            /* Combined long-divide V by d_combined (= 127 × 3^combined_k).
+             * Single pass replaces /127 + combined_k iterations of /3.
+             * r ∈ [0, d_combined-1]; val = r*2^32 + limb < d_combined*2^32 ≤ 2^63. */
             uint64x2_t r = vdupq_n_u64(0);
-            #define LIMB_DIV_127(limb_var) do { \
+            #define LIMB_DIV_D(limb_var) do { \
                 uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
-                uint64x2_t q   = neon_unsigned_div127_u64x2_le39(val); \
-                /* r = val - q * 127 = val - (q << 7 - q). */ \
-                uint64x2_t q127 = vsubq_u64(vshlq_n_u64(q, 7), q); \
-                r = vsubq_u64(val, q127); \
+                uint64x2_t q   = neon_apply_magic_u64x2(val, magic_d); \
+                /* r = val - q * d_combined. q < 2^32, d_combined < 2^31, product fits uint64. */ \
+                uint64x2_t qd  = vmull_u32(vmovn_u64(q), vdup_n_u32(d_combined_u32)); \
+                r = vsubq_u64(val, qd); \
                 limb_var = vmovn_u64(q); \
             } while(0)
-            LIMB_DIV_127(L2);
-            LIMB_DIV_127(L1);
-            LIMB_DIV_127(L0);
-            #undef LIMB_DIV_127
+            LIMB_DIV_D(L2);
+            LIMB_DIV_D(L1);
+            LIMB_DIV_D(L0);
+            #undef LIMB_DIV_D
 
-            /* Iterated long-divide by 3, shift_exp times. */
-            for (int k = 0; k < shift_exp; k++) {
+            /* Iterated long-divide by 3 for remaining (shift_exp - combined_k) steps. */
+            for (int k = 0; k < remaining_3s; k++) {
                 r = vdupq_n_u64(0);
                 #define LIMB_DIV_3(limb_var) do { \
                     uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
                     uint64x2_t q   = neon_unsigned_div3_u64x2(val); \
-                    /* r = val - q * 3 = val - (q << 1 + q). */ \
                     uint64x2_t q3  = vaddq_u64(vshlq_n_u64(q, 1), q); \
                     r = vsubq_u64(val, q3); \
                     limb_var = vmovn_u64(q); \
@@ -2650,19 +2674,19 @@ void m4t_mtfp_bitlinear_scale_bx(
             L2 = vmovn_u64(vaddq_u64(vmovl_u32(L2), add_carry));
 
             uint64x2_t r = vdupq_n_u64(0);
-            #define LIMB_DIV_127T(limb_var) do { \
+            #define LIMB_DIV_DT(limb_var) do { \
                 uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \
-                uint64x2_t q   = neon_unsigned_div127_u64x2_le39(val); \
-                uint64x2_t q127 = vsubq_u64(vshlq_n_u64(q, 7), q); \
-                r = vsubq_u64(val, q127); \
+                uint64x2_t q   = neon_apply_magic_u64x2(val, magic_d); \
+                uint64x2_t qd  = vmull_u32(vmovn_u64(q), vdup_n_u32(d_combined_u32)); \
+                r = vsubq_u64(val, qd); \
                 limb_var = vmovn_u64(q); \
             } while(0)
-            LIMB_DIV_127T(L2);
-            LIMB_DIV_127T(L1);
-            LIMB_DIV_127T(L0);
-            #undef LIMB_DIV_127T
+            LIMB_DIV_DT(L2);
+            LIMB_DIV_DT(L1);
+            LIMB_DIV_DT(L0);
+            #undef LIMB_DIV_DT
 
-            for (int k = 0; k < shift_exp; k++) {
+            for (int k = 0; k < remaining_3s; k++) {
                 r = vdupq_n_u64(0);
                 #define LIMB_DIV_3T(limb_var) do { \
                     uint64x2_t val = vaddq_u64(vshlq_n_u64(r, 32), vmovl_u32(limb_var)); \

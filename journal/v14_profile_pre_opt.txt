@@ -1,0 +1,160 @@
+Analysis of sampling bitnet_harness (pid 93880) every 1 millisecond
+Process:         bitnet_harness [93880]
+Path:            /Users/USER/*/bitnet_harness
+Load Address:    0x10467c000
+Identifier:      bitnet_harness
+Version:         ???
+Code Type:       ARM64
+Parent Process:  zsh [93878]
+Target Type:     live task
+
+Date/Time:       2026-05-08 17:30:36.334 -0600
+Launch Time:     2026-05-08 17:30:35.888 -0600
+OS Version:      macOS 26.3.1 (25D2128)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         9857K
+Physical footprint (peak):  9857K
+Idle exit:                  untracked
+----
+
+Call graph:
+    19 Thread_21364782: Main Thread
+    + 12 _dyld_start  (in dyld) + 0  [0x10469c9c0]
+    + 4 start  (in dyld) + 7104  [0x191865d04]
+    + ! 4 dyld4::prepare(dyld4::APIs&, mach_o::Header const*)  (in dyld) + 2996  [0x1918670e4]
+    + !   4 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 432  [0x191876184]
+    + !     3 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 544  [0x1918ae07c]
+    + !     : 3 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x1918adc6c]
+    + !     :   3 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x191896a30]
+    + !     :     3 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x1918966a4]
+    + !     :       3 mach_msg_overwrite  (in dyld) + 244  [0x1918e5b64]
+    + !     :         3 mach_msg2_internal  (in dyld) + 76  [0x1918e59b8]
+    + !     :           3 mach_msg2_trap  (in dyld) + 8  [0x19185e72c]
+    + !     1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 324  [0x1918adfa0]
+    + !       1 dyld4::ExternallyViewableState::generateAtlas(lsl::Allocator&)  (in dyld) + 716  [0x1918ac7d0]
+    + !         1 PropertyList::encode(ByteStream&)  (in dyld) + 736  [0x1918c7048]
+    + 1 start  (in dyld) + 4752  [0x1046a03d4]
+    + ! 1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1660  [0x1046e8498]
+    + !   1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x1046e8c6c]
+    + !     1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1046d1a30]
+    + !       1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x1046d16a4]
+    + !         1 mach_msg_overwrite  (in dyld) + 244  [0x104720b64]
+    + !           1 mach_msg2_internal  (in dyld) + 76  [0x1047209b8]
+    + !             1 mach_msg2_trap  (in dyld) + 8  [0x10469972c]
+    + 1 start  (in dyld) + 4024  [0x1918650fc]
+    + ! 1 dyld4::ExternallyViewableState::ExternallyViewableState(lsl::Allocator&)  (in dyld) + 128  [0x1918ac310]
+    + 1 start  (in dyld) + 4076  [0x191865130]
+    +   1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1660  [0x1918ad498]
+    +     1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x1918adc6c]
+    +       1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x191896a30]
+    +         1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x1918966a4]
+    +           1 mach_msg_overwrite  (in dyld) + 244  [0x1918e5b64]
+    +             1 mach_msg2_internal  (in dyld) + 76  [0x1918e59b8]
+    +               1 mach_msg2_trap  (in dyld) + 8  [0x19185e72c]
+    4239 Thread_21364782   DispatchQueue_1: com.apple.main-thread  (serial)
+      4239 start  (in dyld) + 7184  [0x191865d54]
+        4239 main  (in bitnet_harness) + 2036  [0x10467e50c]
+          821 bitnet_forward_block  (in bitnet_harness) + 4080  [0x10467d918]
+          ! 821 ???  (in <unknown binary>)  [0x7d3064400]
+          !   821 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,1120,...  [0x104681970,0x104681880,...]
+          813 bitnet_forward_block  (in bitnet_harness) + 4956  [0x10467dc84]
+          ! 791 ???  (in <unknown binary>)  [0x7d3068ae0]
+          ! : 791 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,916,...  [0x104681970,0x1046817b4,...]
+          ! 9 ???  (in <unknown binary>)  [0x104c82450]
+          ! : 9 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 916,1120,...  [0x1046817b4,0x104681880,...]
+          ! 6 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1856  [0x104681b60]
+          ! : 6 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 616,652,...  [0x104681688,0x1046816ac,...]
+          ! 4 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1808  [0x104681b30]
+          ! : 3 _platform_memmove  (in libsystem_platform.dylib) + 452,460  [0x191c39544,0x191c3954c]
+          ! : 1 DYLD-STUB$$mkdtempat_np  (in libsystem_c.dylib) + 12  [0x191b35bd4]
+          ! 2 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1784  [0x104681b18]
+          ! : 1 DYLD-STUB$$mkdtempat_np  (in libsystem_c.dylib) + 12  [0x191b35bd4]
+          ! : 1 _platform_memmove  (in libsystem_platform.dylib) + 452  [0x191c39544]
+          ! 1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 356  [0x104681584]
+          794 bitnet_forward_block  (in bitnet_harness) + 4136  [0x10467d950]
+          ! 793 ???  (in <unknown binary>)  [0x7d3064400]
+          ! : 793 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,1120,...  [0x104681970,0x104681880,...]
+          ! 1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 356  [0x104681584]
+          318 bitnet_forward_block  (in bitnet_harness) + 412  [0x10467cac4]
+          ! 317 ???  (in <unknown binary>)  [0x7d3064400]
+          ! : 317 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,916,...  [0x104681970,0x1046817b4,...]
+          ! 1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 420  [0x1046815c4]
+          304 bitnet_forward_block  (in bitnet_harness) + 4168  [0x10467d970]
+          ! 304 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 1340,1256,...  [0x104680eac,0x104680e58,...]
+          296 bitnet_forward_block  (in bitnet_harness) + 3668  [0x10467d77c]
+          ! 295 ???  (in <unknown binary>)  [0x7d3064400]
+          ! : 295 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,1120,...  [0x104681970,0x104681880,...]
+          ! 1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 284  [0x10468153c]
+          284 bitnet_forward_block  (in bitnet_harness) + 4112  [0x10467d938]
+          ! 284 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 1340,1256,...  [0x104680eac,0x104680e58,...]
+          109 bitnet_forward_block  (in bitnet_harness) + 4988  [0x10467dca4]
+          ! 109 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 784,1312,...  [0x104680c80,0x104680e90,...]
+          98 bitnet_forward_block  (in bitnet_harness) + 3700  [0x10467d79c]
+          ! 98 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 1256,1340,...  [0x104680e58,0x104680eac,...]
+          86 bitnet_forward_block  (in bitnet_harness) + 444  [0x10467cae4]
+          ! 86 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 1256,1312,...  [0x104680e58,0x104680e90,...]
+          81 bitnet_forward_block  (in bitnet_harness) + 4620,4592,...  [0x10467db34,0x10467db18,...]
+          74 bitnet_forward_block  (in bitnet_harness) + 524  [0x10467cb34]
+          ! 73 ???  (in <unknown binary>)  [0x7d3064400]
+          ! : 73 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 916,1120,...  [0x1046817b4,0x104681880,...]
+          ! 1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   1 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 388  [0x1046815a4]
+          69 bitnet_forward_block  (in bitnet_harness) + 468  [0x10467cafc]
+          ! 67 ???  (in <unknown binary>)  [0x7d3064400]
+          ! : 67 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 1360,1120,...  [0x104681970,0x104681880,...]
+          ! 2 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+          !   2 m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 284,304  [0x10468153c,0x104681550]
+          24 bitnet_forward_block  (in bitnet_harness) + 500  [0x10467cb1c]
+          ! 24 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 812,756,...  [0x104680c9c,0x104680c64,...]
+          24 bitnet_forward_block  (in bitnet_harness) + 556  [0x10467cb54]
+          ! 24 m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 704,784,...  [0x104680c30,0x104680c80,...]
+          14 bitnet_forward_block  (in bitnet_harness) + 112  [0x10467c998]
+          ! 14 m4t_mtfp_rmsnorm_bx  (in bitnet_harness) + 976,1180,...  [0x104680438,0x104680504,...]
+          9 bitnet_forward_block  (in bitnet_harness) + 4708  [0x10467db8c]
+          ! 9 m4t_mtfp_rmsnorm_bx  (in bitnet_harness) + 1900,1040,...  [0x1046807d4,0x104680478,...]
+          6 bitnet_forward_block  (in bitnet_harness) + 3404  [0x10467d674]
+          ! 6 m4t_mtfp_rmsnorm_bx  (in bitnet_harness) + 120,1076,...  [0x1046800e0,0x10468049c,...]
+          4 bitnet_forward_block  (in bitnet_harness) + 2276  [0x10467d20c]
+          ! 4 m4t_mtfp_attn_v_combine  (in bitnet_harness) + 136,172  [0x10467f560,0x10467f584]
+          3 bitnet_forward_block  (in bitnet_harness) + 2220  [0x10467d1d4]
+          ! 1 _xzm_free  (in libsystem_malloc.dylib) + 348  [0x191a4f8a0]
+          ! : 1 __bzero  (in libsystem_platform.dylib) + 0  [0x191c39050]
+          ! 1 _xzm_free  (in libsystem_malloc.dylib) + 0  [0x191a4f744]
+          ! 1 m4t_mtfp_softmax  (in bitnet_harness) + 1696  [0x10467fcd8]
+          3 bitnet_forward_block  (in bitnet_harness) + 3804  [0x10467d804]
+          ! 3 m4t_mtfp_rmsnorm_bx  (in bitnet_harness) + 100,1092,...  [0x1046800cc,0x1046804ac,...]
+          1 _platform_memmove  (in libsystem_platform.dylib) + 180  [0x191c39434]
+          1 bitnet_forward_block  (in bitnet_harness) + 852  [0x10467cc7c]
+          ! 1 pow  (in libsystem_m.dylib) + 516  [0x1a165d1c4]
+          1 bitnet_forward_block  (in bitnet_harness) + 872  [0x10467cc90]
+          ! 1 pow  (in libsystem_m.dylib) + 564  [0x1a165d1f4]
+          1 bitnet_forward_block  (in bitnet_harness) + 2088  [0x10467d150]
+          ! 1 _platform_memmove  (in libsystem_platform.dylib) + 180  [0x191c39434]
+          1 bitnet_forward_block  (in bitnet_harness) + 2100  [0x10467d15c]
+            1 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 324  [0x191a54940]
+              1 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 172  [0x191a551a0]
+                1 _xzm_chunk_list_pop  (in libsystem_malloc.dylib) + 24  [0x191a55a2c]
+
+Total number in stack (recursive counted multiple, when >=5):
+        15       m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 0  [0x104681420]
+        7       m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness) + 0  [0x104680970]
+        6       ???  (in <unknown binary>)  [0x7d3064400]
+        6       m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness) + 132  [0x1046814a4]
+
+Sort by top of stack, same collapsed (when >= 5):
+        m4t_ternary_5in8_matmul_bt_route  (in bitnet_harness)        3179
+        m4t_mtfp_bitlinear_scale_bx  (in bitnet_harness)        929
+        bitnet_forward_block  (in bitnet_harness)        81
+        m4t_mtfp_rmsnorm_bx  (in bitnet_harness)        32
+        _dyld_start  (in dyld)        12
+        _platform_memmove  (in libsystem_platform.dylib)        6
+        mach_msg2_trap  (in dyld)        5
+
+Binary images description not available
+
