@@ -20,6 +20,27 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Functional gaps (consumer-visible)
 
+### TD-21 — M4T_SUBSTRATE.md doesn't cover Phase 2 BitNet primitives
+
+**Source:** `journal/saturation_audit_complete_2026-05-09.md` doc-currency
+review (item #6 of post-RMSNorm-fix remediation).
+**State:** the substrate spec's §17 cross-reference ends at §20 (sub-2-bit
+packing). Phase 2 added a substantial set of bx-aware primitives
+(`m4t_mtfp_rmsnorm_bx`, `relu²_bx`, `elementwise_mul_bx`,
+`bitlinear_scale_bx`, `bitlinear_scale_no_a8_bx`, `m4t_mtfp_softmax`,
+`m4t_rope_apply`, `m4t_a8_quantize`/`dequantize`, `m4t_mtfp_rescale_bx`,
+`m4t_mtfp_vec_scale`, `m4t_mtfp_vec_dot_i64`, `m4t_mtfp_attn_v_combine`)
+that aren't in §17 or any later section. They exist in the headers and
+m4t/README.md, but have no spec-section anchor.
+**Impact:** per CONTRIBUTING.md principle 7, kernels need to trace back
+to spec constraints. The Phase 2 BitNet kernels currently float as
+"consumer-driven additions" without spec backing.
+**Remediation:** lightweight `journal/bitnet_phase2_spec_amend.md` cycle
+adding §21 (or wherever) for "Phase 2 BitNet inference primitives" with
+the bx-tracking convention as the load-bearing spec content.
+**Priority hint:** medium. Pre-existing spec drift; not introduced by
+the recent RMSNorm work. No production impact.
+
 ### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks
 
 **Source:** `journal/inference_battery_v2_2026-05-09.md` (red-team finding).
@@ -109,7 +130,7 @@ These come from `docs/THESIS.md` and remain open after the substrate-claim work 
 ### TD-15 — What benchmark is the substrate's right arbiter?
 
 **Source:** `docs/THESIS.md` "Open questions for the consumer-layer rebuild."
-**Status:** unresolved. Image-canon benchmarks are base-2-framed; CIFAR-10 hits a representation tax base-3 doesn't close; Go-position phase classification was a strong base-3-native signal in the prior cycle.
+**Status:** unresolved. Image-canon benchmarks are base-2-framed; CIFAR-10 hits a representation tax base-3 doesn't close. **As of 2026-05-09**, BitNet b1.58-2B-4T inference (`gesh/bitnet/`) runs end-to-end on the substrate — one candidate arbiter for Part A of the thesis, though its claim shape doesn't speak directly to Part B (routing). See `journal/inference_battery_v2_2026-05-09.md` for characterization.
 **Implication:** the consumer-layer rebuild needs to pick its arbiter deliberately. Default to image canon would not be a substrate-claim win.
 
 ### TD-16 — Is SDOT load-bearing for the substrate-claim?

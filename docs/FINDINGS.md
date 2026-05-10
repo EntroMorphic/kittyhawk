@@ -1,6 +1,6 @@
 ---
 title: Findings
-status: substrate complete + 3 substrate-claim axes landed (2026-05-05)
+status: substrate complete + 3 substrate-claim axes landed + BitNet b1.58-2B-4T inference end-to-end (2026-05-09)
 companions: NORTH_STAR.md · docs/THESIS.md · docs/REMEDIATION_PLAN.md · CHANGELOG.md
 ---
 
@@ -22,18 +22,19 @@ Each axis records:
 
 **Question.** Do the rebuilt substrate kernels behave correctly under their stated contracts?
 
-**Measurement.** Eight ctest binaries pass from a clean build under `-Werror`:
+**Measurement.** **29 ctest binaries** pass from a clean build under `-Werror` (as of 2026-05-09). Original 8 listed below; the additional 21 cover NEON-vs-scalar_ref bit-exactness for the no-scalar-audit cycle (pack/unpack 4-in-8 + 5-in-8, MTFP4↔MTFP19 conversions, shift3, ternary_matmul_neon, accum_aligning_neon), the §20 5-in-8 W-packed and X-packed matmul kernels, the V14.C–V14.G Phase-2 BitNet primitive paths (rmsnorm_bx with the gamma_bx > target_bx regression case at commit `4d4c917`, relu²_bx, elementwise_mul_bx, bitlinear_scale_bx, softmax NEON-gather LUT, RoPE, A8 quantize), and gesh consumer tests:
 
 | Binary | Tests / properties | Oracle |
 |---|---|---|
-| `test_m4t_trit_pack` | Hand-derived golden values | Self-consistent |
+| `test_m4t_trit_pack` | Hand-derived golden values + 4-in-8 + 5-in-8 NEON-vs-scalar_ref | Self-consistent + NEON-vs-scalar |
 | `test_m4t_trit_ops` | All 9 input pairs × 6 ops | Hand-derived truth tables |
 | `test_m4t_trit_reducers` | Mixed inputs across 3 reducers | Hand-derived |
-| `test_m4t_mtfp` | Block + vec ops, NEON + tail + aliasing | Hand-derived |
+| `test_m4t_mtfp` | Block + vec ops + softmax + RoPE + bx-aware kernels (rmsnorm_bx incl. gamma_bx > target_bx regression, relu²_bx, elementwise_mul_bx, bitlinear_scale_bx) + vec_dot_i64 incl. bound-constant pin | Hand-derived + bit-exact NEON-vs-scalar_ref |
 | `test_m4t_route` | All 5 route primitives + emission coverage helper + e2e mini-pass | Hand-derived |
 | `test_m4t_mtfp_accum_aligning` | 14 properties × 10k random samples per property | Bit-exact int64 reference |
 | `test_m4t_mtfp4` | 12 tests including 10k-sample narrow property + K=1M long-K | Bit-exact int64 reference |
 | `test_m4t_ternary_matmul` | 9 tests including K=1M long-K + partial-block + reserved-trit-code | Bit-exact int64 reference |
+| (+ 21 additional binaries — see `m4t/README.md` "Tests" section for the full inventory) | | |
 
 **What this is not.** This is housekeeping, not a substrate-claim measurement. Bit-exact correctness against a reference says the kernel implements its specification; it doesn't say the specification is the right shape, or that any benchmark exercises the kernel in a way that justifies its complexity.
 

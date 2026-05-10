@@ -1,7 +1,7 @@
 ---
 title: Thesis brief
 companions: NORTH_STAR.md · m4t/docs/M4T_SUBSTRATE.md · docs/FINDINGS.md
-status: ground-zero (2026-05-01)
+status: substrate complete + BitNet b1.58-2B-4T inference end-to-end (2026-05-09)
 ---
 
 # Thesis
@@ -34,7 +34,7 @@ The previous cycle measured a 60pp gap between random-U + sign-only routing and 
 
 ## Open questions for the consumer-layer rebuild
 
-1. **What benchmark is the substrate's right arbiter?** MNIST and Fashion-MNIST are base-2-framed. CIFAR-10 hits a representation tax that base-3 alone does not close. Go-position phase classification was a strong base-3-native signal. The consumer-layer rebuild should pick its arbiter deliberately rather than defaulting to image canon.
+1. **What benchmark is the substrate's right arbiter?** MNIST and Fashion-MNIST are base-2-framed. CIFAR-10 hits a representation tax that base-3 alone does not close. The consumer-layer rebuild should pick its arbiter deliberately rather than defaulting to image canon. **As of 2026-05-09**, BitNet b1.58-2B-4T inference (`gesh/bitnet/`) runs end-to-end on the substrate with coherent generation across factual / definitional / narrative / long-context tasks (see `journal/inference_battery_v2_2026-05-09.md` for the 24-prompt characterization, including substrate-specific quality gaps on multi-step reasoning / code / structured output that warrant follow-up). BitNet inference is one candidate arbiter — it exercises the full kernel surface in production — but its claim shape is "ternary LLM works on the substrate's native numeric system," which is closer to Part A (substrate is the natural shape) than Part B (routing is essential). A Part-B arbiter is still open.
 
 2. **Is the SDOT-native MTFP4 path the load-bearing primitive?** The substrate's strongest "MTFP-as-hardware" claim sits at MTFP4 × ternary → MTFP19 (Case W per §8.4). The kernel ships and is property-tested at K up to 1M. If a routing consumer can drive this kernel into a benchmark win, that is the substrate-claim's cleanest demonstration. Untested at the benchmark level until consumers come back online.
 
