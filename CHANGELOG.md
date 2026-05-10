@@ -4,6 +4,116 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Found — PART-B EVIDENCE on N4 sparse attention (2026-05-10)
+Per `journal/cycle2_full_battery_findings.md` (commit `a40da63`).
+
+**The first direct empirical evidence for thesis Part B (routing is
+essential, gap widens with task richness) on a real workload.** Cycle 2
+of the LMM-derived mode-shift plan executed N4 (post-hoc sparse attention
+via `m4t_route_threshold_extract` + `m4t_route_distance_batch`) on the
+24-prompt × 4-arm × 6-k battery (456 runs).
+
+All three pre-commit EVIDENCE gates passed:
+- ✅ At k=64: routed within 10pp of dense (0pp gap)
+- ✅ At k=16: routed beats random by **+16.7pp** (75.0% vs 58.3%)
+- ✅ Gap (routed − random) widens monotonically with sparsity:
+   k=16 +4 prompts, k=8 +5, k=4 +6
+
+Surprise finding: routed at k=4 (22/24) outperforms dense (19/24) on
+three prompts where dense fails by looping (`code_comment`,
+`edge_question`, `edge_repetitive`). Mechanism hypothesis (not confirmed):
+aggressive substrate-routed attention selects diverse-by-signature K
+positions, breaking attention-loop dynamics that dense locks into.
+
+Substrate-distinctiveness: HIGH. The routing pipeline (packed-trit
+signatures + popcount distance) cannot be replicated on a base-2 substrate
+without trit packing infrastructure.
+
+Honest caveats: loop heuristic is preliminary (manual classification
+would refine pass rates but pattern survives); oracle baseline isn't a
+true upper bound (top-k by |score| is suboptimal vs dense softmax);
+24-prompt battery is small for "Part-B evidence" claims; compute-parity
+not measured (only quality); single-seed for random arm.
+
+This finding makes thesis Part B move from "essentially untested" to
+"first direct evidence on a real workload, surviving pre-committed
+gates." Full caveats in the journal.
+
+### Added — Cycle 2 sparse attention infrastructure: 4 arms × trajectory (2026-05-10)
+Per `journal/cycle2_design.md` (commits `bcd8ba6`, `62e231a`, `e248e05`).
+
+Runtime-selectable attention mode in `gesh/bitnet/bitnet_harness.c`:
+- `BITNET_ATTN_MODE` env var ∈ {dense, random, routed, oracle}
+- `BITNET_ATTN_K` env var (top-k value; default = head_dim = 128)
+- Default unset = bit-exact identical to production path
+
+Four experimental arms:
+- **Dense** — current production behavior, NEON-routed via
+  `m4t_mtfp_attn_v_combine`.
+- **Random top-k** — xorshift32 + Fisher-Yates index selection; sparse
+  scalar `bitnet_sparse_attn_v_combine`.
+- **Routed top-k** — Q/K signatures via `m4t_route_threshold_extract`
+  with 1/3-quantile-of-|Q| tau choice (defends against R1's tau=0
+  failure mode by guaranteeing all three trit states realize);
+  `m4t_route_distance_batch` for popcount distance; manual top-k by
+  ascending distance (sidesteps M4T_ROUTE_MAX_T=64 limit).
+- **Oracle top-k** — dense scores first, qsort-by-|score|, recompute
+  weights on top-k. Strong baseline but NOT a true upper bound (per
+  Phase 2.5 probe finding).
+
+Phase 2.5 probe (2 prompts × 4 arms × 6 k = 38 runs) caught the
+methodology issue that token agreement is the wrong metric for
+Part-B evidence (random can match dense by coincidence; routed often
+diverges to a different VALID continuation). Refined methodology
+(strict-pass classification, oracle-clause dropped from gates) used in
+the full battery.
+
+### Added — Cycle 1: Part-B Experiment Design LMM (2026-05-09 to 2026-05-10)
+Per `journal/cycle1_plan*.md` and `journal/partB_experiments_*.md`
+(commit `eeac320`).
+
+Plan → red-team → remediation → execution. The LMM (RAW → NODES → REFLECT
+→ SYNTH) produced:
+- 16 candidate Part-B experiments across 7 categories (architectural,
+  post-hoc inference-only, compression, RL, compositional, less-familiar
+  areas, suspicious).
+- 7-axis scoring rubric (re-applicable as new candidates emerge).
+- An operationalization of Part B (matched FLOPs at inference; trajectory
+  along single complexity axis; existence + trajectory + mechanism as
+  joint criteria).
+- Top candidate: N4 (post-hoc sparse attention via `route_topk_abs`).
+  Score 32/35. Selected for Cycle 2 execution.
+
+### Added — LMM cycle on step-change selection (2026-05-09)
+Per `journal/step_change_*.md` (commit `b170853`).
+
+Applied the Lincoln Manifold Method to "what's the next step-change for
+the project." The cycle changed my conclusion: from "build training
+infrastructure" (capability step-change) to **mode shift from
+substrate-building to substrate-testing** (claim step-change). The
+project had been accumulating Part-A evidence (kernels work, BitNet
+runs) while leaving Part-B essentially untested; the synthesis
+recommended an inference-only Part-B test as the next concrete move.
+
+The mode-shift framing was vindicated by Cycle 2's evidence (entry
+above): one strong inference-only candidate produced direct Part-B
+evidence without requiring training-first sequencing.
+
+### Closed — TD-20 fully via gate1+fudge2 (2026-05-10)
+Per `journal/math_div_atomics_2026-05-10.md` (commit `b34c8e4`).
+
+Atomics investigation of the math_div holdout (the 1 of 5 substrate-
+specific failures the gate1 fix didn't recover). Per-layer ε analysis
+showed ~5× per-layer noise compounding — NOT a single-kernel bug like
+RMSNorm was. The fix came from the prior sweep's untested combination
+(`gate1 + fudge=2`): math_div recovers ("12" direct), factual_hamlet
+regression recovers ("Shakespeare wrote Hamlet"), def_ml improves.
+Strict pass rate 19/24 → ~22/24 (~92%). Default updated:
+`score_shift += 1` → `score_shift += 2` in attention score rescale.
+
+Methodology lift: when two single-knob optima are identified
+independently, test the combination before declaring either the winner.
+
 ### Changed — `BITNET_GATE_ACT_BX` 2 → 1 recovers TD-20 quality failures (2026-05-10)
 Per `journal/hp_sweep_2026-05-10.md` (commit `d2c01ae`).
 

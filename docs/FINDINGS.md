@@ -1,6 +1,6 @@
 ---
 title: Findings
-status: substrate complete + 3 substrate-claim axes landed + BitNet b1.58-2B-4T inference characterized (2026-05-10)
+status: substrate complete + 3 substrate-claim axes + BitNet inference characterized + first direct Part-B evidence on N4 sparse attention (2026-05-10)
 companions: NORTH_STAR.md · docs/THESIS.md · docs/REMEDIATION_PLAN.md · CHANGELOG.md
 ---
 
@@ -139,6 +139,35 @@ The ~80% configuration matches HF's behavior on 4 of 5 previously-failing prompt
 
 **Journal cycles.** `journal/bitnet_phase1_*` (raw → nodes → reflect → synthesize → closeout, work-units 1-8); `journal/substrate_vs_hf_2026-05-09/RESOLVED.md` (RMSNorm bug fix); `journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md` (initial 8-prompt confirmation); `journal/inference_battery_v2_2026-05-09.md` (24-prompt characterization, including HF cross-check on failures); `journal/hp_sweep_2026-05-10.md` (GATE_ACT_BX retuning that recovered 4 of 5 failures).
 
+## Axis 5 — Part-B evidence on N4 sparse attention (substrate-claim)
+
+**Question.** Does the substrate's routing-first base-3 architecture provide a measurable advantage over no-routing alternatives at fixed compute, AND does the advantage widen as task structure (here: attention sparsity, ≈ task-richness in the test-design sense) increases? This is the central thesis Part B claim, untested with pre-committed gates until this cycle.
+
+**Measurement.** N4 (post-hoc sparse attention via the substrate's `m4t_route_threshold_extract` + `m4t_route_distance_batch` primitives) on BitNet b1.58-2B-4T inference. 24 prompts × 4 arms (dense, random top-k, substrate-routed top-k, oracle top-k) × 6 k values (128, 64, 32, 16, 8, 4) = 456 runs. Pre-committed gates per `journal/partB_experiments_synth.md` and `journal/cycle2_probe_findings.md` (refined methodology after the Phase 2.5 probe).
+
+| k | dense | random | routed | oracle |
+|---|---|---|---|---|
+| 128 / 64 | 19/24 | 19/24 | 19/24 | 19/24 |
+| 32 | 19/24 | 19/24 | 18/24 | 20/24 |
+| **16** | 19/24 | **14/24** | **18/24** | 16/24 |
+| **8** | 19/24 | **13/24** | **18/24** | 12/24 |
+| **4** | 19/24 | **16/24** | **22/24** | 15/24 |
+
+**All three EVIDENCE gates passed:**
+- At k=64, routed within 10pp of dense (0pp gap)
+- At k=16, routed beats random by **+16.7pp** (75.0% vs 58.3%)
+- Gap (routed − random) widens monotonically with sparsity: k=16 +4 prompts → k=8 +5 → k=4 +6
+
+**Surprise result: routed at k=4 (22/24) outperforms dense (19/24)** on three loop-prone prompts (`code_comment`, `edge_question`, `edge_repetitive`). Mechanism hypothesis (not confirmed): aggressive substrate-routed attention selects diverse-by-signature K positions, breaking attention-loop dynamics that dense locks into.
+
+**Substrate-distinctiveness.** HIGH. The routing pipeline (packed-trit signatures via `m4t_route_threshold_extract` with 1/3-quantile-of-|Q| tau choice, popcount distance via `m4t_route_distance_batch`) cannot be replicated on a base-2 substrate without trit packing infrastructure.
+
+**What this is.** First direct Part-B evidence on a real workload, surviving pre-committed gates. The mode-shift framing from `journal/step_change_synth.md` (substrate-building → substrate-testing) was vindicated: one strong inference-only candidate produced direct Part-B evidence without requiring training-first sequencing.
+
+**What this is not.** Not a closure on Part B. One workload (BitNet inference), one model scale (2B params), one decoding strategy (greedy). Loop heuristic is preliminary (manual classification would refine numbers but pattern survives). Oracle baseline is NOT a true upper bound (top-k by |score| is suboptimal vs dense softmax) — the substrate-vs-random comparison is the load-bearing signal. Compute-parity not measured (only quality). Single-seed for random arm.
+
+**Journal cycles.** `journal/step_change_*.md` (LMM-derived mode shift); `journal/cycle1_plan*.md` + `journal/partB_experiments_*.md` (Cycle 1 design + Part-B operationalization + 7-axis scoring rubric); `journal/cycle2_design.md` + `journal/cycle2_probe_findings.md` + `journal/cycle2_full_battery_findings.md` (Cycle 2 execution + verdict).
+
 ## Open axes (not yet measured)
 
 - **Strong-claim L2 (activations).** Same shape as L1; likely similar verdict at fixed density. Not yet run.
@@ -148,3 +177,6 @@ The ~80% configuration matches HF's behavior on 4 of 5 previously-failing prompt
 - **Vision claim 3 (broad form).** Each layer's strong-claim cycle is a tile of this broader question. The L1 verdict is the first defensible empirical point.
 - **BitNet inference under sampling** (top-k, top-p, temperature). Axis 4 is greedy-only. Sampling may soften some greedy-failure modes (loops); also may introduce different failure shapes. Open.
 - **HF-vs-substrate full 24-prompt comparison.** Currently only the 5-failure subset has HF cross-check. A full HF run would establish the substrate's quality delta vs reference across every prompt.
+- **Manual classification of all 456 Cycle 2 outputs.** Loop heuristic is preliminary; manual review would refine Axis 5's pass-rate numbers. Pattern (routed > random, gap widens) should survive but absolute rates will shift.
+- **Compute-parity verification for Cycle 2 (wall-clock per token).** Sparse attention SHOULD save FLOPs at small k; this hasn't been verified empirically.
+- **Cycle 3: routing-native attention with training (N1).** The training-required architectural test of Part B. Cycle 2 gave us evidence in the post-hoc form; Cycle 3 would test whether the gain amplifies under joint optimization.

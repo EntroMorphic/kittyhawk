@@ -57,6 +57,73 @@ recovered math_div ("12" direct) plus the gate1 regression
 (factual_hamlet), bringing strict pass rate to ~22/24 (~92%). Both
 defaults updated.
 
+### TD-23 — Manual classification of Cycle 2's 456 outputs
+
+**Source:** `journal/cycle2_full_battery_findings.md` honest caveats.
+**State:** Cycle 2 full battery (24 prompts × 4 arms × 6 k = 456 runs)
+used the loop heuristic for preliminary pass-rate counting. The
+heuristic has known false positives and false negatives (per
+`journal/math_div_atomics_2026-05-10.md`); manual strict-pass
+classification of every output would refine the absolute numbers.
+**Impact:** the EVIDENCE pattern (routed > random; gap widens with
+sparsity) should survive manual classification, but the absolute
+pass rates will shift. The pre-commit gate verdict (PASS) is unlikely
+to change but the magnitudes will.
+**Remediation:** ~2-4 hours of focused manual review reading each of
+the 456 outputs and labeling ✓ / ⚠ / ✗.
+**Priority hint:** medium. Refines the published numbers; doesn't
+change the verdict.
+
+### TD-24 — Compute-parity verification for Cycle 2
+
+**Source:** `journal/cycle2_full_battery_findings.md` honest caveats.
+**State:** Cycle 2 measured QUALITY (pass rates) at each (arm, k) but
+not COMPUTE (wall-clock per token, FLOPs). Sparse attention SHOULD save
+FLOPs at small k (linearly with k), but the implementation hasn't been
+verified to deliver this. The "matched FLOPs" framing the synth chose
+for Part-B operationalization needs empirical FLOP counting to land
+cleanly.
+**Impact:** without compute-parity verification, the Part-B claim is
+"routed beats random on quality at small k" rather than the stronger
+"routed beats random at matched compute."
+**Remediation:** instrument the harness to count FLOPs per arm
+(BitLinear ops, attention dot products, signature ops, distance batch
+ops); run a wall-clock micro-bench on the sparse path; cross-check.
+**Priority hint:** medium-high. Strengthens the Part-B claim
+materially.
+
+### TD-25 — Larger Part-B eval (1000+ prompts on standard benchmarks)
+
+**Source:** `journal/cycle2_full_battery_findings.md` honest caveats.
+**State:** The 24-prompt battery is small for "Part-B evidence"
+claims. Standard NLP evals (MMLU, HellaSwag, etc.) use thousands of
+prompts and have established difficulty / capability axes.
+**Impact:** the Cycle 2 Part-B finding rests on n=24 prompts with
+manual category selection. A larger eval would confirm or refute the
+generalization.
+**Remediation:** integrate a standard NLP eval harness with the
+substrate; run dense vs routed at multiple k values; report per-task
+breakdown.
+**Priority hint:** medium. Solidifies an existing finding rather
+than producing a new one.
+
+### TD-26 — Cycle 3: routing-native attention with training (N1)
+
+**Source:** `journal/partB_experiments_synth.md` Cycle 3 design;
+`journal/cycle2_full_battery_findings.md` "Next moves."
+**State:** The post-hoc Part-B test (N4) succeeded. The architectural
+Part-B test (N1 = routing-native attention trained from scratch)
+would test whether the gain amplifies under joint optimization.
+**Prerequisites:** gradient kernels for the substrate primitives in
+attention (bitlinear_scale_bx_backward, rmsnorm_bx_backward,
+attn_v_combine_backward, route_topk_abs straight-through-or-REINFORCE
+gradient); MTFP optimizer state representation; training loop
+integration.
+**Impact:** would establish whether Part-B is a post-hoc curiosity
+or an architectural advantage. Big claim if it lands.
+**Priority hint:** high (for thesis ambition); resource-intensive
+(months of foundational kernel work).
+
 ### TD-22 — gate1 single-prompt regression + untested knob combinations (CLOSED 2026-05-10)
 
 **Source:** `journal/hp_sweep_2026-05-10.md` Phase B.

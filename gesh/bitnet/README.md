@@ -14,14 +14,18 @@ kernel surface composes into a real ternary LLM.
 - **Forward pass: 30 layers × any prompt length, KV cache, greedy generation.**
 - **Quality characterized on a 24-prompt battery** spanning factual /
   definitional / narrative / math / code / structured-output / long-context /
-  edge categories. Strict pass rate **~80%** (~19/24) post-hyperparameter-sweep,
-  zero hard failures. See
-  [`journal/inference_battery_v2_2026-05-09.md`](../../journal/inference_battery_v2_2026-05-09.md)
-  for the per-prompt breakdown and
-  [`journal/hp_sweep_2026-05-10.md`](../../journal/hp_sweep_2026-05-10.md) for
-  the GATE_ACT_BX = 1 retuning that recovered 4 of 5 substrate-specific
-  failures. (Earlier 8-prompt battery confirmed coherence on easy categories;
-  v2 surfaced and characterized the harder ones.)
+  edge categories. Strict pass rate **~92%** (~22/24) post-tuning, zero hard
+  failures. See
+  [`journal/inference_battery_v2_2026-05-09.md`](../../journal/inference_battery_v2_2026-05-09.md),
+  [`journal/hp_sweep_2026-05-10.md`](../../journal/hp_sweep_2026-05-10.md) (GATE_ACT_BX=1),
+  and [`journal/math_div_atomics_2026-05-10.md`](../../journal/math_div_atomics_2026-05-10.md)
+  (atomics + score_shift fudge=2 closing TD-20).
+- **Part-B evidence on N4 sparse attention (2026-05-10).** Substrate-routed
+  top-k attention via `m4t_route_threshold_extract` + `m4t_route_distance_batch`
+  passed all three pre-committed EVIDENCE gates on the 24-prompt × 4-arm × 6-k
+  battery (456 runs). Per
+  [`journal/cycle2_full_battery_findings.md`](../../journal/cycle2_full_battery_findings.md).
+  See "Cycle 2 sparse-attention modes" below for how to invoke.
 - **Substrate-vs-HF investigation closed.** A latent silent-saturation bug in
   `m4t_mtfp_rmsnorm_bx` at `gamma_bx > target_bx` (BitNet's typical regime)
   collapsed `post_attention_layernorm` outputs by 6.5× and produced
@@ -150,6 +154,32 @@ cmake --build build --target bitnet_harness
 
 The `--dump` output uses the `ACTV2` format documented in
 `scripts/compare_activations.py`. The harness writes to **stderr**, not stdout.
+
+### Cycle 2 sparse-attention modes (research / Part-B experiment)
+
+The harness supports runtime-selectable attention modes for the N4
+Part-B experiment (per `journal/cycle2_design.md` and
+`journal/cycle2_full_battery_findings.md`):
+
+```bash
+# Default (env unset): bit-exact dense (production path).
+./build/gesh/bitnet_harness ...
+
+# Substrate-routed top-k: pick K positions per Q via packed-trit
+# signature distance (m4t_route_threshold_extract + distance_batch).
+BITNET_ATTN_MODE=routed BITNET_ATTN_K=4 ./build/gesh/bitnet_harness ...
+
+# Random top-k baseline (xorshift32 + Fisher-Yates):
+BITNET_ATTN_MODE=random BITNET_ATTN_K=4 ./build/gesh/bitnet_harness ...
+
+# Oracle top-k (compute dense scores first, pick top-k by |score|):
+BITNET_ATTN_MODE=oracle BITNET_ATTN_K=4 ./build/gesh/bitnet_harness ...
+```
+
+When `BITNET_ATTN_MODE` is unset or = `dense`, the production path runs
+unchanged (bit-exact). The sparse arms use a scalar
+`bitnet_sparse_attn_v_combine` — experimental, not on the production
+hot path.
 
 This subdirectory is **not** in ctest. It's a consumer-side harness, comparable
 to the audit binaries — built by the main CMake but invoked manually.
