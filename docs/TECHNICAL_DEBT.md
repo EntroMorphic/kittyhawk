@@ -20,6 +20,27 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Functional gaps (consumer-visible)
 
+### TD-19 — Late-layer `block_output` saturation in BitNet inference
+
+**Source:** `journal/saturation_audit_2026-05-09.md` (red-team revision).
+**State:** post-RMSNorm-fix sweep shows 1–9 cells per position saturating at
+`MTFP19_MAX` in `block_output` at layers 24–29 with `BITNET_ACT_BX = 8`. The
+harness comment claiming "zero saturation at ACT_BX=8" was made before the
+RMSNorm fix; the fix produces correctly-larger magnitudes that propagate to
+the residual stream and tip a small fraction of cells over MAX_VAL in late
+layers.
+**Impact:** end-to-end battery still shows 8/8 prompts coherent, so it's not
+visibly hurting quality. But the residual stream is the carrier of
+information through the network; 0.35% saturation is non-zero signal loss.
+**Remediation:** sweep `BITNET_ACT_BX ∈ {6, 7, 8}` post-fix (the previous
+sweep was on the buggy substrate, so its conclusion no longer holds);
+re-run the inference battery; pick the bx that minimizes saturation while
+preserving coherence.
+**Priority hint:** medium. Not blocking; revisits when the next BitNet
+quality-improvement cycle opens.
+
+
+
 ### TD-2 — MTFP19-X variant of 5-in-8 packed matmul
 
 **Source:** `journal/m4t_5in8_closeout.md` "Honest scope."

@@ -113,7 +113,8 @@ primitive earned its place by being on the per-token forward path.
   22% → 7% (per `journal/v14f_profile_opt_*`).
 - `m4t_mtfp_bitlinear_scale_no_a8_bx` — variant for the bit-faithful path
   (skip A8 quantize, accept int64 raw matmul outputs).
-- `m4t_mtfp_relu2_inplace`, `m4t_mtfp_vec_mul_inplace` — FFN sub-pieces.
+- `m4t_mtfp_relu2_inplace_bx`, `m4t_mtfp_elementwise_mul_bx` — FFN sub-pieces
+  (bx-aware variants; production paths divide-before-clamp at int64).
 - `m4t_rope_apply` — RoPE rotation, NEON tile.
 - `m4t_mtfp_rescale_bx` — explicit between-bx rescale (consumer composition;
   also used internally by `_bx` kernels).

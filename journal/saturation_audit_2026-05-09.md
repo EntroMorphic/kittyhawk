@@ -50,42 +50,73 @@ future cleanup cycle.
 
 ## Empirical saturation in BitNet inference
 
-Forward pass on the 8-token canary prompt (15 positions if generating; here
-just the prompt forward). For each captured site, counted cells with
-`|mantissa| ≥ MTFP19_MAX = 581_130_733`:
+**First pass (under-scoped):** sampled 4 layers × 2 positions × 12 captured
+sites and reported "5 cells, only at L0/p7 gate." Red-team caught the
+under-scoping; the broader sweep below replaces it.
+
+**Broader sweep (all 30 layers × all 8 positions × 12 captured sites)** for
+the canary prompt `"What is the capital of France?"`:
 
 ```
-layer  site               n_cells   sat   sat%   max|mantissa|
-L 0 p7 gate                 6912      5   0.1%      581130733  ⚠ saturated
-L *  * (all other sites)               0   0.0%      < MAX_VAL
+Total saturations: 227 across the full sweep.
+
+Hot spots (27 (layer, position, site) triples with sat > 0):
+  L 0 p1-p7   gate            : 2-5 cells (post-relu² outlier clipping)
+  L24-L29 p* block_output     : 1-9 cells (NEW finding)
 ```
 
-5 cells out of 6912 in `gate` (post-relu²-inplace) at layer 0, position 7.
-Zero saturation across all 30 layers × all other capture sites × all 8
-positions.
+Two distinct mechanisms:
 
-These 5 saturations are **genuine outlier clipping**, not silent corruption:
-- `relu2_inplace_bx` does the divide BEFORE the clamp at int64 precision.
-- The clamp fires only when `relu(gate)² × 3^FFN_BX` actually exceeds
-  MAX_VAL — for `BITNET_FFN_BX = 6`, that's `gate_real > √(MAX_VAL/3^6) =
-  √797K ≈ 893`. Five outlier cells reach that magnitude in this prompt.
-- Downstream `ffn_sub_norm` normalizes magnitude; the loss of exact
-  magnitude on these 5 cells doesn't propagate visibly (block_output and
-  ffn_sub_norm at the same layer/position both stay well within range).
-- End-to-end battery (`journal/post_rmsnorm_fix_battery_2026-05-09/`)
-  shows 8/8 prompts coherent — outlier clipping is not affecting quality.
+**Hot spot 1 — early-layer `gate`** (relu² output): `relu2_inplace_bx` does
+divide-before-clamp at int64; saturation only fires when `relu(gate)² ×
+3^FFN_BX` genuinely exceeds MAX_VAL. For `BITNET_FFN_BX = 6`, that's
+`gate_real > √(MAX_VAL/3^6) ≈ 893`. A handful of outlier cells reach that
+magnitude per position. Downstream `ffn_sub_norm` normalizes magnitude;
+this is the open-saturation case the spec allows (Case S per §8.5).
 
-## Conclusion
+**Hot spot 2 — late-layer `block_output` (NEW, likely RMSNorm-fix-induced):**
+1–9 cells per position at L24–L29, capping the residual stream at MAX_VAL.
+The harness comment at `bitnet_harness.c:44` claims "zero saturation across
+all 30 layers" at `BITNET_ACT_BX=8` — but that claim was made *before* the
+RMSNorm `gamma_bx > target_bx` fix (`4d4c917`). Pre-fix, post_attn_norm
+outputs were magnitude-collapsed by ~6.5× (the silent saturation bug), so
+the residual stream stayed well within MTFP19 range. Post-fix, the correct
+(larger) magnitudes propagate and saturate at the previously-safe ACT_BX=8
+in late layers. **The fix exposed a latent scale-tightness that the bug
+was masking.** Open follow-up below.
 
-No further fixes warranted. The substrate's other bx-aware kernels already
-follow the correct divide-before-clamp pattern. The occasional outlier
-clipping in relu² is acceptable: it's the open-saturation case the spec
-allows (Case S per §8.5), not the silent-saturation bug pattern.
+## Q·K dot accumulator overflow check
 
-## Doc fix
+`m4t_mtfp_vec_dot_i64` is used by attention scoring (`gesh/bitnet/bitnet_harness.c`
+line 334). Theoretical worst-case for head_dim=128 is
+`128 × MAX_VAL² ≈ 2^65.2` — exceeds int64 max (2^63 − 1). Empirically: worst
+|Q·K| over the full forward pass is 2.37e10, leaving 2^28.5 headroom vs int64
+max. **Practically safe**, but the input-bound assumption (activations far
+below MAX_VAL) is undocumented at the kernel boundary; should add an
+assertion or tighten the docstring if a future consumer might pass closer-to-MAX
+inputs.
 
-Caught one stale doc reference I introduced in the prior `gesh/bitnet/README.md`
-rewrite: listed `m4t_mtfp_relu2_inplace` and `m4t_mtfp_vec_mul_inplace` as
-the activation kernels, but the harness uses `_bx` variants
-(`m4t_mtfp_relu2_inplace_bx`, `m4t_mtfp_elementwise_mul_bx`). Fixed in the
-same commit as this journal entry.
+## Conclusion (revised)
+
+The compute-clamp-rescale-down silent-saturation pattern: still no further
+instances found beyond RMSNorm. Open clamping in `gate` is benign and
+spec-sanctioned.
+
+**One follow-on issue surfaced by the broader sweep: late-layer block_output
+saturation, likely RMSNorm-fix-induced.** Not blocking — the end-to-end
+battery (`journal/post_rmsnorm_fix_battery_2026-05-09/`) shows 8/8 coherent
+output, so 0.35% saturation at L25–L26 isn't visibly hurting generation
+quality. Possible remediation: lower `BITNET_ACT_BX` from 8 → 7 (3× more
+real-space headroom) and re-run the battery to verify quality preserved.
+Recorded as TD; not addressed in this audit.
+
+## Doc fixes
+
+I introduced a stale doc reference during the post-fix doc shore-up:
+`m4t_mtfp_vec_mul_inplace` is not a defined function — the actual kernel is
+`m4t_mtfp_elementwise_mul_bx`. Lived in two places:
+- `gesh/bitnet/README.md` (fixed in the same commit as the original audit)
+- `m4t/README.md` (red-team caught; fixed in the same commit as this revision)
+
+Plus the activation-kernel names in both READMEs were the non-`_bx` legacy
+names; corrected to the `_bx` variants the harness actually calls.
