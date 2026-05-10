@@ -41,16 +41,40 @@
  * SQUARED magnitudes (relu²(gate) × up). For gate_real ≤ 6 typical, the
  * squared product reaches ~200; bx=14 saturates at 35. We use a smaller
  * FFN_BX that gives wider range (real max 3^(29-FFN_BX) at MTFP19_MAX). */
-#define BITNET_ACT_BX 8       /* MTFP19_MAX/3^8 ≈ 88573 — Phase 2 wu1.4
-                               * red-team revealed block_output saturation
-                               * at ACT_BX=10 (max real ~9836 was hit by
-                               * 0.5% of cells from L4 onward, capping
-                               * residual stream). Lowering to 8: zero
-                               * saturation across all 30 layers,
-                               * block_output cos jumps from 0.05 (L29)
-                               * to 0.95+, multi-prompt argmax accuracy
-                               * 2/5 (vs 0/5), generation produces
-                               * domain-coherent text. */
+#define BITNET_ACT_BX 8       /* MTFP19_MAX/3^8 ≈ 88573. Tuning history:
+                               *
+                               * Phase 2 wu1.4 red-team (pre-RMSNorm-fix):
+                               * ACT_BX=10 saturated 0.5% of block_output
+                               * cells from L4 onward. Lowered to 8 →
+                               * "zero saturation across 30 layers" was
+                               * the claim at the time.
+                               *
+                               * Post-RMSNorm-fix (commit 4d4c917): the
+                               * "zero saturation" claim NO LONGER HOLDS.
+                               * The bug was magnitude-collapsing post_attn_norm
+                               * outputs by 6.5×; fixing it lets correctly-larger
+                               * residuals propagate, and ~209 cells (0.034%
+                               * of the 30L × 8pos × 2560-cell residual
+                               * stream sweep) now saturate in late layers
+                               * (L24-L29). See journal/saturation_audit_2026-05-09.md
+                               * and journal/act_bx_sweep_2026-05-09.md.
+                               *
+                               * The ACT_BX sweep ∈ {6, 7, 8} (TD-19) showed:
+                               * - BX=8 keeps 209 saturations BUT 8/8 prompts
+                               *   coherent and math correct (12+7=19).
+                               * - BX=7 → 0 saturations BUT one prompt loops.
+                               * - BX=6 → 0 saturations BUT math regresses
+                               *   (12+7=20; 1-trit precision loss flips argmax
+                               *   on tight integer-token logit margins).
+                               *
+                               * Conscious tradeoff: keep BX=8. The ~0.034%
+                               * residual-stream saturation is absorbed by
+                               * downstream RMSNorm; coherence + correctness
+                               * are the load-bearing metrics, not saturation
+                               * count. End-to-end battery (8 + 24 prompts)
+                               * confirms the substrate produces coherent
+                               * English on factual / definitional / narrative
+                               * / long-context tasks at this setting. */
 #define BITNET_FFN_BX 6       /* MTFP19_MAX/3^6 ≈ 797K — gate, up.
                                * Sweep [4,6,8,10,12]: Pearson peaks at 6
                                * (0.6857). FFN_BX=8 ranks Paris higher
