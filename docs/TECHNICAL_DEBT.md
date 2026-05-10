@@ -20,24 +20,18 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Functional gaps (consumer-visible)
 
-### TD-19 — Late-layer `block_output` saturation in BitNet inference
+### TD-19 — Late-layer `block_output` saturation in BitNet inference (CLOSED 2026-05-09)
 
 **Source:** `journal/saturation_audit_2026-05-09.md` (red-team revision).
-**State:** post-RMSNorm-fix sweep shows 1–9 cells per position saturating at
-`MTFP19_MAX` in `block_output` at layers 24–29 with `BITNET_ACT_BX = 8`. The
-harness comment claiming "zero saturation at ACT_BX=8" was made before the
-RMSNorm fix; the fix produces correctly-larger magnitudes that propagate to
-the residual stream and tip a small fraction of cells over MAX_VAL in late
-layers.
-**Impact:** end-to-end battery still shows 8/8 prompts coherent, so it's not
-visibly hurting quality. But the residual stream is the carrier of
-information through the network; 0.35% saturation is non-zero signal loss.
-**Remediation:** sweep `BITNET_ACT_BX ∈ {6, 7, 8}` post-fix (the previous
-sweep was on the buggy substrate, so its conclusion no longer holds);
-re-run the inference battery; pick the bx that minimizes saturation while
-preserving coherence.
-**Priority hint:** medium. Not blocking; revisits when the next BitNet
-quality-improvement cycle opens.
+**Resolution:** closed by `journal/act_bx_sweep_2026-05-09.md`. Swept
+`BITNET_ACT_BX ∈ {6, 7, 8}` post-fix. Lowering bx fully eliminates
+block_output saturation (BX=7: 0 cells; BX=6: 0 cells) but trades it for
+end-to-end quality regressions: BX=7 introduces a loop on
+`reasoning_color`, BX=6 also flips the argmax on math (12 + 7 = 20 instead
+of 19) due to 1-trit precision loss. **Keep BITNET_ACT_BX = 8.** The
+0.034% saturation fraction is absorbed by downstream RMSNorm; substrate
+metric improved at lower bx but end-to-end metric did not — the
+saturations weren't load-bearing for quality.
 
 
 
