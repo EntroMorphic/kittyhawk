@@ -377,14 +377,29 @@ void bitnet_forward_block(
                 }
 
                 /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
-                 * Adaptive: shift so max_abs maps to ≤ 30 nats, plus 1
-                 * extra bit to slightly soften the distribution.
-                 * Empirical sweep over fudge ∈ {0, 1, 2, 3, 4} on a
-                 * 10-prompt fact-recall battery: fudge=1 best (5/10),
-                 * fudge=0 (4/10), fudge=4 (0/10 — totally flat). */
+                 * Adaptive: shift so max_abs maps to ≤ 30 nats, plus a
+                 * fudge factor that softens the distribution.
+                 *
+                 * Tuning history:
+                 * - Pre-RMSNorm-fix: empirical sweep over fudge ∈ {0..4}
+                 *   on a 10-prompt fact-recall battery; fudge=1 best
+                 *   (5/10). That tuning was on the buggy substrate.
+                 * - Post-RMSNorm-fix + GATE_ACT_BX = 1 (2026-05-10):
+                 *   atomics investigation of the holdout math_div failure
+                 *   (the 1 of 5 the gate1 fix didn't recover) showed it
+                 *   wasn't a single-kernel bug — per-layer ε grows
+                 *   ~5× per layer through compound noise, not a localized
+                 *   jump. Re-tested gate1 + fudge2 (the prior sweep had
+                 *   identified fudge2 as 4/5 single-knob winner but it
+                 *   wasn't combined with gate1). Result: math_div
+                 *   recovers ("12" direct), factual_hamlet recovers
+                 *   ("Shakespeare wrote Hamlet"), def_ml improves; one
+                 *   regression (code_comment loops the comment again).
+                 *   Net +3/-1 vs gate1 alone. Strict pass rate ~21/24.
+                 *   Per journal/math_div_atomics_2026-05-10.md. */
                 int score_shift = 0;
                 while ((max_abs >> score_shift) > 30) score_shift++;
-                score_shift += 1;
+                score_shift += 2;
 
                 for (int t = 0; t < seq_k; t++) {
                     int64_t r;

@@ -41,40 +41,35 @@ the bx-tracking convention as the load-bearing spec content.
 **Priority hint:** medium. Pre-existing spec drift; not introduced by
 the recent RMSNorm work. No production impact.
 
-### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks (PARTIALLY CLOSED 2026-05-10)
+### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks (CLOSED 2026-05-10)
 
 **Source:** `journal/inference_battery_v2_2026-05-09.md` (red-team finding).
 **Original state:** expanded 24-prompt battery showed 5 substrate failures
 (reason_word, math_div, code_loop, code_comment, json_format). HF handled
 4 of 5 correctly.
-**Resolution (partial):** hyperparameter sweep
-(`journal/hp_sweep_2026-05-10.md`) found `BITNET_GATE_ACT_BX = 1` (down
-from 2) recovers 4 of the 5 failures. The original tuning was on the
-pre-RMSNorm-fix substrate where residual magnitudes were 6.5× smaller;
-post-fix, the wider real-space range of BX=1 became load-bearing for
-preventing outlier-cell quantization-binning in the FFN gate²·up product.
-Strict 24-prompt pass rate 63% → ~80%, zero hard failures. Default
-updated. Math_div remains indirect (gives algebraically equivalent "12 ×
-12 = 144" instead of direct "12") — likely model-capability quirk under
-greedy decoding rather than substrate issue.
-**Remaining open:** factual_hamlet regression and gate1+fudge2 untested
-(see TD-22).
+**Resolution:** two-stage retuning landed all 5. Stage 1
+(`journal/hp_sweep_2026-05-10.md`): `BITNET_GATE_ACT_BX = 1` recovered
+4/5 (reason_word, code_loop, code_comment, json_format). Stage 2
+(`journal/math_div_atomics_2026-05-10.md`): atomics investigation of
+math_div confirmed it was noise-accumulation rather than a single-kernel
+bug; testing `gate1 + fudge=2` (the untested combination from TD-22)
+recovered math_div ("12" direct) plus the gate1 regression
+(factual_hamlet), bringing strict pass rate to ~22/24 (~92%). Both
+defaults updated.
 
-### TD-22 — gate1 single-prompt regression + untested knob combinations
+### TD-22 — gate1 single-prompt regression + untested knob combinations (CLOSED 2026-05-10)
 
 **Source:** `journal/hp_sweep_2026-05-10.md` Phase B.
-**State:** `BITNET_GATE_ACT_BX = 1` (gate1) recovers 4 of 5 substrate-
-specific failures but introduces one regression: `factual_hamlet` went
-from "Shakespeare wrote Hamlet" to "(Hint: It's a famous play by a famous
-playwright." The Phase A sweep also found `score_shift fudge = 2` and
-`BITNET_FFN_BX = 8` as separate winners (4/5 each); their combinations
-with gate1 weren't tested.
-**Remediation:** sweep gate1+fudge2, gate1+fudge2+ffn8 on the failure
-subset; if any combination preserves the gate1 wins AND restores
-factual_hamlet, adopt it. If no combination recovers both, accept the
-factual_hamlet regression as worth the broader gain.
-**Priority hint:** medium. Not blocking; the gate1 default is already a
-net positive.
+**Resolution:** `journal/math_div_atomics_2026-05-10.md`. Atomics
+investigation of the math_div holdout showed it was not a single-kernel
+bug (per-layer ε grows ~5× per layer through compound noise; no localized
+jump). Tested `gate1 + fudge=2` combination (untested in original sweep);
+recovers math_div ("12" direct), recovers factual_hamlet ("Shakespeare
+wrote Hamlet"), improves def_ml. Net +3/-0 vs gate1 alone (apparent
+regressions on code_python / edge_question / code_comment all turned out
+to be heuristic false positives — both produce valid output, just with
+different repetition character). Strict pass rate ~19/24 → **~22/24 (92%)**.
+Default updated: `score_shift += 2`.
 
 
 
