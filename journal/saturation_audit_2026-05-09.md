@@ -91,10 +91,19 @@ was masking.** Open follow-up below.
 line 334). Theoretical worst-case for head_dim=128 is
 `128 × MAX_VAL² ≈ 2^65.2` — exceeds int64 max (2^63 − 1). Empirically: worst
 |Q·K| over the full forward pass is 2.37e10, leaving 2^28.5 headroom vs int64
-max. **Practically safe**, but the input-bound assumption (activations far
-below MAX_VAL) is undocumented at the kernel boundary; should add an
-assertion or tighten the docstring if a future consumer might pass closer-to-MAX
-inputs.
+max. **Practically safe**, and as of audit item #4 the bound is now both
+documented and assertion-guarded:
+
+- Header docstring (`m4t_mtfp.h`) names the worst-case constant
+  `M4T_VEC_DOT_I64_K_MAX_WORST_CASE = 27` (every cell at ±MAX_VAL) and
+  cites the empirical BitNet headroom (2^28.5).
+- Debug builds (`-UNDEBUG`, used by `m4t_test`) run an O(n) abs+max scan
+  and assert `n × max|x| × max|y| < 2^62`. Production builds (`NDEBUG`)
+  skip the scan entirely — zero hot-path overhead.
+- Regression test `test_vec_dot_i64_bound_constant` pins the constant
+  to its derivation (`floor((2^63-1) / MAX_VAL²)`) so MAX_VAL drift can't
+  silently desync it, and verifies BitNet-shape inputs (n=128, ±10K
+  cells) produce results well within the bound.
 
 ## Conclusion (revised)
 

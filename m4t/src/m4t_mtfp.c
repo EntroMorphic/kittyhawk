@@ -95,6 +95,30 @@ int64_t m4t_mtfp_vec_dot_i64(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n) {
     if (n == 0) return 0;
     assert(x && y);
 
+    /* Debug-only overflow guard: in test builds (-UNDEBUG), scan for the
+     * worst-case absolute magnitudes and assert that n × max|x| × max|y|
+     * fits int64 with at least 1 bit margin. Production builds (NDEBUG)
+     * skip the O(n) scan entirely. Catches misuse like calling with very
+     * large n on inputs near MTFP19_MAX without affecting hot-path latency. */
+#ifndef NDEBUG
+    {
+        int64_t max_ax = 0, max_ay = 0;
+        for (int i = 0; i < n; i++) {
+            int64_t ax = x[i] < 0 ? -(int64_t)x[i] : (int64_t)x[i];
+            int64_t ay = y[i] < 0 ? -(int64_t)y[i] : (int64_t)y[i];
+            if (ax > max_ax) max_ax = ax;
+            if (ay > max_ay) max_ay = ay;
+        }
+        /* Worst-case sum bound: n × max_ax × max_ay must leave 1 bit margin
+         * vs INT64_MAX = 2^63 − 1. Equivalent: n × max_ax × max_ay < 2^62. */
+        if (max_ax > 0 && max_ay > 0) {
+            int64_t per_prod_cap = (int64_t)1 << 62;
+            assert((int64_t)n <= per_prod_cap / (max_ax * max_ay) &&
+                   "m4t_mtfp_vec_dot_i64: input magnitudes × n would overflow int64");
+        }
+    }
+#endif
+
 #if M4T_HAS_NEON
     int64x2_t acc_lo = vdupq_n_s64(0);
     int64x2_t acc_hi = vdupq_n_s64(0);

@@ -333,6 +333,45 @@ static void test_vec_dot_i64_extreme(void) {
     free(x); free(y);
 }
 
+/* Regression: pin the documented worst-case n bound and verify the
+ * BitNet-shape workload (n = head_dim = 128, mantissas << MAX_VAL) fits
+ * comfortably under the int64 accumulator. Per item #4 of the post-fix
+ * concern remediation; documented in m4t_mtfp.h docstring. */
+static void test_vec_dot_i64_bound_constant(void) {
+    /* Constant must match the worst-case derivation:
+     * floor((2^63 - 1) / MAX_VAL²) = floor((2^63 - 1) / (2^29.1)²). */
+    int64_t per_prod_worst = (int64_t)M4T_MTFP_MAX_VAL * (int64_t)M4T_MTFP_MAX_VAL;
+    int64_t k_max_derived = (int64_t)0x7FFFFFFFFFFFFFFFLL / per_prod_worst;
+    if (M4T_VEC_DOT_I64_K_MAX_WORST_CASE != (int)k_max_derived) {
+        FAIL("worst-case K constant drift: documented %d, derived %lld",
+             M4T_VEC_DOT_I64_K_MAX_WORST_CASE, (long long)k_max_derived);
+    }
+    /* BitNet attention scoring shape: n=128, |Q|, |K| << MAX_VAL.
+     * Use representative magnitudes (~10K, well within MTFP19 mantissa
+     * for activations at BITNET_ACT_BX = 8). Sum-of-products bound:
+     * 128 × 10K × 10K = 1.28e10, well under 2^62. */
+    int n = 128;
+    m4t_mtfp_t x[128], y[128];
+    for (int i = 0; i < n; i++) {
+        x[i] = (m4t_mtfp_t)((i * 7919) % 20000 - 10000);
+        y[i] = (m4t_mtfp_t)((i * 6151) % 20000 - 10000);
+    }
+    int64_t neon = m4t_mtfp_vec_dot_i64(x, y, n);
+    int64_t ref  = m4t_mtfp_vec_dot_i64_scalar_ref(x, y, n);
+    if (neon != ref) {
+        FAIL("dot_i64 BitNet shape: NEON=%lld ref=%lld",
+             (long long)neon, (long long)ref);
+    }
+    /* Result magnitude check: empirical BitNet headroom claim is
+     * ~2^28.5 vs int64. For random ±10K cells × n=128, |sum| ≤
+     * 128 × 10K × 10K = 1.28e10 ≈ 2^33.6 — well within int64. */
+    int64_t a_neon = neon < 0 ? -neon : neon;
+    if (a_neon > ((int64_t)1 << 35)) {
+        FAIL("dot_i64 BitNet shape result %lld exceeds expected magnitude bound",
+             (long long)a_neon);
+    }
+}
+
 /* ── m4t_mtfp_relu2_inplace_bx (V14.D) ─────────────────────────────────── */
 
 static void test_relu2_bx_aligned(void) {
@@ -923,6 +962,7 @@ int main(void) {
     test_vec_dot_i64_aligned();
     test_vec_dot_i64_unaligned();
     test_vec_dot_i64_extreme();
+    test_vec_dot_i64_bound_constant();
 
     test_attn_v_combine_aligned();
     test_attn_v_combine_unaligned();

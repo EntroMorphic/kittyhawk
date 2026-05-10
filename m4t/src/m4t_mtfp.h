@@ -125,19 +125,31 @@ void m4t_mtfp_vec_sub_inplace(m4t_mtfp_t* dst, const m4t_mtfp_t* a, int n);
  * bitnet_lm_head and bitnet_argmax_full_vocab. No scalar tail —
  * boundary handled via stack-local zero-padded 4-element buffers.
  *
- * Bound analysis: per product fits int64 (max |MTFP19_MAX|² ≈ 3.4e17).
- * Sum fits int64 for n × 3.4e17 < 9.2e18, i.e. n ≤ 27 in the
- * worst-case-saturated sense. In practice activations are well
- * below MTFP19 max so larger n is fine; the substrate doesn't
- * verify this. Caller responsible if both operands hover near
- * MTFP19_MAX over very large n (matches the prior scalar
- * implementation's overflow behavior).
+ * Bound analysis: per product fits int64 (max |MTFP19_MAX|² ≈ 3.4e17 = 2^58.2).
+ * Sum fits int64 for n × 3.4e17 < 9.2e18 (= 2^63 − 1), i.e.
+ *   n ≤ M4T_VEC_DOT_I64_K_MAX_WORST_CASE = 27
+ * IF every cell saturates at ±MTFP19_MAX. Most realistic inputs sit far
+ * below MAX_VAL, so the practical bound is much higher.
+ *
+ * Empirical reference: BitNet b1.58-2B-4T attention scoring uses n=128
+ * (head_dim). Worst observed |Q·K| during a full 30-layer × 8-position
+ * forward pass: 2.37e10 ≈ 2^34.5 — leaves 2^28.5 (~370M×) headroom vs
+ * int64 max. Verified in journal/saturation_audit_complete_2026-05-09.md.
+ *
+ * Verification:
+ *   - Production (NDEBUG): no runtime check; caller responsibility.
+ *   - Debug builds (-UNDEBUG, used by m4t_test): an O(n) abs+max scan
+ *     asserts n × max|x| × max|y| < 2^62 (1-bit margin). Catches abuse
+ *     at test time without affecting production latency.
  *
  * Preconditions:
  *   n >= 0 (n==0 returns 0)
  *   x, y non-NULL when n > 0
  *   x and y point to disjoint or aliasing memory (no aliasing
- *     constraint — operation is read-only on both inputs) */
+ *     constraint — operation is read-only on both inputs)
+ *   Sum-of-products fits int64 (caller responsibility in production;
+ *     debug builds assert) */
+#define M4T_VEC_DOT_I64_K_MAX_WORST_CASE 27
 int64_t m4t_mtfp_vec_dot_i64(const m4t_mtfp_t* x, const m4t_mtfp_t* y, int n);
 
 /* Scalar-only reference. Test oracle for m4t_mtfp_vec_dot_i64.
