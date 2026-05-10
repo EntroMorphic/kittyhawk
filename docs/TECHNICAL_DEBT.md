@@ -20,6 +20,29 @@ The journal cycles are the source of truth. This doc is an index for navigation.
 
 ## Functional gaps (consumer-visible)
 
+### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks
+
+**Source:** `journal/inference_battery_v2_2026-05-09.md` (red-team finding).
+**State:** expanded 24-prompt battery showed 5 substrate failures. HF
+(bf16) on the same 5 prompts handled 4 of them correctly. The substrate
+fails on multi-step reasoning ("trip 3pm→5pm" answered as 8 hours instead
+of 2), arithmetic beyond simple addition (`144 ÷ 12` → repeating loop),
+code completion (drifts into repetition by token ~30), and structured
+output (JSON formatting fails). On easy tasks (factual recall, definitions,
+narrative, long-context) the substrate matches or rivals HF.
+**Diagnosis hypothesis (not confirmed):** residual quantization noise from
+some kernel we haven't audited; or the BITNET_ACT_BX = 8 saturation
+tradeoff (TD-19 closed but saturations remain at 0.034%); or softmax
+precision (V14.G v2 vs ideal); or interaction effects.
+**Remediation:** localize per-layer divergence on a substrate-specific
+failure (e.g., `code_loop`) by capturing both substrate and HF activations
+and finding the layer where ε first exceeds threshold. Then narrow to a
+specific kernel via the same pattern as the RMSNorm investigation.
+**Priority hint:** medium. Not blocking — the substrate is still coherent.
+But this is the next layer of substrate-quality work; if not addressed,
+"substrate runs BitNet inference" remains true but understating the
+degradation.
+
 ### TD-19 — Late-layer `block_output` saturation in BitNet inference (CLOSED 2026-05-09)
 
 **Source:** `journal/saturation_audit_2026-05-09.md` (red-team revision).

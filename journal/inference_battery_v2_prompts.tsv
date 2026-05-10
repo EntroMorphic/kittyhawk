@@ -1,0 +1,25 @@
+factual_capital	30	128000,3923,374,279,6864,315,9822,30	What is the capital of France?
+factual_hamlet	30	128000,15546,6267,9777,1169,30	Who wrote Hamlet?
+factual_columbus	30	128000,644,1148,1060,1550,32917,17782,304,279,52248,30	In what year did Columbus arrive in the Americas?
+def_photosynth	30	128000,32872,74767,374	Photosynthesis is
+def_gravity	30	128000,39509,374,279,5457,430	Gravity is the force that
+def_ml	30	128000,22333,6975,374,264,2115	Machine learning is a field
+nar_once	60	128000,12805,5304,264,892	Once upon a time
+nar_storm	60	128000,2181,574,264,6453,323,13766,88,3814,11,323	It was a dark and stormy night, and
+nar_discovery	60	128000,791,28568,7111,520,279,828,323,15393	The scientist looked at the data and realized
+math_add	30	128000,717,5636,220,22,17239	12 plus 7 equals
+math_div	30	128000,8929,18255,555,220,717,17239	144 divided by 12 equals
+reason_word	30	128000,2746,264,5542,11141,520,220,18,5298,323,30782,520,220,20,5298,11,279,8577,3952	If a train leaves at 3pm and arrives at 5pm, the trip took
+code_python	60	128000,755,76798,1471,1680	def fibonacci(n):
+code_loop	60	128000,2000,602,304,2134,7,605,1680	for i in range(10):
+code_comment	60	128000,322,5830,311,3460,459,1358,315,26864	// Function to sort an array of integers
+translate_french	30	128000,28573,311,8753,25,22691,11,1268,527,499,30	Translate to French: Hello, how are you?
+dialog_continue	30	128000,32,25,2650,527,499,3815,3432,5380,33,25,358,1097	A: How are you doing today?
+B: I am
+json_format	30	128000,12281,311,4823,25,836,374,30505,11,4325,374,220,966,13,4823,25	Convert to JSON: name is Alice, age is 30. JSON:
+long_history	30	128000,791,3925,315,279,18991,3577,45395,1690,24552,13,52686,36592,279,83679,955,18991,3577,304,279,220,868,339,9478,11,902,14110,1534,279,9041,315,6677,13,13538,430,11	The history of the printing press spans many centuries. Gutenberg invented the movable type printing press in the 15th century, which revolutionized the spread of knowledge. Before that,
+long_recipe	30	128000,1271,23360,264,18414,19692,499,1205,20415,11,13465,11,19335,11,14432,11,62888,17138,11,28915,17138,11,12290,11,14403,11,323,33165,8819,13,5629,11,864,20559,279,24276,13,5112,11	To bake a chocolate cake you need flour, sugar, eggs, butter, cocoa powder, baking powder, salt, milk, and vanilla extract. First, preheat the oven. Then,
+long_summary	30	128000,644,12399,11,279,2380,1925,8125,369,279,18174,315,279,13041,21080,1051,5054,56399,11,7100,35665,11,323,9434,1558,88771,555,5370,54490,1122,39503,13,578,1455,5199,315,1521,574	In summary, the three main reasons for the decline of the Roman Empire were political instability, economic troubles, and external invasions by various barbarian tribes. The most significant of these was
+edge_single	60	128000,9906	Hello
+edge_repetitive	60	128000,9891,10035,10035,10035,10035,10035,10035,10035,10035,10035,10035,10035,10035,10035,10035	yes yes yes yes yes yes yes yes yes yes yes yes yes yes yes
+edge_question	60	128000,10445,30	Why?
