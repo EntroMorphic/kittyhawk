@@ -4,7 +4,7 @@ A routing-first ternary compute stack for Apple Silicon. Built on the thesis tha
 
 **Start here:** [`NORTH_STAR.md`](NORTH_STAR.md) — the compass.
 
-## Status (as of 2026-05-09)
+## Status (as of 2026-05-10)
 
 Ground-zero rebuild **complete through Tier 3** plus substrate-claim measurements landed AND **first real consumer (BitNet b1.58-2B-4T) producing coherent end-to-end inference** on the substrate. Layers:
 
@@ -25,8 +25,9 @@ Project-wide invariants enforced: NEON-only production paths; no scalar fallback
 
 **BitNet b1.58-2B-4T inference (substrate's first real-LLM consumer):**
 - **30 layers × any prompt length × KV-cached greedy generation.** Default A8 BitLinear path plus a bit-faithful no-A8 path used for substrate-vs-HF localization. Per `gesh/bitnet/`.
-- **Coherent end-to-end output verified across an 8-prompt battery** (factual, definitional, narrative, math, reasoning, translation; zero degenerate loops; top-K overlap with HF bf16 = 7/10 at BOS). Per `journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md`.
+- **Quality characterized on a 24-prompt battery** across factual / definitional / narrative / math / code / structured-output / long-context / edge categories. Strict pass rate **~80%** (~19/24, zero hard failures) post-hyperparameter-sweep. Earlier 8-prompt battery (8/8 coherent) confirmed coherence; the 24-prompt v2 surfaced and characterized substrate-specific quality limits. Per `journal/inference_battery_v2_2026-05-09.md` and `journal/hp_sweep_2026-05-10.md`.
 - **Substrate-vs-HF investigation closed** — a latent silent-saturation bug in `m4t_mtfp_rmsnorm_bx` at `gamma_bx > target_bx` (BitNet's typical regime) collapsed `post_attention_layernorm` outputs by 6.5× and produced degenerate generation loops; fixed at commits `4d4c917` / `8bb78d2`. Per `journal/substrate_vs_hf_2026-05-09/RESOLVED.md`.
+- **Hyperparameter retuning** — `BITNET_GATE_ACT_BX 2 → 1` recovered 4 of 5 substrate-specific quality failures uncovered by the v2 battery (commit `d2c01ae`). Mechanism: trades 1 trit of fractional precision for 3× wider real-space range in the FFN gate²·up product; the wider range was previously masked by the RMSNorm bug's magnitude collapse. Per `journal/hp_sweep_2026-05-10.md`.
 
 **Substrate-claim measurements (this cycle's landing):**
 - **Tri-state utilization audit** (`journal/tristate_op_*`). Two-gate audit of third-state utilization across substrate layers L1-L4 + L6 on a 1.58-bit-LLM-shape workload. Verdict: L1, L2, L6 unambiguously load-bearing per both gates; L4 least load-bearing (mean cos ≈ 0.94); L3 sparsity-dominated.

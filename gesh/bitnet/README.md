@@ -9,14 +9,19 @@ This is **Phase 1** of the four-phase ternary-ML arc (inference → fine-tune �
 train-from-scratch → productize). The harness validates that the substrate's
 kernel surface composes into a real ternary LLM.
 
-## Status (2026-05-08)
+## Status (2026-05-10)
 
 - **Forward pass: 30 layers × any prompt length, KV cache, greedy generation.**
-- **Coherent end-to-end output verified across an 8-prompt battery.** Zero
-  degenerate loops. Token-level divergence from HF bf16 is the expected
-  artifact of greedy decoding under MTFP19 vs bf16 logit ε — both paths
-  produce coherent English. See
-  [`journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md`](../../journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md).
+- **Quality characterized on a 24-prompt battery** spanning factual /
+  definitional / narrative / math / code / structured-output / long-context /
+  edge categories. Strict pass rate **~80%** (~19/24) post-hyperparameter-sweep,
+  zero hard failures. See
+  [`journal/inference_battery_v2_2026-05-09.md`](../../journal/inference_battery_v2_2026-05-09.md)
+  for the per-prompt breakdown and
+  [`journal/hp_sweep_2026-05-10.md`](../../journal/hp_sweep_2026-05-10.md) for
+  the GATE_ACT_BX = 1 retuning that recovered 4 of 5 substrate-specific
+  failures. (Earlier 8-prompt battery confirmed coherence on easy categories;
+  v2 surfaced and characterized the harder ones.)
 - **Substrate-vs-HF investigation closed.** A latent silent-saturation bug in
   `m4t_mtfp_rmsnorm_bx` at `gamma_bx > target_bx` (BitNet's typical regime)
   collapsed `post_attention_layernorm` outputs by 6.5× and produced
@@ -123,8 +128,10 @@ All NEON-only in production (`feedback_function_over_speed_no_scalar`).
   forms are not on the harness path).
 - **Cross-exp / vec primitives:** `m4t_mtfp_vec_add_inplace`,
   `m4t_mtfp_rescale_bx`.
-- **Attention:** `m4t_rope_apply_neon`, `m4t_softmax_exp_poly_neon` (V14.G v2),
-  `m4t_mtfp_a8_vec_scale_neon`.
+- **Attention:** `m4t_mtfp_rope_apply` (RoPE rotation; LUT-backed cos/sin
+  at Q29 fixed-point), `m4t_mtfp_softmax` (V14.G v2 NEON-gather LUT),
+  `m4t_mtfp_vec_dot_i64` (Q·K dot accumulator), `m4t_mtfp_attn_v_combine`
+  (weighted V output).
 
 ## Running the harness
 

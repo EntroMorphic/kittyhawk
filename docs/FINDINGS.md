@@ -1,6 +1,6 @@
 ---
 title: Findings
-status: substrate complete + 3 substrate-claim axes landed + BitNet b1.58-2B-4T inference end-to-end (2026-05-09)
+status: substrate complete + 3 substrate-claim axes landed + BitNet b1.58-2B-4T inference characterized (2026-05-10)
 companions: NORTH_STAR.md · docs/THESIS.md · docs/REMEDIATION_PLAN.md · CHANGELOG.md
 ---
 
@@ -119,6 +119,26 @@ Each axis records:
 
 **Journal cycles.** `journal/tristate_strong_*` (RAW → SYNTHESIZE → CLOSEOUT, multi-round red-team) + `journal/tristate_strong_5in8_addendum.md` (sub-2-bit packing) + `journal/tristate_strong_membw_*` (memory regime test) + `journal/p0_kernel_opt_redteam.md` (P0-1/P0-2/P0-3 with per-item red-team).
 
+## Axis 4 — BitNet b1.58-2B-4T end-to-end inference quality on the substrate
+
+**Question.** Does the substrate run a real ternary LLM (BitNet b1.58-2B-4T, 2B parameters, 30 layers) end-to-end with quality comparable to the bf16 reference?
+
+**Measurement.** 24-prompt greedy-decoded battery across 8 categories: factual recall (3), definitional (3), narrative (3), math/reasoning (3), code (3), dialog/structured (3), long-context (3), edge cases (3). Each prompt manually classified ✓ / ⚠ / ✗ for correctness + coherence. HF (bf16) cross-checked on the substrate-specific failure subset.
+
+| Configuration | ✓ | ⚠ | ✗ | Strict pass |
+|---|---|---|---|---|
+| Pre-RMSNorm-fix substrate | (degenerate loops on canary) | — | — | — |
+| Post-RMSNorm-fix, baseline (BX=2) | 15 | 4 | 5 | 63% |
+| Post-fix + GATE_ACT_BX = 1 | ~19 | ~5 | 0 | ~80% |
+
+The ~80% configuration matches HF's behavior on 4 of 5 previously-failing prompts (`reason_word`, `code_loop`, `code_comment`, `json_format`). The single remaining substrate-specific divergence at this config is `factual_hamlet` (gives a "Hint: It's a famous play..." instead of "Shakespeare"); see TD-22.
+
+**What this is not.** Not a benchmark score. Not a competitive eval against any standard NLP suite (24 prompts is small; there's no public BitNet eval). It's a substrate-quality characterization at the 2B-LLM scale: the substrate's MTFP19 / packed-ternary numeric system runs the model to coherent end-to-end output across diverse task categories, with measurable but well-characterized quality limits.
+
+**What this is.** First empirical confirmation that the substrate can host a real ternary LLM at production scale. Prior to this work, the substrate had been validated at the kernel level (Axis 0) and the synthetic-routing level (Gesh phase A.1/A.2), but never on a real consumer model. The 24-prompt battery across diverse task shapes makes the kernel-correctness story (Axis 0) downstream-meaningful: the kernels not only pass their unit tests, they compose into a model whose outputs are coherent.
+
+**Journal cycles.** `journal/bitnet_phase1_*` (raw → nodes → reflect → synthesize → closeout, work-units 1-8); `journal/substrate_vs_hf_2026-05-09/RESOLVED.md` (RMSNorm bug fix); `journal/post_rmsnorm_fix_battery_2026-05-09/SUMMARY.md` (initial 8-prompt confirmation); `journal/inference_battery_v2_2026-05-09.md` (24-prompt characterization, including HF cross-check on failures); `journal/hp_sweep_2026-05-10.md` (GATE_ACT_BX retuning that recovered 4 of 5 failures).
+
 ## Open axes (not yet measured)
 
 - **Strong-claim L2 (activations).** Same shape as L1; likely similar verdict at fixed density. Not yet run.
@@ -126,3 +146,5 @@ Each axis records:
 - **Strong-claim L5 (cross-exp accumulator).** Requires residual-style workload not produced by GEMM. Not yet run.
 - **Strong-claim L6 (post-ternarization activations).** Same shape as L2.
 - **Vision claim 3 (broad form).** Each layer's strong-claim cycle is a tile of this broader question. The L1 verdict is the first defensible empirical point.
+- **BitNet inference under sampling** (top-k, top-p, temperature). Axis 4 is greedy-only. Sampling may soften some greedy-failure modes (loops); also may introduce different failure shapes. Open.
+- **HF-vs-substrate full 24-prompt comparison.** Currently only the 5-failure subset has HF cross-check. A full HF run would establish the substrate's quality delta vs reference across every prompt.

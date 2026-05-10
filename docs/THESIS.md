@@ -1,7 +1,7 @@
 ---
 title: Thesis brief
 companions: NORTH_STAR.md · m4t/docs/M4T_SUBSTRATE.md · docs/FINDINGS.md
-status: substrate complete + BitNet b1.58-2B-4T inference end-to-end (2026-05-09)
+status: substrate complete + BitNet b1.58-2B-4T inference characterized at ~80% strict pass on 24-prompt battery (2026-05-10)
 ---
 
 # Thesis

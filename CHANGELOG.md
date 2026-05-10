@@ -4,6 +4,53 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Changed — `BITNET_GATE_ACT_BX` 2 → 1 recovers TD-20 quality failures (2026-05-10)
+Per `journal/hp_sweep_2026-05-10.md` (commit `d2c01ae`).
+
+After the RMSNorm fix landed (commit `4d4c917`, 2026-05-08), an expanded
+24-prompt inference battery showed the substrate had measurable quality
+degradation vs HF (bf16) on multi-step reasoning, code completion, and
+structured output — 5 substrate-specific failures (TD-20). Hypothesis: the
+four substrate hyperparameters (`score_shift` fudge, `BITNET_FFN_BX`,
+`BITNET_GATE_ACT_BX`, RMSNorm `eps_mantissa`) had all been tuned on the
+pre-fix substrate where residual magnitudes were 6.5× smaller; post-fix,
+prior tuning may have drifted out of optimum.
+
+Single-knob sweep on the 5-failure subset:
+
+| Config | Pass |
+|---|---|
+| baseline | 1/5 |
+| `gate1` (GATE_ACT_BX = 1) | **5/5** |
+| `fudge2` (score_shift fudge = 2) | 4/5 |
+| `ffn8` (FFN_BX = 8) | 4/5 |
+| (others) | ≤ 3/5 |
+
+Full 24-prompt battery on `gate1`: **+5 / -1 vs baseline.** Strict pass
+rate jumped from 15/24 (63%) to ~19/24 (~80%); zero hard failures.
+Substrate-specific failures recovered:
+- `reason_word`: "8 hours" ✗ → "**2 hours.**" ✓ (matches HF)
+- `code_loop`: drift loop → real Python with `print(f...)` output
+- `code_comment`: comment loop → `def sort_array(arr): arr.sort() return arr`
+- `json_format`: ```python loop → `{"name": "Alice", "age": 30}.`
+
+One regression: `factual_hamlet` gives "(Hint: It's a famous play..." instead
+of "Shakespeare." Recorded as TD-22 along with untested `gate1+fudge2` /
+`gate1+ffn8` combinations.
+
+**Mechanism**: gate²·up product is at `2*FFN_BX = 12` scale; narrowing to
+`GATE_ACT_BX`. At BX=2: divide by 3^10, real-space ceiling MAX_VAL/3^2 ≈
+64.5M. At BX=1: divide by 3^11, ceiling MAX_VAL/3^1 ≈ 194M (3× wider).
+Trades 1 trit of fractional precision for 3× dynamic range. The downstream
+`ffn_sub_norm` normalizes magnitude away, so range matters more than the
+lost precision when residuals are at correct (post-fix) magnitudes. The
+original "Pearson invariant ∈ [1, 6]" sweep was on the buggy substrate
+where the range advantage didn't matter.
+
+TD-20 partially closed (4/5 failures recovered). Methodology lift in the
+journal: when a substrate hyperparameter is tuned on buggy state, retune
+after the fix.
+
 ### Fixed — RMSNorm `gamma_bx > target_bx` silent saturation (2026-05-08)
 Per `journal/substrate_vs_hf_2026-05-09/RESOLVED.md` (commits `4d4c917`, `8bb78d2`).
 
