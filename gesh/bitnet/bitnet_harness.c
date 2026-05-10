@@ -24,6 +24,8 @@
 
 #include "m4t_ternary_matmul.h"
 #include "m4t_mtfp.h"
+#include "m4t_route.h"        /* Cycle 2 Phase 2.4: substrate-routed sparse attention */
+#include "m4t_trit_pack.h"    /* M4T_TRIT_PACKED_BYTES for signature sizing */
 #include "m4t_types.h"
 
 #include <stdio.h>
@@ -183,6 +185,92 @@ static void bitnet_pick_random_indices(int* out, int k, int n, unsigned int* rng
         out[i] = pool[i];
     }
     free(pool);
+}
+
+/* qsort comparator for int64 ascending. */
+static int bitnet_cmp_i64_asc(const void* a, const void* b) {
+    int64_t av = *(const int64_t*)a, bv = *(const int64_t*)b;
+    return (av > bv) - (av < bv);
+}
+
+/* Compute a percentile-based tau over |values[]| to feed
+ * m4t_route_threshold_extract such that all three trit states are
+ * realized non-trivially (per §18 input-class contract). Uses the
+ * 1/3-quantile of absolute values: ~33% of trits will be 0, ~33%
+ * will be +1, ~33% will be -1 in the resulting signature. Returns
+ * tau in the same units as |values|. */
+static int64_t bitnet_routed_pick_tau(const m4t_mtfp_t* values, int n) {
+    int64_t* abs_vals = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    for (int i = 0; i < n; i++) {
+        int32_t v = values[i];
+        abs_vals[i] = (int64_t)(v < 0 ? -v : v);
+    }
+    qsort(abs_vals, (size_t)n, sizeof(int64_t), bitnet_cmp_i64_asc);
+    int64_t tau = abs_vals[n / 3];
+    if (tau < 1) tau = 1;  /* floor at 1 to avoid all-trit-zero degenerate */
+    free(abs_vals);
+    return tau;
+}
+
+/* Pick the k positions in [0, seq_k) whose K signatures are CLOSEST to
+ * the Q signature in popcount (Hamming-on-trits) distance. Uses
+ * m4t_route_threshold_extract to build signatures and
+ * m4t_route_distance_batch for distance computation. Manually sorts
+ * distances for top-k selection (route_topk_abs has T ≤ 64 limit; we
+ * want it for arbitrary seq_k).
+ *
+ * out[0..k) = chosen position indices. */
+static int bitnet_pick_routed_compare(const void* a, const void* b) {
+    /* Sort ascending by second-element-of-pair (distance). */
+    int32_t av = ((const int32_t*)a)[1];
+    int32_t bv = ((const int32_t*)b)[1];
+    return (av > bv) - (av < bv);
+}
+
+static void bitnet_pick_routed_indices(
+    int* out, int k, int seq_k,
+    const m4t_mtfp_t* qh,
+    const m4t_mtfp_t* k_cache, size_t k_row_size, int kv_head,
+    int head_dim)
+{
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(head_dim);
+
+    /* Choose tau from Q's magnitude distribution to realize all three trit states. */
+    int64_t tau = bitnet_routed_pick_tau(qh, head_dim);
+
+    /* Q signature. */
+    int64_t* q_i64 = (int64_t*)malloc((size_t)head_dim * sizeof(int64_t));
+    for (int d = 0; d < head_dim; d++) q_i64[d] = (int64_t)qh[d];
+    uint8_t* q_sig = (uint8_t*)malloc((size_t)sig_bytes);
+    m4t_route_threshold_extract(q_sig, q_i64, tau, head_dim);
+
+    /* K signatures (one per position). */
+    uint8_t* k_sigs = (uint8_t*)malloc((size_t)seq_k * sig_bytes);
+    int64_t* tmp_i64 = q_i64;  /* reuse */
+    for (int t = 0; t < seq_k; t++) {
+        const m4t_mtfp_t* kh = k_cache + (size_t)t * k_row_size + (size_t)kv_head * head_dim;
+        for (int d = 0; d < head_dim; d++) tmp_i64[d] = (int64_t)kh[d];
+        m4t_route_threshold_extract(k_sigs + (size_t)t * sig_bytes,
+                                     tmp_i64, tau, head_dim);
+    }
+
+    /* Distances. mask = all 0xFF (consider all positions). */
+    uint8_t* mask = (uint8_t*)malloc((size_t)sig_bytes);
+    memset(mask, 0xFF, (size_t)sig_bytes);
+    int32_t* dists = (int32_t*)malloc((size_t)seq_k * sizeof(int32_t));
+    m4t_route_distance_batch(dists, q_sig, k_sigs, mask, seq_k, head_dim);
+
+    /* Top-k by SMALLEST distance — sort (idx, dist) pairs ascending. */
+    int32_t* pairs = (int32_t*)malloc((size_t)seq_k * 2 * sizeof(int32_t));
+    for (int t = 0; t < seq_k; t++) {
+        pairs[2*t + 0] = (int32_t)t;
+        pairs[2*t + 1] = dists[t];
+    }
+    qsort(pairs, (size_t)seq_k, 2 * sizeof(int32_t), bitnet_pick_routed_compare);
+    for (int i = 0; i < k; i++) out[i] = (int)pairs[2*i + 0];
+
+    free(pairs); free(dists); free(mask);
+    free(k_sigs); free(q_sig); free(q_i64);
 }
 
 /* Pick top-k indices from scores[0..n) by absolute value (descending).
@@ -579,10 +667,16 @@ void bitnet_forward_block(
                             if (a > max_abs) max_abs = a;
                         }
                     } else {
-                        /* RANDOM (default sparse) and ROUTED-as-random-stub. */
-                        if (g_attn_mode == BITNET_ATTN_RANDOM ||
-                            g_attn_mode == BITNET_ATTN_ROUTED) {
+                        /* RANDOM and ROUTED — pick indices, then compute true scores. */
+                        if (g_attn_mode == BITNET_ATTN_RANDOM) {
                             bitnet_pick_random_indices(indices, k_eff, seq_k, &g_attn_rng);
+                        } else if (g_attn_mode == BITNET_ATTN_ROUTED) {
+                            const m4t_mtfp_t* k_cache_layer =
+                                cache->k + (size_t)layer_idx * cache->per_layer_stride;
+                            bitnet_pick_routed_indices(
+                                indices, k_eff, seq_k,
+                                qh, k_cache_layer, row_size, kv_head,
+                                BITNET_HEAD_DIM);
                         }
                         /* Compute true Q·K dot at the chosen indices only. */
                         for (int i = 0; i < k_eff; i++) {
