@@ -32,6 +32,60 @@
 #include <stdint.h>
 #include <assert.h>
 
+/* ── Cycle 2 (Part-B sparse attention experiment) — runtime-selectable
+ *    attention mode. Default DENSE = current production behavior; sparse
+ *    arms (RANDOM, ROUTED, ORACLE) exist for the experiment per
+ *    journal/cycle2_design.md and journal/partB_experiments_synth.md.
+ *
+ *    Set BITNET_ATTN_MODE ∈ {dense,random,routed,oracle} (case-insensitive)
+ *    Set BITNET_ATTN_K ∈ positive int (default = head_dim, i.e. equivalent
+ *    to dense for sparse modes).
+ *
+ *    When env vars are unset: bit-exact match to the production path. */
+typedef enum {
+    BITNET_ATTN_DENSE = 0,
+    BITNET_ATTN_RANDOM,
+    BITNET_ATTN_ROUTED,
+    BITNET_ATTN_ORACLE,
+} bitnet_attn_mode_t;
+
+static bitnet_attn_mode_t g_attn_mode = BITNET_ATTN_DENSE;
+static int                g_attn_k    = BITNET_HEAD_DIM;  /* trajectory knob */
+static __attribute__((unused)) unsigned int g_attn_rng = 0xC0FFEE01u;  /* random-arm seed (used in Phase 2.2) */
+
+static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
+    switch (m) {
+        case BITNET_ATTN_DENSE:  return "dense";
+        case BITNET_ATTN_RANDOM: return "random";
+        case BITNET_ATTN_ROUTED: return "routed";
+        case BITNET_ATTN_ORACLE: return "oracle";
+    }
+    return "unknown";
+}
+
+static void bitnet_attn_mode_init_from_env(void) {
+    const char* m = getenv("BITNET_ATTN_MODE");
+    if (m) {
+        if      (!strcasecmp(m, "dense"))  g_attn_mode = BITNET_ATTN_DENSE;
+        else if (!strcasecmp(m, "random")) g_attn_mode = BITNET_ATTN_RANDOM;
+        else if (!strcasecmp(m, "routed")) g_attn_mode = BITNET_ATTN_ROUTED;
+        else if (!strcasecmp(m, "oracle")) g_attn_mode = BITNET_ATTN_ORACLE;
+        else {
+            fprintf(stderr, "[harness] unknown BITNET_ATTN_MODE=%s, using dense\n", m);
+        }
+    }
+    const char* k = getenv("BITNET_ATTN_K");
+    if (k) {
+        int v = atoi(k);
+        if (v > 0 && v <= BITNET_HEAD_DIM * 32) g_attn_k = v;
+        else fprintf(stderr, "[harness] bad BITNET_ATTN_K=%s, using %d\n", k, g_attn_k);
+    }
+    if (g_attn_mode != BITNET_ATTN_DENSE) {
+        fprintf(stderr, "[harness] sparse attention mode = %s, k = %d\n",
+                bitnet_attn_mode_name(g_attn_mode), g_attn_k);
+    }
+}
+
 /* ── Phase 2 work-unit 1: bx-aware activation flow constants. ────────────
  * Target bx for normal (linear-magnitude) activations through the
  * network. Picked to give MTFP19_MAX/3^14 ≈ 35 of headroom — comfortable
@@ -101,6 +155,91 @@
                                * (factual_hamlet gives a "Hint" instead
                                * of "Shakespeare"). Strict pass rate 15/24
                                * → ~19/24. Per journal/hp_sweep_2026-05-10.md. */
+
+/* ── Cycle 2 sparse-attention helpers (experimental; not on production
+ *    path unless BITNET_ATTN_MODE != dense). Per journal/cycle2_design.md. */
+
+/* xorshift32 for deterministic random index selection (random arm). */
+static inline unsigned int bitnet_xorshift32(unsigned int* state) {
+    unsigned int x = *state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+/* Pick k unique indices from [0, n) into out[]. Modifies *rng_state.
+ * Uses partial Fisher-Yates: O(n) memory + time, fine for our n ≤ 4096. */
+static void bitnet_pick_random_indices(int* out, int k, int n, unsigned int* rng_state) {
+    if (k >= n) {
+        for (int i = 0; i < n; i++) out[i] = i;
+        return;
+    }
+    int* pool = (int*)malloc((size_t)n * sizeof(int));
+    for (int i = 0; i < n; i++) pool[i] = i;
+    for (int i = 0; i < k; i++) {
+        unsigned int r = bitnet_xorshift32(rng_state);
+        int j = i + (int)(r % (unsigned int)(n - i));
+        int tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+        out[i] = pool[i];
+    }
+    free(pool);
+}
+
+/* Pick top-k indices from scores[0..n) by absolute value (descending).
+ * Used by ORACLE arm — picks the k positions with highest |Q·K| score
+ * after dense scores are computed. O(n log n) sort; fine for n ≤ 4096. */
+static int bitnet_pick_oracle_compare(const void* a, const void* b) {
+    /* Sort descending by |second-element-of-pair|. Pair: (index, abs_score). */
+    int64_t av = ((const int64_t*)a)[1];
+    int64_t bv = ((const int64_t*)b)[1];
+    if (av < bv) return  1;
+    if (av > bv) return -1;
+    return 0;
+}
+
+static void bitnet_pick_oracle_topk(int* out, int k, int n, const int64_t* scores) {
+    if (k >= n) {
+        for (int i = 0; i < n; i++) out[i] = i;
+        return;
+    }
+    int64_t* pairs = (int64_t*)malloc((size_t)n * 2 * sizeof(int64_t));
+    for (int i = 0; i < n; i++) {
+        pairs[2*i + 0] = (int64_t)i;
+        pairs[2*i + 1] = scores[i] < 0 ? -scores[i] : scores[i];
+    }
+    qsort(pairs, (size_t)n, 2 * sizeof(int64_t), bitnet_pick_oracle_compare);
+    for (int i = 0; i < k; i++) out[i] = (int)pairs[2*i + 0];
+    free(pairs);
+}
+
+/* Sparse attn_v_combine: out[d] = clamp(Σ_i weights[i] · V[indices[i]][d] >> shift).
+ * Scalar implementation — this path is experimental (Cycle 2 sparse arms);
+ * NOT on the production hot path when BITNET_ATTN_MODE is unset/dense.
+ * The dense path remains m4t_mtfp_attn_v_combine (NEON-routed). */
+static void bitnet_sparse_attn_v_combine(
+    m4t_mtfp_t* out, int shift,
+    const m4t_mtfp_t* weights,
+    const m4t_mtfp_t* V_base, size_t row_size,
+    int k, int head_dim,
+    const int* indices)
+{
+    int64_t* acc = (int64_t*)calloc((size_t)head_dim, sizeof(int64_t));
+    for (int i = 0; i < k; i++) {
+        int t = indices[i];
+        const m4t_mtfp_t* V_t = V_base + (size_t)t * row_size;
+        int64_t w = (int64_t)weights[i];
+        for (int d = 0; d < head_dim; d++) {
+            acc[d] += w * (int64_t)V_t[d];
+        }
+    }
+    for (int d = 0; d < head_dim; d++) {
+        int64_t r = acc[d] >> shift;
+        if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
+        if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
+        out[d] = (m4t_mtfp_t)r;
+    }
+    free(acc);
+}
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
  *
@@ -355,76 +494,133 @@ void bitnet_forward_block(
             m4t_mtfp_t* weights    = (m4t_mtfp_t*)malloc((size_t)seq_k * sizeof(m4t_mtfp_t));
             assert(scores_i64 && scores_int && weights);
 
+            /* Cycle 2: branch by attention mode. Dense path is bit-exact
+             * unchanged from production. Sparse arms (random/routed/oracle)
+             * use a separate code path with bitnet_sparse_attn_v_combine
+             * (scalar — experimental, not on production hot path). */
+            int sparse_active = (g_attn_mode != BITNET_ATTN_DENSE && g_attn_k < seq_k);
+
             for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
                 int kv_head = h / q_per_kv;
                 const m4t_mtfp_t* qh = s->q + (size_t)h * BITNET_HEAD_DIM;
-
-                /* Compute scores[t] = dot(qh, K_cache[layer][t][kv_head]). */
-                int64_t max_abs = 1;
-                for (int t = 0; t < seq_k; t++) {
-                    size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
-                                        + (size_t)t * row_size
-                                        + (size_t)kv_head * BITNET_HEAD_DIM;
-                    const m4t_mtfp_t* kh = cache->k + k_row_base;
-                    /* V14.A: NEON int32×int32→int64 dot via libm4t helper.
-                     * Same semantics as the prior scalar loop, but the
-                     * production code path is NEON-only per condition (5)
-                     * of the pure-ternary directive. */
-                    int64_t acc = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
-                    scores_i64[t] = acc;
-                    int64_t a = acc < 0 ? -acc : acc;
-                    if (a > max_abs) max_abs = a;
-                }
-
-                /* Rescale scores into "1 LSB ≈ 1 nat" range for softmax.
-                 * Adaptive: shift so max_abs maps to ≤ 30 nats, plus a
-                 * fudge factor that softens the distribution.
-                 *
-                 * Tuning history:
-                 * - Pre-RMSNorm-fix: empirical sweep over fudge ∈ {0..4}
-                 *   on a 10-prompt fact-recall battery; fudge=1 best
-                 *   (5/10). That tuning was on the buggy substrate.
-                 * - Post-RMSNorm-fix + GATE_ACT_BX = 1 (2026-05-10):
-                 *   atomics investigation of the holdout math_div failure
-                 *   (the 1 of 5 the gate1 fix didn't recover) showed it
-                 *   wasn't a single-kernel bug — per-layer ε grows
-                 *   ~5× per layer through compound noise, not a localized
-                 *   jump. Re-tested gate1 + fudge2 (the prior sweep had
-                 *   identified fudge2 as 4/5 single-knob winner but it
-                 *   wasn't combined with gate1). Result: math_div
-                 *   recovers ("12" direct), factual_hamlet recovers
-                 *   ("Shakespeare wrote Hamlet"), def_ml improves; one
-                 *   regression (code_comment loops the comment again).
-                 *   Net +3/-1 vs gate1 alone. Strict pass rate ~21/24.
-                 *   Per journal/math_div_atomics_2026-05-10.md. */
-                int score_shift = 0;
-                while ((max_abs >> score_shift) > 30) score_shift++;
-                score_shift += 2;
-
-                for (int t = 0; t < seq_k; t++) {
-                    int64_t r;
-                    if (scores_i64[t] >= 0) r = scores_i64[t] >> score_shift;
-                    else                    r = -((-scores_i64[t]) >> score_shift);
-                    if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
-                    if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
-                    scores_int[t] = (m4t_mtfp_t)r;
-                }
-
-                /* Softmax over scores. */
-                m4t_mtfp_softmax(weights, scores_int, seq_k);
-
-                /* attn_out[h × head_dim..] = Σ_t weights[t] · V_cache[layer][t][kv_head].
-                 * weights[t] is at scale 2^30; V is mantissa.
-                 * V14.B: NEON outer-product accumulate via libm4t helper.
-                 * Loop order swapped (t outer, d inner contiguous) for NEON
-                 * vmlal_s32 broadcast pattern; bit-exact equivalent of the
-                 * prior (d, t) scalar loop. */
                 m4t_mtfp_t* out_h = s->attn_output + (size_t)h * BITNET_HEAD_DIM;
                 const m4t_mtfp_t* V_base = cache->v
                     + (size_t)layer_idx * cache->per_layer_stride
                     + (size_t)kv_head * BITNET_HEAD_DIM;
-                m4t_mtfp_attn_v_combine(out_h, 30, weights, V_base, row_size,
-                                        seq_k, BITNET_HEAD_DIM);
+
+                if (!sparse_active) {
+                    /* ── DENSE PATH (production) — unchanged from pre-Cycle 2. */
+                    /* Compute scores[t] = dot(qh, K_cache[layer][t][kv_head]). */
+                    int64_t max_abs = 1;
+                    for (int t = 0; t < seq_k; t++) {
+                        size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                            + (size_t)t * row_size
+                                            + (size_t)kv_head * BITNET_HEAD_DIM;
+                        const m4t_mtfp_t* kh = cache->k + k_row_base;
+                        /* V14.A: NEON int32×int32→int64 dot via libm4t helper.
+                         * Same semantics as the prior scalar loop, but the
+                         * production code path is NEON-only per condition (5)
+                         * of the pure-ternary directive. */
+                        int64_t acc = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
+                        scores_i64[t] = acc;
+                        int64_t a = acc < 0 ? -acc : acc;
+                        if (a > max_abs) max_abs = a;
+                    }
+
+                    /* Rescale scores; see tuning history at score_shift below.
+                     * Per journal/math_div_atomics_2026-05-10.md (gate1+fudge2). */
+                    int score_shift = 0;
+                    while ((max_abs >> score_shift) > 30) score_shift++;
+                    score_shift += 2;
+
+                    for (int t = 0; t < seq_k; t++) {
+                        int64_t r;
+                        if (scores_i64[t] >= 0) r = scores_i64[t] >> score_shift;
+                        else                    r = -((-scores_i64[t]) >> score_shift);
+                        if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
+                        if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
+                        scores_int[t] = (m4t_mtfp_t)r;
+                    }
+
+                    m4t_mtfp_softmax(weights, scores_int, seq_k);
+
+                    /* V14.B: NEON outer-product accumulate via libm4t helper.
+                     * Loop order swapped (t outer, d inner) for NEON
+                     * vmlal_s32 broadcast pattern. */
+                    m4t_mtfp_attn_v_combine(out_h, 30, weights, V_base, row_size,
+                                            seq_k, BITNET_HEAD_DIM);
+                } else {
+                    /* ── SPARSE PATH (Cycle 2 experimental) ─────────────── */
+                    int k_eff = g_attn_k;  /* sparse_active gate ensures < seq_k */
+
+                    int* indices = (int*)malloc((size_t)k_eff * sizeof(int));
+                    int64_t* sub_scores_i64 = (int64_t*)malloc((size_t)k_eff * sizeof(int64_t));
+                    m4t_mtfp_t* sub_scores_int = (m4t_mtfp_t*)malloc((size_t)k_eff * sizeof(m4t_mtfp_t));
+                    m4t_mtfp_t* sub_weights = (m4t_mtfp_t*)malloc((size_t)k_eff * sizeof(m4t_mtfp_t));
+                    assert(indices && sub_scores_i64 && sub_scores_int && sub_weights);
+
+                    /* Pick indices per arm. RANDOM and ORACLE implemented in
+                     * Phases 2.2/2.3. ROUTED is Phase 2.4 (TODO). */
+                    int64_t max_abs = 1;
+                    if (g_attn_mode == BITNET_ATTN_ORACLE) {
+                        /* ORACLE: compute dense scores first, then pick top-k by |score|. */
+                        for (int t = 0; t < seq_k; t++) {
+                            size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                                + (size_t)t * row_size
+                                                + (size_t)kv_head * BITNET_HEAD_DIM;
+                            const m4t_mtfp_t* kh = cache->k + k_row_base;
+                            scores_i64[t] = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
+                        }
+                        bitnet_pick_oracle_topk(indices, k_eff, seq_k, scores_i64);
+                        /* Pull the chosen scores into the sub buffer. */
+                        for (int i = 0; i < k_eff; i++) {
+                            sub_scores_i64[i] = scores_i64[indices[i]];
+                            int64_t a = sub_scores_i64[i] < 0 ? -sub_scores_i64[i] : sub_scores_i64[i];
+                            if (a > max_abs) max_abs = a;
+                        }
+                    } else {
+                        /* RANDOM (default sparse) and ROUTED-as-random-stub. */
+                        if (g_attn_mode == BITNET_ATTN_RANDOM ||
+                            g_attn_mode == BITNET_ATTN_ROUTED) {
+                            bitnet_pick_random_indices(indices, k_eff, seq_k, &g_attn_rng);
+                        }
+                        /* Compute true Q·K dot at the chosen indices only. */
+                        for (int i = 0; i < k_eff; i++) {
+                            int t = indices[i];
+                            size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                                + (size_t)t * row_size
+                                                + (size_t)kv_head * BITNET_HEAD_DIM;
+                            const m4t_mtfp_t* kh = cache->k + k_row_base;
+                            int64_t acc = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
+                            sub_scores_i64[i] = acc;
+                            int64_t a = acc < 0 ? -acc : acc;
+                            if (a > max_abs) max_abs = a;
+                        }
+                    }
+
+                    int score_shift = 0;
+                    while ((max_abs >> score_shift) > 30) score_shift++;
+                    score_shift += 2;
+
+                    for (int i = 0; i < k_eff; i++) {
+                        int64_t r;
+                        if (sub_scores_i64[i] >= 0) r = sub_scores_i64[i] >> score_shift;
+                        else                        r = -((-sub_scores_i64[i]) >> score_shift);
+                        if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
+                        if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
+                        sub_scores_int[i] = (m4t_mtfp_t)r;
+                    }
+
+                    m4t_mtfp_softmax(sub_weights, sub_scores_int, k_eff);
+
+                    bitnet_sparse_attn_v_combine(out_h, 30, sub_weights,
+                                                  V_base, row_size,
+                                                  k_eff, BITNET_HEAD_DIM,
+                                                  indices);
+
+                    free(indices); free(sub_scores_i64);
+                    free(sub_scores_int); free(sub_weights);
+                }
             }
 
             /* Stash one debug score per head (last position's score),
@@ -684,6 +880,9 @@ static int bitnet_argmax_full_vocab(
 }
 
 int main(int argc, char** argv) {
+    /* Cycle 2: read sparse-attention mode from env. No-op when env unset. */
+    bitnet_attn_mode_init_from_env();
+
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
     int n_positions = 1;       /* number of positions to forward (work-unit 7 cache) */
