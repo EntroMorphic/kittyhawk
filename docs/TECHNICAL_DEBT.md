@@ -57,6 +57,28 @@ recovered math_div ("12" direct) plus the gate1 regression
 (factual_hamlet), bringing strict pass rate to ~22/24 (~92%). Both
 defaults updated.
 
+### TD-27 — Why does substrate-routed top-k outperform oracle top-k?
+
+**Source:** `journal/loop_regularizer_atomics_2026-05-10.md` open follow-ups.
+**State:** The Cycle 2 full battery showed routed_k=4 = 22/24 vs
+oracle_k=4 = 15/24. Both are relevance-aware sparse attention; both
+break loops by sparsification. The atomics confirmed sparsity is the
+loop-breaking mechanism, not routing specifically. But the gap between
+routed and oracle is real and substrate-distinct: signature-distance
+selection beats score-magnitude selection on this workload.
+**Hypothesis space:** Discrete-vs-continuous selection robustness;
+softmax-redistribution interaction (oracle picks high-|score| which
+includes high-NEGATIVE scores that softmax suppresses anyway, wasting
+sparsity budget); coarseness of trit signatures might be a feature
+not bug at small bx; selection-rule consistency across heads.
+**Remediation:** controlled experiment varying selection metric
+(signature distance vs raw |Q·K| vs |Q·K| restricted to positive
+scores vs other) while holding sparsity constant; compare per-head
+selection diversity; analyze softmax weight distribution at the chosen
+positions for each rule.
+**Priority hint:** medium. The Cycle 2 finding stands without this —
+but answering it would let us claim mechanism not just outcome.
+
 ### TD-23 — Manual classification of Cycle 2's 456 outputs
 
 **Source:** `journal/cycle2_full_battery_findings.md` honest caveats.
