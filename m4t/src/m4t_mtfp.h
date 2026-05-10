@@ -439,6 +439,23 @@ m4t_mtfp_t m4t_int32_rsqrt_scalar_ref(m4t_mtfp_t src);
  * inflated by ≤ 2× per cell. Acceptable for normalization; not
  * acceptable if the caller needs bit-exact symmetric behavior.
  *
+ * ⚠ COMPOSITION HAZARD: this kernel produces output at γ's IMPLICIT bx scale
+ * (whatever the caller's γ is denominated in). The internal clamp to
+ * M4T_MTFP_MAX_VAL therefore happens AT THAT SCALE. If a caller composes
+ * this with a subsequent rescale-down — e.g.
+ *     m4t_mtfp_rmsnorm(y, x, γ, ε, n);
+ *     m4t_mtfp_rescale_bx(y, y, gamma_bx, target_bx, n);  // gamma_bx > target_bx
+ * — they reconstruct the silent-saturation bug fixed in `m4t_mtfp_rmsnorm_bx`
+ * (commit 4d4c917). The intermediate per-cell value can exceed MAX_VAL even
+ * when the correct output at target_bx fits; the clamp-then-divide order
+ * masks the loss.
+ *
+ * For BitNet-style inference where γ_bx > activation_bx, USE
+ * `m4t_mtfp_rmsnorm_bx` INSTEAD. It internally pre-rescales γ to target_bx
+ * so the per-cell math lands at the right scale (no silent intermediate
+ * saturation). See `journal/substrate_vs_hf_2026-05-09/RESOLVED.md` for
+ * the full incident.
+ *
  * Per journal/rsqrt_design_lmm.md (work-unit 2 of bitnet_phase1). */
 void m4t_mtfp_rmsnorm(
     m4t_mtfp_t* y,
@@ -741,7 +758,15 @@ void m4t_mtfp_bitlinear_scale_no_a8_bx_scalar_ref(
  * dynamic range, but the downstream RMSNorm normalizes magnitude away.
  *
  * Per-cell scalar — 64-bit multiply doesn't naturally vectorize beyond
- * the existing block ops; documented per the cross-exp accum precedent. */
+ * the existing block ops; documented per the cross-exp accum precedent.
+ *
+ * ⚠ COMPOSITION HAZARD: output is at the IMPLICIT 2*x_bx scale (squaring
+ * doubles the bx). The internal clamp to M4T_MTFP_MAX_VAL therefore
+ * happens at that intermediate scale. If a caller composes this with a
+ * subsequent rescale-down to a lower bx, the intermediate clamp can mask
+ * silent saturation — same shape as the RMSNorm bug fixed in `4d4c917`.
+ * Use `m4t_mtfp_relu2_inplace_bx` for any caller that wants explicit
+ * x_bx → target_bx semantics; the bx variant divides BEFORE clamping. */
 void m4t_mtfp_relu2_inplace(m4t_mtfp_t* x, int n);
 void m4t_mtfp_relu2_inplace_scalar_ref(m4t_mtfp_t* x, int n);
 
@@ -749,7 +774,12 @@ void m4t_mtfp_relu2_inplace_scalar_ref(m4t_mtfp_t* x, int n);
  *
  * y[i] = a[i] · b[i] with saturating clamp. Used by BitNet's FFN gated
  * path: gate_act × up. Same precision concern as relu² (squared-magnitude
- * range exceeds MTFP19); same mitigation (followed by RMSNorm). */
+ * range exceeds MTFP19); same mitigation (followed by RMSNorm).
+ *
+ * ⚠ COMPOSITION HAZARD: output is at the IMPLICIT (a_bx + b_bx) scale.
+ * Same caveat as `m4t_mtfp_relu2_inplace` above — a caller composing this
+ * with a subsequent rescale-down reconstructs the silent-saturation bug
+ * shape. Use `m4t_mtfp_elementwise_mul_bx` for explicit bx tracking. */
 void m4t_mtfp_elementwise_mul(
     m4t_mtfp_t* y, const m4t_mtfp_t* a, const m4t_mtfp_t* b, int n);
 void m4t_mtfp_elementwise_mul_scalar_ref(

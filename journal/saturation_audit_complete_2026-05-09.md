@@ -113,9 +113,11 @@ The audit is comprehensive across:
 
 Total surface checked: ~16 source files, all clamp-pattern sites classified.
 
-## Open: composition hazard
+## Composition hazard — addressed
 
 Three non-`_bx` legacy variants (`m4t_mtfp_rmsnorm`, `m4t_mtfp_relu2_inplace`,
 `m4t_mtfp_elementwise_mul`) are individually clean but a future consumer
 could reconstruct the bug shape by composing them with `m4t_mtfp_rescale_bx`.
-Addressed separately as item 2 of the post-RMSNorm-fix concern list.
+Closed by header-level "⚠ COMPOSITION HAZARD" docstrings on each, pointing
+to the safe `_bx` alternatives and to this audit. No production callers
+existed at the time of remediation; tests + scalar_ref wrappers preserved.
