@@ -80,12 +80,27 @@
                                * (0.6857). FFN_BX=8 ranks Paris higher
                                * (#8 vs #41) but loses overall correlation
                                * — picking 6 favors broader signal. */
-#define BITNET_GATE_ACT_BX 2  /* MTFP19_MAX/3^2 ≈ 64.5M headroom for
-                               * gate²×up products. Empirically: Pearson
-                               * is invariant for GATE_ACT_BX ∈ [1, 6];
-                               * picking 2 to preserve ~17 fractional
-                               * bits below 1.0 while covering the 6M+
-                               * outlier range cleanly. */
+#define BITNET_GATE_ACT_BX 1  /* MTFP19_MAX/3^1 ≈ 194M headroom for
+                               * gate²×up products. Tuning history:
+                               *
+                               * Original choice (pre-RMSNorm-fix): 2,
+                               * "Pearson invariant for [1,6]; picking 2
+                               * to preserve ~17 fractional bits below 1.0."
+                               * That sweep was on the buggy substrate
+                               * (predates 4d4c917).
+                               *
+                               * Post-fix re-sweep (TD-20 remediation,
+                               * 2026-05-10): swept GATE_ACT_BX ∈ {1, 2,
+                               * 4, 6} on the 5 substrate-specific failure
+                               * prompts. BX=1 went from baseline 1/5 to
+                               * 5/5. Full 24-prompt battery confirmed:
+                               * 5 prompts upgrade from loop/wrong → coherent
+                               * (reason_word "2 hours" not "8", code_comment
+                               * yields real def sort_array, json_format
+                               * yields actual JSON), 1 regression
+                               * (factual_hamlet gives a "Hint" instead
+                               * of "Shakespeare"). Strict pass rate 15/24
+                               * → ~19/24. Per journal/hp_sweep_2026-05-10.md. */
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
  *

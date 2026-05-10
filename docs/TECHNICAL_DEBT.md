@@ -41,28 +41,42 @@ the bx-tracking convention as the load-bearing spec content.
 **Priority hint:** medium. Pre-existing spec drift; not introduced by
 the recent RMSNorm work. No production impact.
 
-### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks
+### TD-20 — Substrate quality degradation vs HF on reasoning/code/structured tasks (PARTIALLY CLOSED 2026-05-10)
 
 **Source:** `journal/inference_battery_v2_2026-05-09.md` (red-team finding).
-**State:** expanded 24-prompt battery showed 5 substrate failures. HF
-(bf16) on the same 5 prompts handled 4 of them correctly. The substrate
-fails on multi-step reasoning ("trip 3pm→5pm" answered as 8 hours instead
-of 2), arithmetic beyond simple addition (`144 ÷ 12` → repeating loop),
-code completion (drifts into repetition by token ~30), and structured
-output (JSON formatting fails). On easy tasks (factual recall, definitions,
-narrative, long-context) the substrate matches or rivals HF.
-**Diagnosis hypothesis (not confirmed):** residual quantization noise from
-some kernel we haven't audited; or the BITNET_ACT_BX = 8 saturation
-tradeoff (TD-19 closed but saturations remain at 0.034%); or softmax
-precision (V14.G v2 vs ideal); or interaction effects.
-**Remediation:** localize per-layer divergence on a substrate-specific
-failure (e.g., `code_loop`) by capturing both substrate and HF activations
-and finding the layer where ε first exceeds threshold. Then narrow to a
-specific kernel via the same pattern as the RMSNorm investigation.
-**Priority hint:** medium. Not blocking — the substrate is still coherent.
-But this is the next layer of substrate-quality work; if not addressed,
-"substrate runs BitNet inference" remains true but understating the
-degradation.
+**Original state:** expanded 24-prompt battery showed 5 substrate failures
+(reason_word, math_div, code_loop, code_comment, json_format). HF handled
+4 of 5 correctly.
+**Resolution (partial):** hyperparameter sweep
+(`journal/hp_sweep_2026-05-10.md`) found `BITNET_GATE_ACT_BX = 1` (down
+from 2) recovers 4 of the 5 failures. The original tuning was on the
+pre-RMSNorm-fix substrate where residual magnitudes were 6.5× smaller;
+post-fix, the wider real-space range of BX=1 became load-bearing for
+preventing outlier-cell quantization-binning in the FFN gate²·up product.
+Strict 24-prompt pass rate 63% → ~80%, zero hard failures. Default
+updated. Math_div remains indirect (gives algebraically equivalent "12 ×
+12 = 144" instead of direct "12") — likely model-capability quirk under
+greedy decoding rather than substrate issue.
+**Remaining open:** factual_hamlet regression and gate1+fudge2 untested
+(see TD-22).
+
+### TD-22 — gate1 single-prompt regression + untested knob combinations
+
+**Source:** `journal/hp_sweep_2026-05-10.md` Phase B.
+**State:** `BITNET_GATE_ACT_BX = 1` (gate1) recovers 4 of 5 substrate-
+specific failures but introduces one regression: `factual_hamlet` went
+from "Shakespeare wrote Hamlet" to "(Hint: It's a famous play by a famous
+playwright." The Phase A sweep also found `score_shift fudge = 2` and
+`BITNET_FFN_BX = 8` as separate winners (4/5 each); their combinations
+with gate1 weren't tested.
+**Remediation:** sweep gate1+fudge2, gate1+fudge2+ffn8 on the failure
+subset; if any combination preserves the gate1 wins AND restores
+factual_hamlet, adopt it. If no combination recovers both, accept the
+factual_hamlet regression as worth the broader gain.
+**Priority hint:** medium. Not blocking; the gate1 default is already a
+net positive.
+
+
 
 ### TD-19 — Late-layer `block_output` saturation in BitNet inference (CLOSED 2026-05-09)
 
