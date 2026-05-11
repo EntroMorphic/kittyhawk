@@ -223,7 +223,19 @@ prompts, layers, heads?
 
 ## B. Research-level open questions
 
-### #5 — Why does routed slightly outperform posracle? [TIER-S]
+### #5 — Why does routed slightly outperform posracle? [TIER-S; CLOSED 2026-05-10]
+
+**Verdict:** routed ≈ posracle at most k values. The TD-27 focused-subset
+finding (8/10 vs 7/10) doesn't replicate at full battery; loop heuristic
+suggests posracle ≥ routed at k=8/16/32 but spot-checking reveals
+heuristic FPs (heuristic systematically penalizes routed's noun-repetition
+in coherent prose). At k=4, routed has +2 prompts of n=24 — may be real
+or noise. Per `journal/td27_5_posracle_full_2026-05-10.md`. The
+substrate-claim story tightens: substrate routing is **a competitive
+implementation** of direction-aware sparse attention, not a uniquely
+superior one in this workload at most k.
+
+
 
 **What it is.** Cycle 2's full battery: routed_k=4 = 22/24, posracle_k=4
 not yet measured at full battery scale (focused subset showed posracle
