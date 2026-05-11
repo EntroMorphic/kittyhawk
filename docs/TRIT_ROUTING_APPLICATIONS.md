@@ -432,7 +432,40 @@ brittle (load-balancing issues, dead experts). Direction-awareness might
 help by giving structurally different tokens structurally different
 routing decisions.
 
-### #9 — Sparse FFN activation prediction [TIER-M]
+### #9 — Sparse FFN activation prediction [TIER-M; PROBE-DONE-POSITIVE 2026-05-11; FULL PREDICTOR DEFERRED]
+
+**Probe ran 2026-05-11 — STRONG positive for substrate-feasibility.**
+
+**Natural relu²(gate) sparsity (30 layers × 6 positions × 2 prompts):**
+min 13.6%, median **51.5%**, max 85.1%.
+
+**Cell-level oracle vs random (6 prompts × 6 configs, first-30-agreement, max 180):**
+
+| config        | aggregate | comment |
+|---------------|-----------|---------|
+| oracle_50pct  | 38/180    | near-bit-exact to dense on math_div (one word diff) |
+| oracle_25pct  | **45/180**| sweet spot — coherent at 75% sparsity |
+| oracle_10pct  | 31/180    | aggressive but mostly coherent |
+| random_50pct  | 9/180     | **LOOPS on 4 of 6 prompts** |
+| random_25pct  | 5/180     | broken on most prompts |
+
+**Oracle beats random by 4× at 50% keep and 9× at 25% keep — the
+largest oracle/random gap of any probe in this cycle.** The FFN
+depends critically on which cells survive; random selection of the
+same ratio totally breaks the model.
+
+**What this validates:** cell-level smart selection is critically
+load-bearing; substrate prediction has massive headroom. A predictor
+that approximates oracle quality would yield real compute savings
+(skip up_proj for predicted-zero cells).
+
+**What's deferred (full #9):** the actual substrate cell predictor
+(offline per-cell characteristic signatures from `gate_proj` weight
+columns, online distance against token signature). The probe answers
+"is it worth pursuing?" — clearly YES. The implementation is a
+focused work-unit recorded as TIER-M follow-up.
+
+**Journal:** `journal/td27_9_ffn_cell_2026-05-11.md`.
 
 **What it is.** Predict which `relu²(gate)` activations will be ZERO,
 skip those cells' downstream computation.

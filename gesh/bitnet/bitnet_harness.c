@@ -214,6 +214,18 @@ static int g_ffn_num_experts = 4;
 static int g_ffn_k           = 2;
 static unsigned int g_ffn_rng = 0xC0FFEE08u;
 
+/* TRIT_ROUTING #9 falsification probe: cell-level FFN sparse activation.
+ * Independent of #8 slice mode. Mask gate_act cells (not slices). */
+typedef enum {
+    BITNET_FFN_CELL_DENSE = 0,
+    BITNET_FFN_CELL_ORACLE,
+    BITNET_FFN_CELL_RANDOM,
+} bitnet_ffn_cell_mode_t;
+
+static bitnet_ffn_cell_mode_t g_ffn_cell_mode = BITNET_FFN_CELL_DENSE;
+static int g_ffn_cell_keep = 0;          /* 0 = keep all (no mask) */
+static unsigned int g_ffn_cell_rng = 0xC0FFEE09u;
+
 static void bitnet_ffn_mode_init_from_env(void) {
     const char* m = getenv("BITNET_FFN_MODE");
     if (m) {
@@ -230,11 +242,27 @@ static void bitnet_ffn_mode_init_from_env(void) {
         fprintf(stderr, "[harness] sparse FFN mode = %s, num_experts = %d, k = %d\n",
                 m ? m : "dense", g_ffn_num_experts, g_ffn_k);
     }
+    /* TRIT_ROUTING #9: cell-level mode. */
+    const char* cm = getenv("BITNET_FFN_CELL_MODE");
+    if (cm) {
+        if      (!strcasecmp(cm, "dense"))  g_ffn_cell_mode = BITNET_FFN_CELL_DENSE;
+        else if (!strcasecmp(cm, "oracle")) g_ffn_cell_mode = BITNET_FFN_CELL_ORACLE;
+        else if (!strcasecmp(cm, "random")) g_ffn_cell_mode = BITNET_FFN_CELL_RANDOM;
+        else fprintf(stderr, "[harness] unknown BITNET_FFN_CELL_MODE=%s, using dense\n", cm);
+    }
+    const char* ck = getenv("BITNET_FFN_CELL_KEEP");
+    if (ck) { int v = atoi(ck); if (v > 0 && v <= BITNET_INTERMEDIATE_SIZE) g_ffn_cell_keep = v; }
+    if (g_ffn_cell_mode != BITNET_FFN_CELL_DENSE && g_ffn_cell_keep > 0) {
+        fprintf(stderr, "[harness] FFN cell mode = %s, keep = %d/%d\n",
+                cm ? cm : "dense", g_ffn_cell_keep, BITNET_INTERMEDIATE_SIZE);
+    }
 }
 
 /* Apply slice-mask to gate_act IN PLACE. Defined later (after xorshift32
  * and posracle_compare); forward declaration here. */
 static void bitnet_ffn_apply_slice_mask(m4t_mtfp_t* gate_act, int N, int k);
+/* TRIT_ROUTING #9: apply cell-mask to gate_act IN PLACE. Forward declared. */
+static void bitnet_ffn_apply_cell_mask(m4t_mtfp_t* gate_act, int keep);
 
 /* ── Phase 2 work-unit 1: bx-aware activation flow constants. ────────────
  * Target bx for normal (linear-magnitude) activations through the
@@ -683,6 +711,36 @@ static void bitnet_ffn_apply_slice_mask(m4t_mtfp_t* gate_act, int N, int k) {
     }
 
     free(keep); free(pairs); free(slice_scores);
+}
+
+/* TRIT_ROUTING #9: cell-level mask. Keep top-`keep` cells by score
+ * (oracle = |gate_act[j]|; random = xorshift). Zero the rest. */
+static void bitnet_ffn_apply_cell_mask(m4t_mtfp_t* gate_act, int keep) {
+    int N = BITNET_INTERMEDIATE_SIZE;
+    if (keep <= 0 || keep >= N) return;
+
+    int64_t* pairs = (int64_t*)malloc((size_t)N * 2 * sizeof(int64_t));
+    for (int j = 0; j < N; j++) {
+        pairs[2*j + 0] = (int64_t)j;
+        int64_t s = 0;
+        if (g_ffn_cell_mode == BITNET_FFN_CELL_ORACLE) {
+            m4t_mtfp_t v = gate_act[j];
+            s = v < 0 ? -(int64_t)v : (int64_t)v;
+        } else if (g_ffn_cell_mode == BITNET_FFN_CELL_RANDOM) {
+            s = (int64_t)bitnet_xorshift32(&g_ffn_cell_rng);
+        }
+        pairs[2*j + 1] = s;
+    }
+    qsort(pairs, (size_t)N, 2 * sizeof(int64_t), bitnet_pick_posracle_compare);
+
+    uint8_t* keep_bits = (uint8_t*)calloc((size_t)N, 1);
+    for (int i = 0; i < keep; i++) keep_bits[(int)pairs[2*i + 0]] = 1;
+
+    for (int j = 0; j < N; j++) {
+        if (!keep_bits[j]) gate_act[j] = 0;
+    }
+
+    free(keep_bits); free(pairs);
 }
 
 /* Sparse attn_v_combine: out[d] = clamp(Σ_i weights[i] · V[indices[i]][d] >> shift).
@@ -1283,6 +1341,11 @@ void bitnet_forward_block(
      * when BITNET_FFN_MODE ∈ {oracle, random}. Default dense = no-op. */
     if (g_ffn_mode != BITNET_FFN_DENSE) {
         bitnet_ffn_apply_slice_mask(s->gate_act, g_ffn_num_experts, g_ffn_k);
+    }
+    /* TRIT_ROUTING #9 falsification probe: cell-mask gate_act in place
+     * when BITNET_FFN_CELL_MODE ∈ {oracle, random}. Default dense = no-op. */
+    if (g_ffn_cell_mode != BITNET_FFN_CELL_DENSE && g_ffn_cell_keep > 0) {
+        bitnet_ffn_apply_cell_mask(s->gate_act, g_ffn_cell_keep);
     }
 
     /* ffn_sub_norm(gate_act). gate_act is at GATE_ACT_BX. Output at
