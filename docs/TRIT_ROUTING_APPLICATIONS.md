@@ -154,37 +154,49 @@ production-quality (not just research code). Required before any
 the FLOP savings at small k (probably yes, k=4 vs full 128 head_dim —
 30× fewer dots per attention step).
 
-### #3 — Hybrid two-stage routing [TIER-M]
+### #3 — Hybrid two-stage routing [TIER-M; CLOSED 2026-05-11]
 
-**What it is.** Use signature distance as a cheap first filter (top-k₁
-candidates), then compute true Q·K on those candidates and pick top-k₂
-< k₁ by signed score. Combines direction-awareness (via trit signatures)
-with magnitude-awareness (via signed score).
+**Implementation:** `gesh/bitnet/bitnet_harness.c` `BITNET_ATTN_MODE=hybrid`,
+`BITNET_ATTN_K1` env (default 4×k_eff). Stage 1 calls
+`bitnet_pick_routed_indices` → top-k₁ candidates; Stage 2 computes
+true Q·K on those k₁ positions and picks top-k₂ by signed score via
+`bitnet_pick_posracle_topk`. Sanity verified: at k₁ ≥ seq_k, hybrid
+is bit-exact equal to posracle (Stage 1 collapses to a no-op).
 
-**How it works.** Two sort passes:
-1. Compute `seq_k` signature distances (cheap — popcount). Pick top-k₁
-   smallest (e.g., k₁ = 16 of 128).
-2. Compute true Q·K on those k₁ positions. Pick top-k₂ by signed score
-   (e.g., k₂ = 4).
+**Result (focused subset, n=10, k=4, k₁ ∈ {8,16,32}):** at
+first-30-token agreement with the dense reference, hybrid_k₁=16
+aggregates 106/300 vs posracle 101/300 vs routed_fixed_τ_5000 28/300.
+**hybrid_k₁=16 wins by 5% aggregate**, with the load-bearing
+differences on `edge_single` (+3) and `long_summary` (+8); loss on
+`long_history` (−6); ties elsewhere. **hybrid_k₁=8** is the right
+choice on tight integer-token tasks (math_add: 9 vs 3 for all other
+arms). Coherence (loop heuristic): all hybrid configs pass on all 10
+prompts; routed_fixed_τ_5000 loops on `code_loop` (recorded as a
+caveat to #4's "fixed τ acceptable at quality").
 
-The first pass is `O(seq_k × head_dim_packed)`; the second is
-`O(k₁ × head_dim)`. For seq_k=4096, k₁=16, k₂=4: total work is
-4096 popcounts + 16 dots vs current routed's 4096 popcounts + 4 dots.
-Modest cost increase; potentially better selection.
+**Substrate-distinctiveness — qualified (LOAD-BEARING WITHIN SUBSTRATE).**
+Originally rated HIGH; downgraded to LOAD-BEARING-WITHIN. Stage 1
+filter uses the trit substrate's signature/distance primitive
+natively (signatures are produced as a byproduct of routing, not
+extra compute). A scalar substrate could implement the same two-
+stage pattern using LSH or partial-dot for Stage 1, but would pay an
+extra projection cost. Two-stage routing is a substrate-compatible
+*operating point*, not a substrate-uniquely-superior algorithm.
 
-**Cost.** ~3-4 days. Adds a new arm to the harness.
+**Cost story.** At seq_k=4096 with k₁=16: hybrid does ~16 dots/step
+vs posracle's ~4096 dots/step — ~256× fewer dots, plus a cheap
+popcount Stage 1. On THIS battery (seq_k ≤ 71), the gap is ~4×.
+The scaling claim is extrapolation; a long-context measurement is
+recorded as the next test.
 
-**Substrate-distinctiveness.** HIGH. Combines two substrate-distinct
-mechanisms (direction-aware filter + magnitude-aware refinement).
+**Open follow-ups (recorded as TDs, not blockers):**
+- Long-context quality + cost measurement at seq_k ≥ 1024.
+- Spot-check the divergent outputs (e.g. long_summary k₁=16 vs
+  posracle) to confirm "better English" vs "coincidentally-tracks".
+- k₁ default sweep at scale (current default 4×k_eff is best
+  aggregate here but the response is noisy).
 
-**Prerequisites.** None beyond current sparse-attention infrastructure.
-
-**What it would test/prove.** Whether combining the two mechanisms beats
-either alone. Could close (or re-open) the routed > posracle 1-prompt
-gap. Could reveal interesting trade-offs (k₁/k₂ pareto curve).
-
-**Open questions.** What's the right (k₁, k₂) ratio? Does the hybrid
-approach generalize to other applications (#8-#13)?
+**Journal:** `journal/td27_3_hybrid_2026-05-11.md`.
 
 ### #4 — Per-layer / per-head / fixed tau (PARTIALLY CLOSED 2026-05-10)
 

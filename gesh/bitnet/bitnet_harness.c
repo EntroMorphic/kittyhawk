@@ -54,6 +54,13 @@ typedef enum {
                             * the routed-vs-oracle gap is explained by oracle
                             * "wasting" budget on high-|negative-score| positions
                             * that softmax suppresses anyway. */
+    BITNET_ATTN_HYBRID,    /* TRIT_ROUTING #3: two-stage. Stage 1: signature
+                            * distance picks top-k1 candidates (cheap filter).
+                            * Stage 2: signed Q·K picks top-k2 < k1 from the
+                            * shortlist (precise refinement). Combines
+                            * direction-awareness from signatures with score
+                            * precision from posracle. k1 from BITNET_ATTN_K1
+                            * env (default k1 = 4 × k2). */
 } bitnet_attn_mode_t;
 
 static bitnet_attn_mode_t g_attn_mode = BITNET_ATTN_DENSE;
@@ -74,9 +81,13 @@ static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
         case BITNET_ATTN_ROUTED:   return "routed";
         case BITNET_ATTN_ORACLE:   return "oracle";
         case BITNET_ATTN_POSRACLE: return "posracle";
+        case BITNET_ATTN_HYBRID:   return "hybrid";
     }
     return "unknown";
 }
+
+static int g_attn_k1 = 0;  /* TRIT_ROUTING #3: hybrid stage-1 candidate count.
+                            * 0 = use default (4 × g_attn_k). */
 
 static void bitnet_attn_mode_init_from_env(void) {
     const char* m = getenv("BITNET_ATTN_MODE");
@@ -86,6 +97,7 @@ static void bitnet_attn_mode_init_from_env(void) {
         else if (!strcasecmp(m, "routed"))   g_attn_mode = BITNET_ATTN_ROUTED;
         else if (!strcasecmp(m, "oracle"))   g_attn_mode = BITNET_ATTN_ORACLE;
         else if (!strcasecmp(m, "posracle")) g_attn_mode = BITNET_ATTN_POSRACLE;
+        else if (!strcasecmp(m, "hybrid"))   g_attn_mode = BITNET_ATTN_HYBRID;
         else {
             fprintf(stderr, "[harness] unknown BITNET_ATTN_MODE=%s, using dense\n", m);
         }
@@ -103,6 +115,11 @@ static void bitnet_attn_mode_init_from_env(void) {
         else fprintf(stderr, "[harness] bad BITNET_ATTN_TAU=%s, ignoring\n", t);
     }
     if (getenv("BITNET_ATTN_NO_CACHE")) g_attn_no_k_cache = 1;
+    const char* k1 = getenv("BITNET_ATTN_K1");
+    if (k1) {
+        int v = atoi(k1);
+        if (v > 0 && v <= BITNET_HEAD_DIM * 32) g_attn_k1 = v;
+    }
     if (g_attn_mode != BITNET_ATTN_DENSE) {
         fprintf(stderr, "[harness] sparse attention mode = %s, k = %d",
                 bitnet_attn_mode_name(g_attn_mode), g_attn_k);
@@ -790,10 +807,52 @@ void bitnet_forward_block(
                     m4t_mtfp_t* sub_weights = (m4t_mtfp_t*)malloc((size_t)k_eff * sizeof(m4t_mtfp_t));
                     assert(indices && sub_scores_i64 && sub_scores_int && sub_weights);
 
-                    /* Pick indices per arm. RANDOM and ORACLE implemented in
-                     * Phases 2.2/2.3. ROUTED is Phase 2.4 (TODO). */
+                    /* Pick indices per arm. RANDOM, ROUTED, ORACLE, POSRACLE,
+                     * HYBRID. */
                     int64_t max_abs = 1;
-                    if (g_attn_mode == BITNET_ATTN_ORACLE ||
+                    if (g_attn_mode == BITNET_ATTN_HYBRID) {
+                        /* TRIT_ROUTING #3: HYBRID two-stage routing.
+                         * Stage 1: signature distance picks top-k1 candidates.
+                         * Stage 2: signed Q·K picks top-k2 = k_eff < k1 from
+                         *          the shortlist (precise refinement). */
+                        int k1 = g_attn_k1 > 0 ? g_attn_k1 : (4 * k_eff);
+                        if (k1 > seq_k) k1 = seq_k;
+                        if (k1 < k_eff) k1 = k_eff;
+
+                        /* Stage 1: routed candidate set. */
+                        int* candidates = (int*)malloc((size_t)k1 * sizeof(int));
+                        const m4t_mtfp_t* k_cache_layer =
+                            cache->k + (size_t)layer_idx * cache->per_layer_stride;
+                        bitnet_pick_routed_indices(
+                            candidates, k1, seq_k,
+                            qh, k_cache_layer, row_size, kv_head,
+                            BITNET_HEAD_DIM,
+                            cache, layer_idx);
+
+                        /* Stage 2: compute true Q·K on the k1 candidates. */
+                        int64_t* cand_scores = (int64_t*)malloc((size_t)k1 * sizeof(int64_t));
+                        for (int i = 0; i < k1; i++) {
+                            int t = candidates[i];
+                            size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                                                + (size_t)t * row_size
+                                                + (size_t)kv_head * BITNET_HEAD_DIM;
+                            const m4t_mtfp_t* kh = cache->k + k_row_base;
+                            cand_scores[i] = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
+                        }
+
+                        /* Stage 2 sort: top-k_eff by signed score (positives first). */
+                        int* relative_top = (int*)malloc((size_t)k1 * sizeof(int));
+                        bitnet_pick_posracle_topk(relative_top, k_eff, k1, cand_scores);
+
+                        /* Translate relative indices in [0, k1) → absolute in [0, seq_k). */
+                        for (int i = 0; i < k_eff; i++) {
+                            indices[i] = candidates[relative_top[i]];
+                            sub_scores_i64[i] = cand_scores[relative_top[i]];
+                            int64_t a = sub_scores_i64[i] < 0 ? -sub_scores_i64[i] : sub_scores_i64[i];
+                            if (a > max_abs) max_abs = a;
+                        }
+                        free(relative_top); free(cand_scores); free(candidates);
+                    } else if (g_attn_mode == BITNET_ATTN_ORACLE ||
                         g_attn_mode == BITNET_ATTN_POSRACLE) {
                         /* ORACLE / POSRACLE: compute dense scores first, then pick top-k.
                          * ORACLE picks by |score|; POSRACLE by signed score (positives win). */
