@@ -91,6 +91,7 @@ ctest --test-dir build
 | [`docs/THESIS.md`](docs/THESIS.md) | What would falsify the thesis. Open questions. |
 | [`docs/FINDINGS.md`](docs/FINDINGS.md) | Running ledger of measurements. |
 | [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md) | Centralized index of deferred work — functional gaps, follow-on research cycles, doc drift, spec deferrals, open questions. |
+| [`docs/TRIT_ROUTING_APPLICATIONS.md`](docs/TRIT_ROUTING_APPLICATIONS.md) | Application surface for the validated trit-routing primitive (direction-aware top-k via packed-trit signatures). 13 items: 4 improvements to the validated sparse-attention application, 3 research questions, 6 applications beyond sparse attention. |
 | [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) | Original kernel rebuild plan; preserved as historical artifact. |
 | [`docs/REMEDIATION_PLAN_REDTEAM.md`](docs/REMEDIATION_PLAN_REDTEAM.md) | Adversarial review of the plan; 12 findings folded in. |
 | [`docs/DESIGN_X-EXPO.md`](docs/DESIGN_X-EXPO.md) | Cross-exponent accumulator design (§14.2 named opt-in). |
