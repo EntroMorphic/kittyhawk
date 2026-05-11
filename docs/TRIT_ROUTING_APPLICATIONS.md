@@ -363,7 +363,15 @@ once diff routing primitive lands.
 
 **Substrate-distinctiveness.** HIGH — this is the actual test.
 
-**Journal:** `journal/td27_7_scope_2026-05-11.md` (full red-team).
+**Journal:**
+- `journal/td27_7_scope_2026-05-11.md` — scope red-team.
+- `journal/td27_7_phase_a_2026-05-11.md` — **Phase A concrete
+  pre-registration**: frozen model spec (1 layer, 4 heads, head_dim
+  16, model_dim 64, float32 in Phase A; ternary weights deferred to
+  Phase B), frozen task (sequence copy, 32 symbols, n ∈ {4..12}),
+  pre-registered success criterion (≥95% test accuracy within 2×
+  Variant A's pass-step), implementation prerequisites, ~2-3 weeks
+  effort once differentiable substrate-route kernel lands.
 
 ---
 
