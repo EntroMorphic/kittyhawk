@@ -157,6 +157,11 @@ typedef enum {
 static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
 static int g_kv_window = 0;
 static unsigned int g_kv_evict_rng = 0xC0FFEE10u;
+/* TRIT_ROUTING #10 amendment: M-step running-mean direction proxy for
+ * sigdist. M=1 reproduces original "current K-sig as direction" probe.
+ * M>1 averages K vectors over last M alive positions per kv_head and
+ * extracts signature from the mean. Per #10 red-team finding M5. */
+static int g_kv_evict_m = 1;
 
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
@@ -182,6 +187,15 @@ static void bitnet_kv_evict_init_from_env(void) {
         int v = atoi(w);
         if (v > 0) g_kv_window = v;
     }
+    /* TRIT_ROUTING #10 amendment: M-step running-mean direction proxy. */
+    const char* mm = getenv("BITNET_KV_EVICT_M");
+    if (mm) { int v = atoi(mm); if (v >= 1) g_kv_evict_m = v; }
+    /* TRIT_ROUTING #10 amendment: configurable random seed for multi-seed
+     * baseline (per red-team finding M4 — single-seed random has unmeasured
+     * variance). */
+    const char* sd = getenv("BITNET_KV_EVICT_SEED");
+    if (sd) { unsigned int v = (unsigned int)strtoul(sd, NULL, 0);
+              if (v != 0) g_kv_evict_rng = v; }
     /* sigdist requires a tau for K signatures. Use 5000 default if unset
      * (per #4 finding: fixed tau is acceptable for quality). */
     if (g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST && g_attn_fixed_tau == 0) {
@@ -491,18 +505,69 @@ static int bitnet_kv_evict_pick_victim(
     }
 
     if (g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST) {
-        /* For each alive p (excluding current_position), compute sum over
-         * kv_heads of popcount(K_sig[p] XOR K_sig[current_position]).
+        /* For each alive p (excluding current_position), compute distance
+         * from p's K-sig to the DIRECTION PROXY's signature.
+         *
+         * Direction proxy options (per #10 amendment, M5 finding):
+         *  - M=1: signature of current_position's K (original probe behavior;
+         *         uses pre-cached k_sig directly).
+         *  - M>1: signature of the mean of K vectors over the last M alive
+         *         positions (current_position + up to M-1 prior alive).
+         *
          * Evict the position with MAX distance. */
         if (cache->k_sig == NULL) return -1;  /* sig cache must be populated */
         int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+
+        /* Build M-step running-mean direction signature per kv_head.
+         * For M=1 we can take a shortcut (use cached current K-sig);
+         * for M>1 we recompute against an averaged K. */
+        uint8_t* dir_sigs = NULL;
+        if (g_kv_evict_m > 1) {
+            dir_sigs = (uint8_t*)malloc((size_t)BITNET_NUM_KV_HEADS * (size_t)sig_bytes);
+            if (!dir_sigs) return -1;
+            /* Gather last M alive positions (including current_position),
+             * walking backward from current_position. */
+            int* m_positions = (int*)malloc((size_t)g_kv_evict_m * sizeof(int));
+            int m_found = 0;
+            for (int p = current_position; p >= 0 && m_found < g_kv_evict_m; p--) {
+                if (p == current_position || !row[p]) m_positions[m_found++] = p;
+            }
+            /* For each kv_head: average K vectors over those positions,
+             * threshold-extract a signature, store in dir_sigs[h]. */
+            int64_t* k_mean = (int64_t*)malloc((size_t)BITNET_HEAD_DIM * sizeof(int64_t));
+            size_t row_size = (size_t)BITNET_NUM_KV_HEADS * BITNET_HEAD_DIM;
+            for (int h = 0; h < BITNET_NUM_KV_HEADS; h++) {
+                for (int d = 0; d < BITNET_HEAD_DIM; d++) k_mean[d] = 0;
+                for (int i = 0; i < m_found; i++) {
+                    size_t base = (size_t)layer_idx * cache->per_layer_stride
+                                  + (size_t)m_positions[i] * row_size
+                                  + (size_t)h * BITNET_HEAD_DIM;
+                    const m4t_mtfp_t* k = cache->k + base;
+                    for (int d = 0; d < BITNET_HEAD_DIM; d++) k_mean[d] += (int64_t)k[d];
+                }
+                /* Mean — integer division is OK; threshold-extract is invariant
+                 * to positive scaling. */
+                if (m_found > 1)
+                    for (int d = 0; d < BITNET_HEAD_DIM; d++) k_mean[d] /= m_found;
+                /* Use same tau used for cached K signatures, so distances are
+                 * commensurable. */
+                int64_t tau = (int64_t)cache->k_sig_tau;
+                m4t_route_threshold_extract(
+                    dir_sigs + (size_t)h * sig_bytes,
+                    k_mean, tau, BITNET_HEAD_DIM);
+            }
+            free(k_mean); free(m_positions);
+        }
+
         int worst_p = -1; int worst_d = -1;
         for (int p = 0; p < seq_k; p++) {
             if (row[p] || p == current_position) continue;
             int dsum = 0;
             for (int h = 0; h < BITNET_NUM_KV_HEADS; h++) {
                 const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, h);
-                const uint8_t* sb = bitnet_kv_cache_k_sig(cache, layer_idx, current_position, h);
+                const uint8_t* sb;
+                if (g_kv_evict_m > 1) sb = dir_sigs + (size_t)h * sig_bytes;
+                else sb = bitnet_kv_cache_k_sig(cache, layer_idx, current_position, h);
                 /* popcount of (sa XOR sb) over sig_bytes. */
                 for (int i = 0; i < sig_bytes; i++) {
                     uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
@@ -514,6 +579,7 @@ static int bitnet_kv_evict_pick_victim(
             }
             if (dsum > worst_d) { worst_d = dsum; worst_p = p; }
         }
+        free(dir_sigs);
         return worst_p;
     }
 
