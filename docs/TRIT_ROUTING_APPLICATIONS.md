@@ -51,11 +51,37 @@ Each item lists: what it is, how it works, cost estimate, substrate-
 distinctiveness, prerequisites, what testing it would prove or refute,
 and open questions specific to it.
 
+### Scope tiers
+
+To prevent flattening "1 day engineering" against "6-8 weeks speculative"
+into the same rank, items are tagged:
+
+- **TIER-S (small)**: hours to days. Engineering or focused experiment.
+  Bounded scope; outcome predictable in shape if not in detail.
+- **TIER-M (medium)**: 1-4 weeks. Research with a clear question; needs
+  dedicated cycle but not foundational work.
+- **TIER-L (large)**: months. Foundational additions OR speculative
+  research-grade investigations.
+
+### Substrate-distinctiveness rubric
+
+To make HIGH / MEDIUM / LOW assessments calibrated:
+
+- **HIGH**: Uses substrate primitives that have no base-2 analog at the
+  implementation level. A base-2 implementation would require building
+  trit-packing infrastructure first.
+- **MEDIUM**: Uses substrate primitives but a base-2 implementation could
+  approximate the same behavior with different primitives (e.g.,
+  signed-score selection on a base-2 substrate ≈ direction-aware
+  selection without trit signatures).
+- **LOW**: No substrate primitives needed; the substrate just happens to
+  be the implementation environment.
+
 ---
 
 ## A. Improvements to the validated application
 
-### #1 — K-signature caching
+### #1 — K-signature caching [TIER-S]
 
 **What it is.** Cache K signatures alongside K and V in the KV cache.
 Compute the signature once at K-write time; reuse on every subsequent
@@ -91,7 +117,7 @@ be amortized in a real KV-cached pipeline. Speedup at long context.
 - Does fixed tau give the same quality as per-Q tau? (See #4 — must
   answer before this becomes a clean engineering win.)
 
-### #2 — NEON-accelerate the sparse path
+### #2 — NEON-accelerate the sparse path [TIER-S]
 
 **What it is.** Production-quality NEON implementation of
 `bitnet_sparse_attn_v_combine` (currently scalar — explicitly marked
@@ -117,7 +143,7 @@ production-quality (not just research code). Required before any
 the FLOP savings at small k (probably yes, k=4 vs full 128 head_dim —
 30× fewer dots per attention step).
 
-### #3 — Hybrid two-stage routing
+### #3 — Hybrid two-stage routing [TIER-M]
 
 **What it is.** Use signature distance as a cheap first filter (top-k₁
 candidates), then compute true Q·K on those candidates and pick top-k₂
@@ -151,17 +177,17 @@ approach generalize to other applications (#8-#13)?
 
 ### #4 — Per-layer / per-head / fixed tau (PARTIALLY CLOSED 2026-05-10)
 
-**Verdict on the fixed-tau test:** per-Q tau is NOT load-bearing for
-aggregate quality. A single fixed τ=5000 matches per-Q at 8/10 on the
-focused subset (n=10). Lower fixed taus (500-2000) are at 7/10. Per-Q
-adaptiveness costs an O(n log n) sort per Q-step and gives no
-measurable quality benefit. **This unblocks #1.** Per
+**Verdict on the fixed-tau test (n=10, focused subset):** per-Q tau
+appears NOT load-bearing for aggregate quality. A single fixed τ=5000
+matches per-Q at 8/10 on the focused subset. Lower fixed taus (500-2000)
+are at 7/10. **This PROVISIONALLY unblocks #1** — but the n=10 evidence
+is thin, and per-Q vs τ=5000 had different per-prompt blind spots
+(suggesting per-context tau might be the actual right answer). #1's
+implementation should treat fixed-tau choice as a calibration step
+informed by a wider set of prompts. Per
 `journal/td27_4_fixed_tau_2026-05-10.md`.
 
-Per-layer / per-head / learned tau still open as Phase 2 follow-ups —
-the per-prompt variation pattern (per-Q and τ=5000 fail on different
-prompts) suggests per-context calibration might outperform either
-single-strategy approach.
+Per-layer / per-head / learned tau still open as Phase 2 follow-ups.
 
 
 
@@ -197,7 +223,7 @@ prompts, layers, heads?
 
 ## B. Research-level open questions
 
-### #5 — Why does routed slightly outperform posracle?
+### #5 — Why does routed slightly outperform posracle? [TIER-S]
 
 **What it is.** Cycle 2's full battery: routed_k=4 = 22/24, posracle_k=4
 not yet measured at full battery scale (focused subset showed posracle
@@ -229,7 +255,14 @@ contribution.
 
 **Open questions.** What workloads might amplify or shrink this gap?
 
-### #6 — Effect with model scale
+### #6 — Effect with model scale [TIER-L; UNDERSCOPED]
+
+**Underscoping note (red-team correction):** "depends on model" cost
+estimate isn't actionable. To make this concrete: would need either
+(a) a larger BitNet variant if Microsoft releases one, OR (b) port
+another small ternary model (~1-2 month engineering effort to replicate
+the BitNet harness for a different architecture). Not pursuing without
+a specific scope reduction.
 
 **What it is.** Tested on BitNet b1.58-2B-4T (2B parameters). Untested
 on larger or smaller models.
@@ -255,7 +288,7 @@ don't need.
 **Open questions.** Does attention-loop frequency change with model
 scale? Does sparsity tolerance change with scale?
 
-### #7 — Cycle 3: routing-native attention with training
+### #7 — Cycle 3: routing-native attention with training [TIER-L]
 
 **What it is.** Architectural Part-B test. Design attention to use
 substrate routing natively (not post-hoc); train; compare to dense
@@ -293,11 +326,17 @@ discrete top-k selection? Does the training stability hold?
 
 ## C. Applications beyond sparse attention
 
-### #8 — MoE gating via signatures
+### #8 — MoE gating via signatures [TIER-M]
 
 **What it is.** Mixture-of-experts gating that routes each token to k
 experts based on signature similarity, instead of via a learned
 gate-network MLP.
+
+**Cost reality check (red-team correction):** the project doesn't have
+a MoE harness. The "~2 weeks" estimate below assumed one existed; total
+honest estimate including MoE harness construction is **~3-5 weeks**
+(building a small MoE block is itself a research project on the
+substrate; integrating it with BitNet's FFN replacement is harder still).
 
 **How it works.** Per token:
 1. Compute token's trit signature via `m4t_route_threshold_extract` (with
@@ -341,7 +380,7 @@ brittle (load-balancing issues, dead experts). Direction-awareness might
 help by giving structurally different tokens structurally different
 routing decisions.
 
-### #9 — Sparse FFN activation prediction
+### #9 — Sparse FFN activation prediction [TIER-M]
 
 **What it is.** Predict which `relu²(gate)` activations will be ZERO,
 skip those cells' downstream computation.
@@ -378,7 +417,7 @@ use of the substrate's direction-awareness.
   already, this could give large speedups; if mostly non-zero, less.
 - How to handle prediction errors (false-zero predictions)?
 
-### #10 — KV cache eviction via signature distance
+### #10 — KV cache eviction via signature distance [TIER-M]
 
 **What it is.** When KV cache fills up at long context, evict positions
 whose K signatures are most-distant from recent Q signatures. Direction-
@@ -406,7 +445,7 @@ FIFO/LRU on long-context coherence.
 **Open questions.** What's the right "recent Q signature" representation?
 Single average, exponential moving average, attention-weighted?
 
-### #11 — Retrieval / nearest-neighbor (extends Gesh phase A.1)
+### #11 — Retrieval / nearest-neighbor (extends Gesh phase A.1) [TIER-M]
 
 **What it is.** General-purpose top-k retrieval from a large embedding
 collection. Gesh phase A.1 already used trit lattice signatures for
@@ -445,7 +484,7 @@ broaden the substrate's claim from "ternary LLM inference works" to
 **Open questions.** Which benchmark? Sentiment (3-class natural fit),
 multi-label classification, dense retrieval?
 
-### #12 — Speculative decoding via signature similarity
+### #12 — Speculative decoding via signature similarity [TIER-L; SPECULATIVE]
 
 **What it is.** Detect when current generation state is similar to a
 past state; reuse the past state's downstream computation as a
@@ -479,7 +518,7 @@ works.
 **Open questions.** What's the right signature layer? How big is the
 cache? What's the verification rule?
 
-### #13 — Cross-layer state caching
+### #13 — Cross-layer state caching [TIER-L; SPECULATIVE]
 
 **What it is.** Within a forward pass, detect when an intermediate
 representation (e.g., post-input-layernorm output) is similar to a
