@@ -323,7 +323,16 @@ don't need.
 **Open questions.** Does attention-loop frequency change with model
 scale? Does sparsity tolerance change with scale?
 
-### #7 — Cycle 3: routing-native attention with training [TIER-L; SCOPE-RED-TEAMED 2026-05-11; PENDING INFRASTRUCTURE]
+### #7 — Cycle 3: routing-native attention with training [TIER-L; PHASE A PASS 2026-05-11]
+
+**🎯 Phase A PASSED.** Substrate-routed attention with top-k=4 + ternary
+weights + implicit STE trains to ≥95% on fixed-length sequence copy in
+**1.29× the steps of dense** (3 seeds, range 1.22-1.38×). Pre-registered
+criterion ≤ 2× cleanly met. See `journal/td27_7_phase_a_result_2026-05-11.md`.
+
+This is the substrate's first measured Part-B result. Phase A gates the
+gradient-estimator question. Phase B (scale, real corpus) and Phase C
+(BitNet-scale comparison) remain.
 
 **This is the project-defining architectural Part-B test.** All
 substrate work to date validates **extensibility** (the substrate can
