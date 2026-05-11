@@ -149,7 +149,21 @@ gap. Could reveal interesting trade-offs (k₁/k₂ pareto curve).
 **Open questions.** What's the right (k₁, k₂) ratio? Does the hybrid
 approach generalize to other applications (#8-#13)?
 
-### #4 — Per-layer / per-head / fixed tau
+### #4 — Per-layer / per-head / fixed tau (PARTIALLY CLOSED 2026-05-10)
+
+**Verdict on the fixed-tau test:** per-Q tau is NOT load-bearing for
+aggregate quality. A single fixed τ=5000 matches per-Q at 8/10 on the
+focused subset (n=10). Lower fixed taus (500-2000) are at 7/10. Per-Q
+adaptiveness costs an O(n log n) sort per Q-step and gives no
+measurable quality benefit. **This unblocks #1.** Per
+`journal/td27_4_fixed_tau_2026-05-10.md`.
+
+Per-layer / per-head / learned tau still open as Phase 2 follow-ups —
+the per-prompt variation pattern (per-Q and τ=5000 fail on different
+prompts) suggests per-context calibration might outperform either
+single-strategy approach.
+
+
 
 **What it is.** Currently tau = 1/3-quantile of |Q| per Q-head per step.
 Alternatives: fixed tau (calibrated once), per-layer tau (each layer

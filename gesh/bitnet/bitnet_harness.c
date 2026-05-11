@@ -59,6 +59,9 @@ typedef enum {
 static bitnet_attn_mode_t g_attn_mode = BITNET_ATTN_DENSE;
 static int                g_attn_k    = BITNET_HEAD_DIM;  /* trajectory knob */
 static __attribute__((unused)) unsigned int g_attn_rng = 0xC0FFEE01u;  /* random-arm seed (used in Phase 2.2) */
+static int64_t g_attn_fixed_tau = 0;  /* TD-27 follow-up #4: 0 = use per-Q 1/3-quantile;
+                                       * positive = use this fixed tau in routed signature extraction.
+                                       * Tests whether per-Q adaptiveness is load-bearing. */
 
 static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
     switch (m) {
@@ -89,9 +92,18 @@ static void bitnet_attn_mode_init_from_env(void) {
         if (v > 0 && v <= BITNET_HEAD_DIM * 32) g_attn_k = v;
         else fprintf(stderr, "[harness] bad BITNET_ATTN_K=%s, using %d\n", k, g_attn_k);
     }
+    const char* t = getenv("BITNET_ATTN_TAU");
+    if (t) {
+        long v = atol(t);
+        if (v > 0) g_attn_fixed_tau = (int64_t)v;
+        else fprintf(stderr, "[harness] bad BITNET_ATTN_TAU=%s, ignoring\n", t);
+    }
     if (g_attn_mode != BITNET_ATTN_DENSE) {
-        fprintf(stderr, "[harness] sparse attention mode = %s, k = %d\n",
+        fprintf(stderr, "[harness] sparse attention mode = %s, k = %d",
                 bitnet_attn_mode_name(g_attn_mode), g_attn_k);
+        if (g_attn_fixed_tau > 0)
+            fprintf(stderr, ", fixed_tau = %lld", (long long)g_attn_fixed_tau);
+        fprintf(stderr, "\n");
     }
 }
 
@@ -242,8 +254,12 @@ static void bitnet_pick_routed_indices(
 {
     int sig_bytes = M4T_TRIT_PACKED_BYTES(head_dim);
 
-    /* Choose tau from Q's magnitude distribution to realize all three trit states. */
-    int64_t tau = bitnet_routed_pick_tau(qh, head_dim);
+    /* Choose tau. Default: per-Q 1/3-quantile of |Q| (ensures all three trit
+     * states realize per §18 input-class contract). Override via
+     * BITNET_ATTN_TAU env var for the TD-27 follow-up #4 experiment
+     * (does per-Q adaptiveness add anything over a fixed tau?). */
+    int64_t tau = g_attn_fixed_tau > 0 ? g_attn_fixed_tau
+                                        : bitnet_routed_pick_tau(qh, head_dim);
 
     /* Q signature. */
     int64_t* q_i64 = (int64_t*)malloc((size_t)head_dim * sizeof(int64_t));
