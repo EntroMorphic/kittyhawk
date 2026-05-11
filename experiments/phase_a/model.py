@@ -340,20 +340,22 @@ class TinyGPT(nn.Module):
     use_rope=True:  rotary position encoding (Phase A.1 variable-length task).
     """
 
-    def __init__(self, variant: str, model_dim=64, num_heads=4, head_dim=16, ffn_dim=128, use_rope=False):
+    def __init__(self, variant: str, model_dim=64, num_heads=4, head_dim=16, ffn_dim=128, use_rope=False, n_layers=1):
         super().__init__()
         assert num_heads * head_dim == model_dim
         self.variant = variant
         self.use_rope = use_rope
+        self.n_layers = n_layers
         self.tok_emb = nn.Embedding(VOCAB, model_dim)
         if not use_rope:
             self.pos_emb = nn.Embedding(SEQ_LEN, model_dim)
-        self.block = TransformerBlock(model_dim, num_heads, head_dim, ffn_dim, variant, use_rope=use_rope)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(model_dim, num_heads, head_dim, ffn_dim, variant, use_rope=use_rope)
+            for _ in range(n_layers)
+        ])
         self.norm_f = RMSNorm(model_dim)
-        # LM head: tied weights would save params but keep simple (BitLinear)
         self.lm_head = BitLinear(model_dim, VOCAB)
 
-        # Pre-compute causal mask (for dense)
         mask = torch.triu(torch.ones(SEQ_LEN, SEQ_LEN, dtype=torch.bool), diagonal=1)
         self.register_buffer("causal_mask", mask)
 
@@ -363,7 +365,9 @@ class TinyGPT(nn.Module):
         if not self.use_rope:
             positions = torch.arange(T, device=input_ids.device)
             x = x + self.pos_emb(positions)[None, :, :]
-        x = self.block(x, self.causal_mask[:T, :T])
+        cm = self.causal_mask[:T, :T]
+        for block in self.blocks:
+            x = block(x, cm)
         x = self.norm_f(x)
         return self.lm_head(x)  # (B, T, VOCAB)
 

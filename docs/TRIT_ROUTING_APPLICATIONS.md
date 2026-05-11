@@ -349,6 +349,16 @@ within the 7000-step limit at 51K params (model is undercapacity).
 Loss ordering preserved (dense ~1.8 < substrate ~2.8 < random ~3.3).
 Phase A.1 with proper capacity (deeper model) is the natural next test.
 
+**Phase A.1 (2 layers, ~90K params, RoPE, variable-N): INCONCLUSIVE-A-FAILS.**
+Pre-registered before running (`journal/td27_7_phase_a1_prereg_2026-05-11.md`).
+Result: dense passes 1/3 seeds (seed 43 at 7800 steps, others 91-93%);
+substrate plateaus at loss 2.0; random plateaus at loss 3.0. Substrate
+> random ordering preserved, but **substrate gap to dense WIDENED
+dramatically** vs fixed-N's 1.29× step ratio. Two hypotheses
+(H1: capacity gap; H2: optimization-surface gap) — distinguishable by
+3-layer or Gumbel-softmax rerun. Result:
+`journal/td27_7_phase_a1_result_2026-05-11.md`.
+
 Journals:
 - `journal/td27_7_phase_a_result_2026-05-11.md` — original PASS writeup.
 - `journal/td27_7_phase_a_remediation_2026-05-11.md` — red-team

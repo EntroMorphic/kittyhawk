@@ -52,7 +52,7 @@ def cosine_lr(step, max_steps, lr_init, lr_min):
 def train(variant: str, seed: int, max_steps: int, log_path: str,
           lr_init=3e-4, lr_min=1e-5, lr_cosine_horizon=10000,
           batch_size=32, eval_every=100, target_acc=0.95,
-          device_name="cpu", verbose=True, use_rope=False):
+          device_name="cpu", verbose=True, use_rope=False, n_layers=1):
     device = torch.device(device_name)
     torch.manual_seed(seed)
     data_gen = torch.Generator(device=device)
@@ -60,7 +60,7 @@ def train(variant: str, seed: int, max_steps: int, log_path: str,
     eval_gen = torch.Generator(device=device)
     eval_gen.manual_seed(seed * 1000 + 99)
 
-    model = TinyGPT(variant, use_rope=use_rope).to(device)
+    model = TinyGPT(variant, use_rope=use_rope, n_layers=n_layers).to(device)
     n_params = count_params(model)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr_init, betas=(0.9, 0.95), weight_decay=0.01)
@@ -126,7 +126,8 @@ if __name__ == "__main__":
     ap.add_argument("--log", required=True)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--use-rope", action="store_true", help="use rotary position encoding (for variable-length)")
+    ap.add_argument("--n-layers", type=int, default=1)
     args = ap.parse_args()
 
-    log = train(args.variant, args.seed, args.max_steps, args.log, device_name=args.device, use_rope=args.use_rope)
+    log = train(args.variant, args.seed, args.max_steps, args.log, device_name=args.device, use_rope=args.use_rope, n_layers=args.n_layers)
     print(f"\nFinal: pass_step={log['pass_step']} final_acc={log['final_acc']:.3f}")
