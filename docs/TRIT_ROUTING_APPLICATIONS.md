@@ -81,7 +81,18 @@ To make HIGH / MEDIUM / LOW assessments calibrated:
 
 ## A. Improvements to the validated application
 
-### #1 — K-signature caching [TIER-S]
+### #1 — K-signature caching [TIER-S; CLOSED]
+
+**Verdict:** implemented + bit-exact + small (~2%) speedup at short
+context. Cache is a uint8_t buffer in `bitnet_kv_cache_t` (~19MB max);
+populated at K-write when fixed tau active; read at routing lookup;
+no-op when env unset (production unchanged). 4/4 prompts produce
+identical output to uncached fixed-tau path. Speedup expected to scale
+with context length (K-sig recompute is O(seq_k × head_dim) per step).
+`BITNET_ATTN_NO_CACHE=1` env flag preserved as debug tool. Per
+`journal/td27_1_k_sig_caching_2026-05-10.md`.
+
+
 
 **What it is.** Cache K signatures alongside K and V in the KV cache.
 Compute the signature once at K-write time; reuse on every subsequent

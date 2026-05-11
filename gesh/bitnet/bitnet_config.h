@@ -160,6 +160,17 @@ typedef struct {
     size_t per_layer_stride;    /* max_seq_len × NUM_KV_HEADS × HEAD_DIM */
     m4t_mtfp_t* k;              /* [n_layers × per_layer_stride] */
     m4t_mtfp_t* v;              /* [n_layers × per_layer_stride] */
+    /* TRIT_ROUTING #1: K-signature cache for substrate-routed sparse attention.
+     * Per (layer, position, kv_head): packed-trit signature of K (32 bytes
+     * for HEAD_DIM=128). NULL when routed mode unused; allocated lazily on
+     * first routed/posracle attention step. Per
+     * docs/TRIT_ROUTING_APPLICATIONS.md item #1; per
+     * journal/td27_4_fixed_tau_2026-05-10.md fixed tau is acceptable. */
+    uint8_t* k_sig;             /* [n_layers × max_seq_len × NUM_KV_HEADS × M4T_TRIT_PACKED_BYTES(HEAD_DIM)]
+                                 * or NULL if not allocated */
+    int k_sig_tau;              /* The tau used to compute cached signatures.
+                                 * If env BITNET_ATTN_TAU changes between runs,
+                                 * cache is invalidated and recomputed. */
 } bitnet_kv_cache_t;
 
 int  bitnet_kv_cache_alloc(bitnet_kv_cache_t* cache, int max_seq_len, int n_layers);

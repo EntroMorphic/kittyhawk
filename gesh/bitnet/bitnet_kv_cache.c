@@ -22,6 +22,8 @@ int bitnet_kv_cache_alloc(bitnet_kv_cache_t* cache, int max_seq_len, int n_layer
     cache->per_layer_stride = per_layer;
     cache->k = (m4t_mtfp_t*)calloc(total_cells, sizeof(m4t_mtfp_t));
     cache->v = (m4t_mtfp_t*)calloc(total_cells, sizeof(m4t_mtfp_t));
+    cache->k_sig = NULL;        /* lazy-allocated on first routed/posracle use */
+    cache->k_sig_tau = 0;
     if (!cache->k || !cache->v) {
         bitnet_kv_cache_free(cache);
         return 2;
@@ -33,6 +35,7 @@ void bitnet_kv_cache_free(bitnet_kv_cache_t* cache) {
     if (!cache) return;
     free(cache->k);
     free(cache->v);
+    free(cache->k_sig);
     memset(cache, 0, sizeof(*cache));
 }
 

@@ -62,6 +62,10 @@ static __attribute__((unused)) unsigned int g_attn_rng = 0xC0FFEE01u;  /* random
 static int64_t g_attn_fixed_tau = 0;  /* TD-27 follow-up #4: 0 = use per-Q 1/3-quantile;
                                        * positive = use this fixed tau in routed signature extraction.
                                        * Tests whether per-Q adaptiveness is load-bearing. */
+static int g_attn_no_k_cache = 0;     /* TRIT_ROUTING #1 verification: when 1, skip
+                                       * K-signature caching even if fixed tau set.
+                                       * Used to verify cache bit-exactness vs uncached
+                                       * fixed-tau path. */
 
 static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
     switch (m) {
@@ -98,6 +102,7 @@ static void bitnet_attn_mode_init_from_env(void) {
         if (v > 0) g_attn_fixed_tau = (int64_t)v;
         else fprintf(stderr, "[harness] bad BITNET_ATTN_TAU=%s, ignoring\n", t);
     }
+    if (getenv("BITNET_ATTN_NO_CACHE")) g_attn_no_k_cache = 1;
     if (g_attn_mode != BITNET_ATTN_DENSE) {
         fprintf(stderr, "[harness] sparse attention mode = %s, k = %d",
                 bitnet_attn_mode_name(g_attn_mode), g_attn_k);
@@ -231,6 +236,61 @@ static int64_t bitnet_routed_pick_tau(const m4t_mtfp_t* values, int n) {
     return tau;
 }
 
+/* TRIT_ROUTING #1: ensure K-signature cache is allocated, with the
+ * requested tau. If cache->k_sig is NULL, allocate. If allocated with
+ * a different tau, free and re-allocate (caller must repopulate).
+ * Returns 1 if cache was (re-)allocated (caller should populate); 0 if
+ * cache already valid for this tau (caller can use existing). */
+static int bitnet_kv_cache_ensure_sig(bitnet_kv_cache_t* cache, int64_t tau) {
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+    size_t per_layer_sig_bytes = (size_t)cache->max_seq_len *
+                                  (size_t)BITNET_NUM_KV_HEADS *
+                                  (size_t)sig_bytes;
+    size_t total_bytes = per_layer_sig_bytes * (size_t)cache->n_layers;
+    if (cache->k_sig && cache->k_sig_tau == (int)tau) return 0;
+    free(cache->k_sig);
+    cache->k_sig = (uint8_t*)calloc(total_bytes, 1);
+    cache->k_sig_tau = (int)tau;
+    assert(cache->k_sig);
+    return 1;  /* caller should populate signatures for all positions 0..current_pos */
+}
+
+/* TRIT_ROUTING #1: compute and store K signatures for one position
+ * in the K cache. Called after K is written. */
+static void bitnet_kv_cache_store_k_sig(
+    bitnet_kv_cache_t* cache, int layer_idx, int position, int64_t tau)
+{
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+    size_t row_size = (size_t)BITNET_NUM_KV_HEADS * BITNET_HEAD_DIM;
+    size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
+                        + (size_t)position * row_size;
+    size_t sig_row_base = (size_t)layer_idx * (size_t)cache->max_seq_len *
+                          (size_t)BITNET_NUM_KV_HEADS * (size_t)sig_bytes
+                        + (size_t)position * (size_t)BITNET_NUM_KV_HEADS *
+                          (size_t)sig_bytes;
+    int64_t k_i64[BITNET_HEAD_DIM];
+    for (int kvh = 0; kvh < BITNET_NUM_KV_HEADS; kvh++) {
+        const m4t_mtfp_t* k = cache->k + k_row_base + (size_t)kvh * BITNET_HEAD_DIM;
+        for (int d = 0; d < BITNET_HEAD_DIM; d++) k_i64[d] = (int64_t)k[d];
+        m4t_route_threshold_extract(
+            cache->k_sig + sig_row_base + (size_t)kvh * (size_t)sig_bytes,
+            k_i64, tau, BITNET_HEAD_DIM);
+    }
+}
+
+/* TRIT_ROUTING #1: pointer to cached K signature for (layer, position, kv_head). */
+static const uint8_t* bitnet_kv_cache_k_sig(
+    const bitnet_kv_cache_t* cache, int layer_idx, int position, int kv_head)
+{
+    int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+    size_t off = (size_t)layer_idx * (size_t)cache->max_seq_len *
+                 (size_t)BITNET_NUM_KV_HEADS * (size_t)sig_bytes
+               + (size_t)position * (size_t)BITNET_NUM_KV_HEADS *
+                 (size_t)sig_bytes
+               + (size_t)kv_head * (size_t)sig_bytes;
+    return cache->k_sig + off;
+}
+
 /* Pick the k positions in [0, seq_k) whose K signatures are CLOSEST to
  * the Q signature in popcount (Hamming-on-trits) distance. Uses
  * m4t_route_threshold_extract to build signatures and
@@ -250,31 +310,45 @@ static void bitnet_pick_routed_indices(
     int* out, int k, int seq_k,
     const m4t_mtfp_t* qh,
     const m4t_mtfp_t* k_cache, size_t k_row_size, int kv_head,
-    int head_dim)
+    int head_dim,
+    /* TRIT_ROUTING #1: optional cached K signatures. If non-NULL and tau
+     * matches cache->k_sig_tau, skip K signature recomputation. */
+    const bitnet_kv_cache_t* cache, int layer_idx)
 {
     int sig_bytes = M4T_TRIT_PACKED_BYTES(head_dim);
 
     /* Choose tau. Default: per-Q 1/3-quantile of |Q| (ensures all three trit
      * states realize per §18 input-class contract). Override via
-     * BITNET_ATTN_TAU env var for the TD-27 follow-up #4 experiment
-     * (does per-Q adaptiveness add anything over a fixed tau?). */
+     * BITNET_ATTN_TAU env var (TRIT_ROUTING #4: per-Q not load-bearing
+     * for aggregate quality; fixed tau enables K-signature caching). */
     int64_t tau = g_attn_fixed_tau > 0 ? g_attn_fixed_tau
                                         : bitnet_routed_pick_tau(qh, head_dim);
 
-    /* Q signature. */
+    /* Use cached K signatures if available with matching tau. */
+    int use_cache = (cache && cache->k_sig && cache->k_sig_tau == (int)tau);
+
+    /* Q signature (always per-step — depends on current Q). */
     int64_t* q_i64 = (int64_t*)malloc((size_t)head_dim * sizeof(int64_t));
     for (int d = 0; d < head_dim; d++) q_i64[d] = (int64_t)qh[d];
     uint8_t* q_sig = (uint8_t*)malloc((size_t)sig_bytes);
     m4t_route_threshold_extract(q_sig, q_i64, tau, head_dim);
 
-    /* K signatures (one per position). */
+    /* K signatures: read from cache if available, else compute on the fly.
+     * Either way, gather into a contiguous buffer for distance_batch. */
     uint8_t* k_sigs = (uint8_t*)malloc((size_t)seq_k * sig_bytes);
-    int64_t* tmp_i64 = q_i64;  /* reuse */
-    for (int t = 0; t < seq_k; t++) {
-        const m4t_mtfp_t* kh = k_cache + (size_t)t * k_row_size + (size_t)kv_head * head_dim;
-        for (int d = 0; d < head_dim; d++) tmp_i64[d] = (int64_t)kh[d];
-        m4t_route_threshold_extract(k_sigs + (size_t)t * sig_bytes,
-                                     tmp_i64, tau, head_dim);
+    if (use_cache) {
+        for (int t = 0; t < seq_k; t++) {
+            const uint8_t* src = bitnet_kv_cache_k_sig(cache, layer_idx, t, kv_head);
+            memcpy(k_sigs + (size_t)t * sig_bytes, src, (size_t)sig_bytes);
+        }
+    } else {
+        int64_t* tmp_i64 = q_i64;  /* reuse */
+        for (int t = 0; t < seq_k; t++) {
+            const m4t_mtfp_t* kh = k_cache + (size_t)t * k_row_size + (size_t)kv_head * head_dim;
+            for (int d = 0; d < head_dim; d++) tmp_i64[d] = (int64_t)kh[d];
+            m4t_route_threshold_extract(k_sigs + (size_t)t * sig_bytes,
+                                         tmp_i64, tau, head_dim);
+        }
     }
 
     /* Distances. mask = all 0xFF (consider all positions). */
@@ -624,6 +698,25 @@ void bitnet_forward_block(
             memcpy(cache->k + base, s->k, row_size * sizeof(m4t_mtfp_t));
             memcpy(cache->v + base, s->v, row_size * sizeof(m4t_mtfp_t));
 
+            /* TRIT_ROUTING #1: if routed mode is active AND a fixed tau is
+             * configured, lazy-allocate K signature cache and populate this
+             * position's signatures. Per #4 finding: per-Q tau not load-
+             * bearing for aggregate quality, so fixed-tau caching is safe. */
+            if (g_attn_mode == BITNET_ATTN_ROUTED && g_attn_fixed_tau > 0
+                && !g_attn_no_k_cache) {
+                if (bitnet_kv_cache_ensure_sig(cache, g_attn_fixed_tau)) {
+                    /* Cache was just (re-)allocated. Populate ALL positions
+                     * up to and including the current one (current_pos may
+                     * have positions already written by prior K-write before
+                     * the cache was active). */
+                    for (int p = 0; p <= position; p++) {
+                        bitnet_kv_cache_store_k_sig(cache, layer_idx, p, g_attn_fixed_tau);
+                    }
+                } else {
+                    bitnet_kv_cache_store_k_sig(cache, layer_idx, position, g_attn_fixed_tau);
+                }
+            }
+
             int seq_k = position + 1;
 
             /* Per-head scratch hoisted out of the head loop (RC-2). */
@@ -731,7 +824,8 @@ void bitnet_forward_block(
                             bitnet_pick_routed_indices(
                                 indices, k_eff, seq_k,
                                 qh, k_cache_layer, row_size, kv_head,
-                                BITNET_HEAD_DIM);
+                                BITNET_HEAD_DIM,
+                                cache, layer_idx);
                         }
                         /* Compute true Q·K dot at the chosen indices only. */
                         for (int i = 0; i < k_eff; i++) {
