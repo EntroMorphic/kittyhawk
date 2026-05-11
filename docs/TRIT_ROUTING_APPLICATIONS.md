@@ -510,7 +510,19 @@ use of the substrate's direction-awareness.
   already, this could give large speedups; if mostly non-zero, less.
 - How to handle prediction errors (false-zero predictions)?
 
-### #10 — KV cache eviction via signature distance [TIER-M; NEGATIVE RESULT 2026-05-11]
+### #10 — KV cache eviction via signature distance [TIER-M; MIXED RESULT 2026-05-11; AMENDED]
+
+> **Status correction (red-team caught overclaim same day):**
+> Originally labeled NEGATIVE RESULT; downgraded to MIXED. The simple
+> sigdist policy at aggressive eviction has a demonstrated diversity-
+> collapse failure mode (n=1 prompt); at moderate eviction it produces
+> coherent on-topic output that the dense-agreement metric scored as
+> "worse than random" but spot-checks show is coherent and on-topic.
+> The substrate-routed eviction CONCEPT is NOT cleanly falsified.
+> Methodology gaps (see amendment in journal): single-seed random
+> comparison, dense-agreement-as-quality conflation, only one direction
+> proxy (current K-sig) tested out of the originally-proposed family
+> (running-mean K-sig, Q-sig, etc.), bounded to seq_k ≤ 71.
 
 **Implementation:** `bitnet_harness.c` adds `BITNET_KV_EVICT_MODE`
 ∈ {none, fifo, random, sigdist} and `BITNET_KV_WINDOW`. `bitnet_kv_cache_t`
