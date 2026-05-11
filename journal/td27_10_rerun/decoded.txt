@@ -1,0 +1,27 @@
+
+========== long_recall_alma ==========
+  dense       :  2010-0-0-0-0-0-0-0-0-0-0-0-0-0-
+  fifo        :  "Light in the Pacific's deep-pelagic biology program, the Pacific's deep-pelagic biology, the Pacific's deep-pelagic biology
+  random_s1   :  Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr.
+  random_s2   :  Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr. Dr.
+  random_s3   :  The answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is
+  sigdist_m1  :  The answer is the Pacific's biology and the Pacific's biology and the Pacific's biology and the Pacific's Pacific's biology and the Pacific's biology and
+  sigdist_m8  :  What is the Pacific's biology, and the Pacific's biology, and the Pacific's biology, and the Pacific's biology, and the Pacific's biology
+
+========== long_narrative_lighthouse ==========
+  dense       :  the lighthouse. The storm was a storm. The lighthouse was a storm. The storm was a lighthouse. The storm. The lighthouse
+  fifo        :  the next day, the next day, the following, the following day, the following, the following day, the following, the following, the following
+  random_s1   :  the day of the day of the day of the day of the day of the day of the day of the day of the day of the day of
+  random_s2   :  the next day of the next day of the next day of the next day of the next day of the next day of the next day of the next
+  random_s3   :  the next day, the next day, the next day, the next day, the next day, the next day, the next day, the next
+  sigdist_m1  :  the eleventh of the eleventh, the twelfth, the twelfth, the thirteenth, the fourteenth, the fifteenth, the
+  sigdist_m8  :  the next day, the following: the eleventh, the following: the following: the following day, the following: the following day, the following
+
+========== long_recipe_extended ==========
+  dense       :  The answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is
+  fifo        :  What is the type of the type of the type of the type of the type of the type of the type of the type of the type of the
+  random_s1   :  tapioca starch, tapioca starch, tapioca starch, tapioca starch, tapioca starch, tapioca starch, tapioca starch, tapioca
+  random_s2   :  What is the answer is the tapioca starch is the starch is the starch is the starch is the starch is the starch is the starch is the starch
+  random_s3   :  What is the type of the type of the type of the type of the type of the type of the type of the type of the type of the
+  sigdist_m1  :  What is the type of tapioca starch is the type of tapioca starch is the type of tapioca starch is the type of tapioca starch is
+  sigdist_m8  :  What is the type of the type of the type of the type of the type of the type of the type of the type of the type of the
