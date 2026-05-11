@@ -129,6 +129,49 @@ static void bitnet_attn_mode_init_from_env(void) {
     }
 }
 
+/* ── TRIT_ROUTING #8 falsification probe: synthetic-MoE slice masking. ──
+ * BitNet's FFN intermediate (6912) is partitioned into N equal slices.
+ * Per-token, pick top-k slices and zero out the rest in gate_act before
+ * ffn_sub_norm sees it. Modes:
+ *   - oracle : top-k by sum |gate_act[slice]| (uses ground truth)
+ *   - random : top-k random slices (deterministic via xorshift, seeded)
+ *   - dense  : no masking (default; behavior unchanged)
+ * Substrate-routed gating is the eventual goal of #8 but requires
+ * offline slice characteristic precomputation; this probe answers the
+ * prerequisite question — does the FFN tolerate slice masking at all? */
+typedef enum {
+    BITNET_FFN_DENSE  = 0,
+    BITNET_FFN_ORACLE,
+    BITNET_FFN_RANDOM,
+} bitnet_ffn_mode_t;
+
+static bitnet_ffn_mode_t g_ffn_mode = BITNET_FFN_DENSE;
+static int g_ffn_num_experts = 4;
+static int g_ffn_k           = 2;
+static unsigned int g_ffn_rng = 0xC0FFEE08u;
+
+static void bitnet_ffn_mode_init_from_env(void) {
+    const char* m = getenv("BITNET_FFN_MODE");
+    if (m) {
+        if      (!strcasecmp(m, "dense"))  g_ffn_mode = BITNET_FFN_DENSE;
+        else if (!strcasecmp(m, "oracle")) g_ffn_mode = BITNET_FFN_ORACLE;
+        else if (!strcasecmp(m, "random")) g_ffn_mode = BITNET_FFN_RANDOM;
+        else fprintf(stderr, "[harness] unknown BITNET_FFN_MODE=%s, using dense\n", m);
+    }
+    const char* n = getenv("BITNET_FFN_NUM_EXPERTS");
+    if (n) { int v = atoi(n); if (v > 0 && BITNET_INTERMEDIATE_SIZE % v == 0) g_ffn_num_experts = v; }
+    const char* k = getenv("BITNET_FFN_K");
+    if (k) { int v = atoi(k); if (v > 0) g_ffn_k = v; }
+    if (g_ffn_mode != BITNET_FFN_DENSE) {
+        fprintf(stderr, "[harness] sparse FFN mode = %s, num_experts = %d, k = %d\n",
+                m ? m : "dense", g_ffn_num_experts, g_ffn_k);
+    }
+}
+
+/* Apply slice-mask to gate_act IN PLACE. Defined later (after xorshift32
+ * and posracle_compare); forward declaration here. */
+static void bitnet_ffn_apply_slice_mask(m4t_mtfp_t* gate_act, int N, int k);
+
 /* ── Phase 2 work-unit 1: bx-aware activation flow constants. ────────────
  * Target bx for normal (linear-magnitude) activations through the
  * network. Picked to give MTFP19_MAX/3^14 ≈ 35 of headroom — comfortable
@@ -439,6 +482,45 @@ static void bitnet_pick_posracle_topk(int* out, int k, int n, const int64_t* sco
     qsort(pairs, (size_t)n, 2 * sizeof(int64_t), bitnet_pick_posracle_compare);
     for (int i = 0; i < k; i++) out[i] = (int)pairs[2*i + 0];
     free(pairs);
+}
+
+/* TRIT_ROUTING #8 falsification probe: slice masking on FFN intermediate.
+ * See bitnet_ffn_mode_t comment above for design rationale. */
+static void bitnet_ffn_apply_slice_mask(m4t_mtfp_t* gate_act, int N, int k) {
+    if (N <= 1 || k >= N) return;
+    int S = BITNET_INTERMEDIATE_SIZE / N;
+    if (S * N != BITNET_INTERMEDIATE_SIZE) return;  /* misalignment guard */
+
+    int64_t* slice_scores = (int64_t*)malloc((size_t)N * sizeof(int64_t));
+    for (int e = 0; e < N; e++) {
+        int64_t s = 0;
+        if (g_ffn_mode == BITNET_FFN_ORACLE) {
+            for (int j = e*S; j < (e+1)*S; j++) {
+                m4t_mtfp_t v = gate_act[j];
+                s += v < 0 ? -(int64_t)v : (int64_t)v;
+            }
+        } else if (g_ffn_mode == BITNET_FFN_RANDOM) {
+            s = (int64_t)bitnet_xorshift32(&g_ffn_rng);
+        }
+        slice_scores[e] = s;
+    }
+
+    int64_t* pairs = (int64_t*)malloc((size_t)N * 2 * sizeof(int64_t));
+    for (int e = 0; e < N; e++) {
+        pairs[2*e + 0] = (int64_t)e;
+        pairs[2*e + 1] = slice_scores[e];
+    }
+    qsort(pairs, (size_t)N, 2 * sizeof(int64_t), bitnet_pick_posracle_compare);
+
+    uint8_t* keep = (uint8_t*)calloc((size_t)N, 1);
+    for (int i = 0; i < k; i++) keep[(int)pairs[2*i + 0]] = 1;
+
+    for (int e = 0; e < N; e++) {
+        if (keep[e]) continue;
+        for (int j = e*S; j < (e+1)*S; j++) gate_act[j] = 0;
+    }
+
+    free(keep); free(pairs); free(slice_scores);
 }
 
 /* Sparse attn_v_combine: out[d] = clamp(Σ_i weights[i] · V[indices[i]][d] >> shift).
@@ -1016,6 +1098,12 @@ void bitnet_forward_block(
                                 BITNET_GATE_ACT_BX,
                                 BITNET_INTERMEDIATE_SIZE);
 
+    /* TRIT_ROUTING #8 falsification probe: slice-mask gate_act in place
+     * when BITNET_FFN_MODE ∈ {oracle, random}. Default dense = no-op. */
+    if (g_ffn_mode != BITNET_FFN_DENSE) {
+        bitnet_ffn_apply_slice_mask(s->gate_act, g_ffn_num_experts, g_ffn_k);
+    }
+
     /* ffn_sub_norm(gate_act). gate_act is at GATE_ACT_BX. Output at
      * ACT_BX (resumes linear-magnitude flow for down_proj). */
     m4t_mtfp_rmsnorm_bx(s->ffn_sub_norm, s->gate_act,
@@ -1184,6 +1272,8 @@ static int bitnet_argmax_full_vocab(
 int main(int argc, char** argv) {
     /* Cycle 2: read sparse-attention mode from env. No-op when env unset. */
     bitnet_attn_mode_init_from_env();
+    /* TRIT_ROUTING #8 falsification probe init. */
+    bitnet_ffn_mode_init_from_env();
 
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */

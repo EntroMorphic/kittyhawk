@@ -361,17 +361,34 @@ discrete top-k selection? Does the training stability hold?
 
 ## C. Applications beyond sparse attention
 
-### #8 — MoE gating via signatures [TIER-M]
+### #8 — MoE gating via signatures [TIER-M; FALSIFICATION-PROBE DONE 2026-05-11; FULL DEFERRED]
 
-**What it is.** Mixture-of-experts gating that routes each token to k
-experts based on signature similarity, instead of via a learned
-gate-network MLP.
+**Cheap probe ran 2026-05-11 (prerequisite check):** partitioned
+BitNet's existing FFN intermediate (6912 → 4 × 1728 slices), masked
+k of N=4 slices per token via either oracle (sum |gate_act[slice]|)
+or random scoring. Result (n=4 prompts):
+- **25% slice mask (k=3/N=4, oracle):** robust on all 4 prompts.
+- **50% slice mask (k=2/N=4, oracle):** task-sensitive — works on
+  factual/conversational, breaks on math+code.
+- **Oracle > random consistently at both ratios** — load-bearing
+  result for #8's premise. Smart slice selection MATTERS; substrate
+  routing has room to add value.
+
+**What's still deferred (full #8):** substrate-routed gating against
+a learned-gate baseline on a trained MoE model. Requires:
+- A MoE harness (~1 week to build; doesn't exist).
+- A trained learned-gate baseline (~1 week + training compute).
+- Substrate-routing implementation (~1 week).
+- Quality + load-balancing measurement (~1 week).
+- Honest scope total: **3-5 weeks**, future cycle.
 
 **Cost reality check (red-team correction):** the project doesn't have
 a MoE harness. The "~2 weeks" estimate below assumed one existed; total
 honest estimate including MoE harness construction is **~3-5 weeks**
 (building a small MoE block is itself a research project on the
 substrate; integrating it with BitNet's FFN replacement is harder still).
+
+**Journal:** `journal/td27_8_ffn_probe_2026-05-11.md`.
 
 **How it works.** Per token:
 1. Compute token's trit signature via `m4t_route_threshold_extract` (with
