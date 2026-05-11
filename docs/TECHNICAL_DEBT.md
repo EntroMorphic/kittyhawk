@@ -57,27 +57,25 @@ recovered math_div ("12" direct) plus the gate1 regression
 (factual_hamlet), bringing strict pass rate to ~22/24 (~92%). Both
 defaults updated.
 
-### TD-27 — Why does substrate-routed top-k outperform oracle top-k?
+### TD-27 — Why does substrate-routed top-k outperform oracle top-k? (CLOSED 2026-05-10)
 
 **Source:** `journal/loop_regularizer_atomics_2026-05-10.md` open follow-ups.
-**State:** The Cycle 2 full battery showed routed_k=4 = 22/24 vs
-oracle_k=4 = 15/24. Both are relevance-aware sparse attention; both
-break loops by sparsification. The atomics confirmed sparsity is the
-loop-breaking mechanism, not routing specifically. But the gap between
-routed and oracle is real and substrate-distinct: signature-distance
-selection beats score-magnitude selection on this workload.
-**Hypothesis space:** Discrete-vs-continuous selection robustness;
-softmax-redistribution interaction (oracle picks high-|score| which
-includes high-NEGATIVE scores that softmax suppresses anyway, wasting
-sparsity budget); coarseness of trit signatures might be a feature
-not bug at small bx; selection-rule consistency across heads.
-**Remediation:** controlled experiment varying selection metric
-(signature distance vs raw |Q·K| vs |Q·K| restricted to positive
-scores vs other) while holding sparsity constant; compare per-head
-selection diversity; analyze softmax weight distribution at the chosen
-positions for each rule.
-**Priority hint:** medium. The Cycle 2 finding stands without this —
-but answering it would let us claim mechanism not just outcome.
+**Resolution:** `journal/td27_mechanism_2026-05-10.md` (commits in this
+patch series). H2 confirmed: oracle's `|Q·K|` selection metric is
+direction-blind, "wasting" sparsity budget on high-|negative-score|
+positions that softmax suppresses anyway. Added a "posracle" arm
+that picks top-k by SIGNED score (not |score|); on a 10-prompt
+focused subset at k=4, posracle = 7/10 (vs oracle 3/10 vs routed 8/10).
+Just changing the sort key from |score| to signed score recovered 4
+of 5 oracle failures. The substrate-distinct contribution is
+**direction-awareness as a native representation property** — trit
+signatures encode direction (sign + zero) by construction, so signature-
+distance selection is direction-aware automatically. Base-2 can
+implement direction-aware sparse attention via posracle-like rules;
+the substrate's contribution is making it native to the representation.
+The remaining ~1-prompt routed > posracle gap (8/10 vs 7/10) is small
+enough to be noise at n=10; could be H1 (representation robustness)
+or H3 (head-coordination) but not pursued.
 
 ### TD-23 — Manual classification of Cycle 2's 456 outputs
 

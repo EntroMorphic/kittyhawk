@@ -49,6 +49,11 @@ typedef enum {
     BITNET_ATTN_RANDOM,
     BITNET_ATTN_ROUTED,
     BITNET_ATTN_ORACLE,
+    BITNET_ATTN_POSRACLE,  /* TD-27 H2 test: top-k by SIGNED Q·K (positives win)
+                            * vs oracle's top-k by |Q·K|. If posracle ≈ routed,
+                            * the routed-vs-oracle gap is explained by oracle
+                            * "wasting" budget on high-|negative-score| positions
+                            * that softmax suppresses anyway. */
 } bitnet_attn_mode_t;
 
 static bitnet_attn_mode_t g_attn_mode = BITNET_ATTN_DENSE;
@@ -57,10 +62,11 @@ static __attribute__((unused)) unsigned int g_attn_rng = 0xC0FFEE01u;  /* random
 
 static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
     switch (m) {
-        case BITNET_ATTN_DENSE:  return "dense";
-        case BITNET_ATTN_RANDOM: return "random";
-        case BITNET_ATTN_ROUTED: return "routed";
-        case BITNET_ATTN_ORACLE: return "oracle";
+        case BITNET_ATTN_DENSE:    return "dense";
+        case BITNET_ATTN_RANDOM:   return "random";
+        case BITNET_ATTN_ROUTED:   return "routed";
+        case BITNET_ATTN_ORACLE:   return "oracle";
+        case BITNET_ATTN_POSRACLE: return "posracle";
     }
     return "unknown";
 }
@@ -68,10 +74,11 @@ static const char* bitnet_attn_mode_name(bitnet_attn_mode_t m) {
 static void bitnet_attn_mode_init_from_env(void) {
     const char* m = getenv("BITNET_ATTN_MODE");
     if (m) {
-        if      (!strcasecmp(m, "dense"))  g_attn_mode = BITNET_ATTN_DENSE;
-        else if (!strcasecmp(m, "random")) g_attn_mode = BITNET_ATTN_RANDOM;
-        else if (!strcasecmp(m, "routed")) g_attn_mode = BITNET_ATTN_ROUTED;
-        else if (!strcasecmp(m, "oracle")) g_attn_mode = BITNET_ATTN_ORACLE;
+        if      (!strcasecmp(m, "dense"))    g_attn_mode = BITNET_ATTN_DENSE;
+        else if (!strcasecmp(m, "random"))   g_attn_mode = BITNET_ATTN_RANDOM;
+        else if (!strcasecmp(m, "routed"))   g_attn_mode = BITNET_ATTN_ROUTED;
+        else if (!strcasecmp(m, "oracle"))   g_attn_mode = BITNET_ATTN_ORACLE;
+        else if (!strcasecmp(m, "posracle")) g_attn_mode = BITNET_ATTN_POSRACLE;
         else {
             fprintf(stderr, "[harness] unknown BITNET_ATTN_MODE=%s, using dense\n", m);
         }
@@ -296,6 +303,33 @@ static void bitnet_pick_oracle_topk(int* out, int k, int n, const int64_t* score
         pairs[2*i + 1] = scores[i] < 0 ? -scores[i] : scores[i];
     }
     qsort(pairs, (size_t)n, 2 * sizeof(int64_t), bitnet_pick_oracle_compare);
+    for (int i = 0; i < k; i++) out[i] = (int)pairs[2*i + 0];
+    free(pairs);
+}
+
+/* TD-27 H2 test: top-k by SIGNED score (descending — highest positive wins).
+ * If oracle's "wastes budget on high-|negative-score| positions softmax
+ * suppresses anyway" hypothesis is right, this should approach routed quality. */
+static int bitnet_pick_posracle_compare(const void* a, const void* b) {
+    /* Sort descending by SIGNED score (no abs). Negatives sink to bottom. */
+    int64_t av = ((const int64_t*)a)[1];
+    int64_t bv = ((const int64_t*)b)[1];
+    if (av < bv) return  1;
+    if (av > bv) return -1;
+    return 0;
+}
+
+static void bitnet_pick_posracle_topk(int* out, int k, int n, const int64_t* scores) {
+    if (k >= n) {
+        for (int i = 0; i < n; i++) out[i] = i;
+        return;
+    }
+    int64_t* pairs = (int64_t*)malloc((size_t)n * 2 * sizeof(int64_t));
+    for (int i = 0; i < n; i++) {
+        pairs[2*i + 0] = (int64_t)i;
+        pairs[2*i + 1] = scores[i];  /* SIGNED — negatives sink to bottom in sort */
+    }
+    qsort(pairs, (size_t)n, 2 * sizeof(int64_t), bitnet_pick_posracle_compare);
     for (int i = 0; i < k; i++) out[i] = (int)pairs[2*i + 0];
     free(pairs);
 }
@@ -650,8 +684,10 @@ void bitnet_forward_block(
                     /* Pick indices per arm. RANDOM and ORACLE implemented in
                      * Phases 2.2/2.3. ROUTED is Phase 2.4 (TODO). */
                     int64_t max_abs = 1;
-                    if (g_attn_mode == BITNET_ATTN_ORACLE) {
-                        /* ORACLE: compute dense scores first, then pick top-k by |score|. */
+                    if (g_attn_mode == BITNET_ATTN_ORACLE ||
+                        g_attn_mode == BITNET_ATTN_POSRACLE) {
+                        /* ORACLE / POSRACLE: compute dense scores first, then pick top-k.
+                         * ORACLE picks by |score|; POSRACLE by signed score (positives win). */
                         for (int t = 0; t < seq_k; t++) {
                             size_t k_row_base = (size_t)layer_idx * cache->per_layer_stride
                                                 + (size_t)t * row_size
@@ -659,7 +695,10 @@ void bitnet_forward_block(
                             const m4t_mtfp_t* kh = cache->k + k_row_base;
                             scores_i64[t] = m4t_mtfp_vec_dot_i64(qh, kh, BITNET_HEAD_DIM);
                         }
-                        bitnet_pick_oracle_topk(indices, k_eff, seq_k, scores_i64);
+                        if (g_attn_mode == BITNET_ATTN_ORACLE)
+                            bitnet_pick_oracle_topk  (indices, k_eff, seq_k, scores_i64);
+                        else
+                            bitnet_pick_posracle_topk(indices, k_eff, seq_k, scores_i64);
                         /* Pull the chosen scores into the sub buffer. */
                         for (int i = 0; i < k_eff; i++) {
                             sub_scores_i64[i] = scores_i64[indices[i]];
