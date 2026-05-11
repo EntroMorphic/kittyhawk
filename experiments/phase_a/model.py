@@ -33,6 +33,28 @@ def ternary_quantize(W: torch.Tensor) -> torch.Tensor:
     return (W + (w_q * alpha - W).detach())
 
 
+def rotary_freqs(head_dim: int, base: float = 10000.0) -> torch.Tensor:
+    """Standard rotary frequencies for head_dim. Returns (head_dim//2,) tensor."""
+    inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    return inv_freq
+
+
+def apply_rotary(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """Apply RoPE to x. x: (..., T, d) where d is even. Returns same shape."""
+    T = x.shape[-2]
+    d = x.shape[-1]
+    positions = torch.arange(T, device=x.device, dtype=freqs.dtype)
+    angles = positions[:, None] * freqs[None, :]  # (T, d/2)
+    cos = angles.cos()
+    sin = angles.sin()
+    # x: (..., T, d) -> split into two halves of d/2 each
+    x1, x2 = x[..., 0::2], x[..., 1::2]  # (..., T, d/2)
+    rx1 = x1 * cos - x2 * sin
+    rx2 = x1 * sin + x2 * cos
+    out = torch.stack([rx1, rx2], dim=-1).flatten(-2)
+    return out
+
+
 class BitLinear(nn.Module):
     """Linear layer with ternary weight QAT (b1.58 style). Bias optional, float."""
 
@@ -109,12 +131,15 @@ def gather_selected(K: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 
 
 class DenseAttention(nn.Module):
-    def __init__(self, model_dim: int, num_heads: int, head_dim: int):
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int, use_rope: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.W_qkv = BitLinear(model_dim, 3 * num_heads * head_dim)
         self.W_o = BitLinear(num_heads * head_dim, model_dim)
+        self.use_rope = use_rope
+        if use_rope:
+            self.register_buffer("rope_freqs", rotary_freqs(head_dim))
 
     def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
@@ -126,6 +151,10 @@ class DenseAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        if self.use_rope:
+            q = apply_rotary(q, self.rope_freqs)
+            k = apply_rotary(k, self.rope_freqs)
+
         # Scores
         scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         # Causal mask
@@ -136,16 +165,75 @@ class DenseAttention(nn.Module):
         return self.W_o(out)
 
 
-class SubstrateRoutedAttention(nn.Module):
-    """Top-k=4 attention selection via substrate signature distance."""
+class RandomTopKAttention(nn.Module):
+    """Top-k=4 attention with UNIFORMLY RANDOM index selection.
 
-    def __init__(self, model_dim: int, num_heads: int, head_dim: int, top_k: int = 4):
+    Red-team baseline (Phase A remediation): if random top-k matches dense
+    on this task, then substrate's signature-based routing is not load-
+    bearing on this regime. Indices are sampled per (query position, head,
+    batch) per forward pass using torch.randperm-style sampling.
+    """
+
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int, top_k: int = 4, use_rope: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.top_k = top_k
         self.W_qkv = BitLinear(model_dim, 3 * num_heads * head_dim)
         self.W_o = BitLinear(num_heads * head_dim, model_dim)
+        self.use_rope = use_rope
+        if use_rope:
+            self.register_buffer("rope_freqs", rotary_freqs(head_dim))
+
+    def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        qkv = self.W_qkv(x)
+        qkv = qkv.view(B, T, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.use_rope:
+            q = apply_rotary(q, self.rope_freqs)
+            k = apply_rotary(k, self.rope_freqs)
+
+        top_k = min(self.top_k, T)
+        # Random index per (B, H, T): sample top_k positions from [0, T) WITHOUT replacement
+        # via argsort of uniform noise. Shape: (B, H, T, top_k)
+        noise = torch.rand(B, self.num_heads, T, T, device=x.device)
+        idx = noise.argsort(dim=-1)[..., :top_k]  # (B, H, T, top_k)
+
+        k_sel = gather_selected(k, idx)
+        v_sel = gather_selected(v, idx)
+
+        scores = (q.unsqueeze(-2) * k_sel).sum(dim=-1) / math.sqrt(self.head_dim)
+
+        t_pos = torch.arange(T, device=x.device).view(1, 1, T, 1)
+        invalid = idx > t_pos
+        scores = scores.masked_fill(invalid, float("-inf"))
+
+        attn = F.softmax(scores, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)
+
+        out = (attn.unsqueeze(-1) * v_sel).sum(dim=-2)
+        out = out.transpose(1, 2).reshape(B, T, self.num_heads * self.head_dim)
+        return self.W_o(out)
+
+
+class SubstrateRoutedAttention(nn.Module):
+    """Top-k=4 attention selection via substrate signature distance."""
+
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int, top_k: int = 4, use_rope: bool = False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.top_k = top_k
+        self.W_qkv = BitLinear(model_dim, 3 * num_heads * head_dim)
+        self.W_o = BitLinear(num_heads * head_dim, model_dim)
+        self.use_rope = use_rope
+        if use_rope:
+            self.register_buffer("rope_freqs", rotary_freqs(head_dim))
 
     def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
@@ -156,6 +244,10 @@ class SubstrateRoutedAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if self.use_rope:
+            q = apply_rotary(q, self.rope_freqs)
+            k = apply_rotary(k, self.rope_freqs)
 
         # Apply causal mask to K's pool: substrate route only over valid past positions.
         # We make K positions that should not be attended invalid by setting their sign
@@ -221,15 +313,17 @@ class FFN(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, model_dim, num_heads, head_dim, ffn_dim, variant: str):
+    def __init__(self, model_dim, num_heads, head_dim, ffn_dim, variant: str, use_rope: bool = False):
         super().__init__()
         self.norm1 = RMSNorm(model_dim)
         if variant == "dense":
-            self.attn = DenseAttention(model_dim, num_heads, head_dim)
+            self.attn = DenseAttention(model_dim, num_heads, head_dim, use_rope=use_rope)
         elif variant == "substrate":
-            self.attn = SubstrateRoutedAttention(model_dim, num_heads, head_dim, top_k=4)
+            self.attn = SubstrateRoutedAttention(model_dim, num_heads, head_dim, top_k=4, use_rope=use_rope)
+        elif variant == "random":
+            self.attn = RandomTopKAttention(model_dim, num_heads, head_dim, top_k=4, use_rope=use_rope)
         else:
-            raise ValueError(f"variant must be 'dense' or 'substrate', got {variant}")
+            raise ValueError(f"variant must be 'dense' / 'substrate' / 'random', got {variant}")
         self.norm2 = RMSNorm(model_dim)
         self.ffn = FFN(model_dim, ffn_dim)
 
@@ -240,15 +334,21 @@ class TransformerBlock(nn.Module):
 
 
 class TinyGPT(nn.Module):
-    """1-layer GPT with ternary weights. Phase A spec."""
+    """1-layer GPT with ternary weights. Phase A spec.
 
-    def __init__(self, variant: str, model_dim=64, num_heads=4, head_dim=16, ffn_dim=128):
+    use_rope=False: absolute position embeddings (Phase A fixed-N task).
+    use_rope=True:  rotary position encoding (Phase A.1 variable-length task).
+    """
+
+    def __init__(self, variant: str, model_dim=64, num_heads=4, head_dim=16, ffn_dim=128, use_rope=False):
         super().__init__()
         assert num_heads * head_dim == model_dim
         self.variant = variant
+        self.use_rope = use_rope
         self.tok_emb = nn.Embedding(VOCAB, model_dim)
-        self.pos_emb = nn.Embedding(SEQ_LEN, model_dim)
-        self.block = TransformerBlock(model_dim, num_heads, head_dim, ffn_dim, variant)
+        if not use_rope:
+            self.pos_emb = nn.Embedding(SEQ_LEN, model_dim)
+        self.block = TransformerBlock(model_dim, num_heads, head_dim, ffn_dim, variant, use_rope=use_rope)
         self.norm_f = RMSNorm(model_dim)
         # LM head: tied weights would save params but keep simple (BitLinear)
         self.lm_head = BitLinear(model_dim, VOCAB)
@@ -259,8 +359,10 @@ class TinyGPT(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         B, T = input_ids.shape
-        positions = torch.arange(T, device=input_ids.device)
-        x = self.tok_emb(input_ids) + self.pos_emb(positions)[None, :, :]
+        x = self.tok_emb(input_ids)
+        if not self.use_rope:
+            positions = torch.arange(T, device=input_ids.device)
+            x = x + self.pos_emb(positions)[None, :, :]
         x = self.block(x, self.causal_mask[:T, :T])
         x = self.norm_f(x)
         return self.lm_head(x)  # (B, T, VOCAB)
@@ -271,7 +373,7 @@ def count_params(m: nn.Module) -> int:
 
 
 if __name__ == "__main__":
-    for v in ("dense", "substrate"):
+    for v in ("dense", "substrate", "random"):
         m = TinyGPT(v)
         x = torch.randint(0, VOCAB, (2, SEQ_LEN))
         out = m(x)

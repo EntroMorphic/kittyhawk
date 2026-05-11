@@ -24,15 +24,18 @@ SEP = 2
 SYM_BASE = 3
 N_SYMBOLS = 32
 VOCAB = 64
-SEQ_LEN = 24
-# Phase A uses FIXED-LENGTH copy. Original pre-reg specified n ∈ {4..12}
-# but with a 1-layer transformer + absolute position embeddings, variable
-# length is too hard to learn without relative-position encoding (rotary
-# or ALiBi). Fixed length isolates the attention-routing question from
-# the position-encoding question. Recorded in journal as Phase A amendment.
-N = 8
-MIN_N = N
-MAX_N = N
+SEQ_LEN = 32
+# Phase A fixed-N=8 (default) OR Phase A.1 variable-length via VARIABLE_N=1 env.
+# Variable-length requires rotary position encoding (use_rope=True in model).
+import os as _os
+VARIABLE_N = _os.environ.get("VARIABLE_N", "0") == "1"
+if VARIABLE_N:
+    MIN_N = 4
+    MAX_N = 12
+else:
+    N = 8
+    MIN_N = N
+    MAX_N = N
 
 
 def make_batch(batch_size: int, device: torch.device, rng: torch.Generator):
@@ -44,7 +47,10 @@ def make_batch(batch_size: int, device: torch.device, rng: torch.Generator):
     target_ids = torch.full((batch_size, SEQ_LEN), PAD, dtype=torch.long, device=device)
 
     for b in range(batch_size):
-        n = N  # fixed length for Phase A; see comment at module top
+        if VARIABLE_N:
+            n = int(torch.randint(MIN_N, MAX_N + 1, (1,), generator=rng, device=rng.device).item())
+        else:
+            n = N
         symbols = torch.randint(0, N_SYMBOLS, (n,), generator=rng, device=rng.device) + SYM_BASE
 
         # Standard teacher-forcing layout:
