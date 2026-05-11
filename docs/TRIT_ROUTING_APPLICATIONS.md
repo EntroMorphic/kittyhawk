@@ -323,39 +323,47 @@ don't need.
 **Open questions.** Does attention-loop frequency change with model
 scale? Does sparsity tolerance change with scale?
 
-### #7 — Cycle 3: routing-native attention with training [TIER-L]
+### #7 — Cycle 3: routing-native attention with training [TIER-L; SCOPE-RED-TEAMED 2026-05-11; PENDING INFRASTRUCTURE]
 
-**What it is.** Architectural Part-B test. Design attention to use
-substrate routing natively (not post-hoc); train; compare to dense
-BitNet attention at matched FLOPs.
+**This is the project-defining architectural Part-B test.** All
+substrate work to date validates **extensibility** (the substrate can
+do things on top of a pre-trained binary-substrate model). #7 asks
+about **necessity** (would a model TRAINED with substrate routing in
+the loop outperform dense at matched compute).
 
-**How it works.** Three changes:
-1. The Q/K projections produce trit-friendly representations directly
-   (could be a trained MTFP4-output BitLinear instead of MTFP19).
-2. The attention sparse-select is part of the forward pass (same as
-   our current routed arm), differentiable via straight-through estimator
-   or REINFORCE through `route_topk_abs`.
-3. Training loop optimizes the model end-to-end.
+**Status:** scope red-teamed 2026-05-11 with pre-registered success
+criterion. Full execution requires infrastructure (backward kernels
+TD-26, differentiable routing, optimizer, training loop) that does
+not yet exist. Honest cost estimate: **4-6 months focused work**.
 
-**Cost.** Months of foundational kernel work. Prerequisites:
-- `bitlinear_scale_bx_backward` and other gradient kernels for the
-  attention path
-- MTFP-native optimizer state (likely a lightweight Adam variant)
-- Training loop integration
+**Pre-registered success criterion (do not modify without explicit
+reason):**
+1. **Quality**: match or exceed dense BitNet on ≥3 diverse
+   benchmarks (WikiText perplexity, reasoning task, code task).
+2. **Compute**: matched **per-step FLOPs**, not matched parameter
+   count.
+3. **Reproducibility**: comparison against a published baseline, not
+   a re-derived baseline under our control.
+4. **Negative result acceptance**: failure is informative and is
+   recorded with the same rigor as P0-4.
 
-**Substrate-distinctiveness.** HIGH. Tests whether the substrate's
-primitive amplifies advantage when the model is TRAINED to use it
-rather than retrofitted.
+**Concrete prerequisites:**
+- Backward kernels for forward path (TD-26 records this scope).
+- Differentiable substrate routing — STE / Gumbel / REINFORCE study.
+- Training pipeline (optimizer, data loader, eval harness).
+- Baseline access strategy (re-train BitNet vs use small-corpus
+  proxy like TinyStories).
 
-**Prerequisites.** The full set of gradient kernels (TD-26).
+**Minimum viable Phase A (smallest possible test):** tiny GPT (1
+layer, 4 heads, head_dim 16, ~10K params), synthetic task (sequence
+copy / modular addition / key-value lookup). Two variants: dense vs
+top-k=4 substrate-routed with STE backward. Success: substrate-
+routed matches dense within 2× training steps. Cost: ~2-3 weeks
+once diff routing primitive lands.
 
-**What it would test/prove.** The architectural Part-B claim. If
-routing-native trained attention beats dense BitNet attention at
-matched FLOPs, we have empirical evidence that routing-essentiality
-isn't just a post-hoc mitigation.
+**Substrate-distinctiveness.** HIGH — this is the actual test.
 
-**Open questions.** What's the right gradient estimator for the
-discrete top-k selection? Does the training stability hold?
+**Journal:** `journal/td27_7_scope_2026-05-11.md` (full red-team).
 
 ---
 
