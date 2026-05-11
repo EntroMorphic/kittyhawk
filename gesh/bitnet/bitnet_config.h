@@ -171,6 +171,11 @@ typedef struct {
     int k_sig_tau;              /* The tau used to compute cached signatures.
                                  * If env BITNET_ATTN_TAU changes between runs,
                                  * cache is invalidated and recomputed. */
+    /* TRIT_ROUTING #10: per-position eviction bitmask. NULL when eviction is
+     * disabled. When non-NULL, attention masks evicted positions to large
+     * negative score before softmax. evicted[layer × max_seq_len + pos] != 0
+     * means "this position has been evicted from this layer's cache." */
+    uint8_t* evicted;
 } bitnet_kv_cache_t;
 
 int  bitnet_kv_cache_alloc(bitnet_kv_cache_t* cache, int max_seq_len, int n_layers);

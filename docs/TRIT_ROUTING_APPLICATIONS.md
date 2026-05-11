@@ -469,33 +469,48 @@ use of the substrate's direction-awareness.
   already, this could give large speedups; if mostly non-zero, less.
 - How to handle prediction errors (false-zero predictions)?
 
-### #10 — KV cache eviction via signature distance [TIER-M]
+### #10 — KV cache eviction via signature distance [TIER-M; NEGATIVE RESULT 2026-05-11]
 
-**What it is.** When KV cache fills up at long context, evict positions
-whose K signatures are most-distant from recent Q signatures. Direction-
-awareness is the right metric: opposite-direction positions are the
-safest to drop.
+**Implementation:** `bitnet_harness.c` adds `BITNET_KV_EVICT_MODE`
+∈ {none, fifo, random, sigdist} and `BITNET_KV_WINDOW`. `bitnet_kv_cache_t`
+gains an `evicted` bitmask. sigdist policy evicts positions with MAX
+summed-popcount K-sig distance to the **current position's K-sig**
+(direction proxy). Dense attention masks evicted scores to
+`-M4T_MTFP_MAX_VAL` before softmax. Sanity verified bit-exact dense
+when window > seq_k.
 
-**How it works.** Same routing pipeline, opposite decision. Maintain a
-running "recent Q signature average." Compute distance from each cached
-K's signature to this average. Evict the m positions with highest
-distance when cache overflows.
+**Result (4-prompt focused subset; max seq_k ~60-70; windows 16 and 32):**
 
-**Cost.** ~1 week. Builds on #1 (K-signature caching). Adds an eviction
-strategy module to the KV cache.
+| policy | first-30-agreement w=16 | first-30-agreement w=32 |
+|---|---|---|
+| fifo | 20/120 | 70/120 |
+| random | **28/120** | **78/120** |
+| sigdist | 26/120 | 60/120 |
 
-**Substrate-distinctiveness.** Direction-awareness as the eviction
-heuristic. Other approaches (FIFO, LRU, attention-weight-based) are
-simpler but direction-blind.
+**sigdist does not beat random eviction** on this battery. At w=16,
+nar_storm sigdist triggers the loop heuristic: "The rain was the only
+sound." × 4. **Self-reinforcing diversity collapse failure mode** —
+when the model is in a repeating state, current K-sig clusters with
+recent K-sigs, sigdist evicts the *diverse* older positions, the model
+loses semantic anchors, the loop reinforces.
 
-**Prerequisites.** #1 (K-signature caching). Long-context test workload
-with cache pressure.
+**Substrate-distinctiveness — NOT VALIDATED.** The direction-aware
+eviction premise is plausible, but the simple "current K-sig as
+direction proxy" implementation fails. Refinements (running-mean K-sig,
+Q-sig direction, exclude-N-most-recent) are recorded as follow-ups but
+NOT pursued in this cycle.
 
-**What it would test/prove.** Whether direction-aware eviction outperforms
-FIFO/LRU on long-context coherence.
+**What this validates:** the eviction infrastructure works (bit-exact
+sanity, composes with #1's K-sig cache). The FFN/attention tolerates
+50% eviction in moderate-seq_k regime with non-substrate policies.
 
-**Open questions.** What's the right "recent Q signature" representation?
-Single average, exponential moving average, attention-weighted?
+**What this does NOT validate:** sigdist as a substrate-distinctive win;
+long-context eviction quality (seq_k > 1024 unmeasured).
+
+**Journal:** `journal/td27_10_kv_evict_2026-05-11.md`.
+
+**This is the substrate's second clean negative result (after P0-4),
+honestly recorded.**
 
 ### #11 — Retrieval / nearest-neighbor (extends Gesh phase A.1) [TIER-M]
 

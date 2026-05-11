@@ -129,6 +129,70 @@ static void bitnet_attn_mode_init_from_env(void) {
     }
 }
 
+/* ── TRIT_ROUTING #10: KV cache eviction. ──────────────────────────────
+ * When `BITNET_KV_WINDOW=N` is set and `current_pos > N` for a layer's
+ * cache, evict positions until alive_count = N. Policies:
+ *   - none     : no-op (default)
+ *   - fifo     : evict the oldest non-evicted position
+ *   - random   : evict a uniformly-random non-evicted position
+ *   - sigdist  : evict the position whose K-signature is most distant
+ *                (popcount XOR with most-recent Q-sig, summed over
+ *                kv_heads) from the recent Q direction. Substrate-routed
+ *                eviction; the test #10 was designed to answer.
+ *
+ * Attention path masks evicted positions to a large negative score before
+ * softmax so weight=0 and they don't contribute to V combine.
+ *
+ * sigdist requires the K-sig cache populated (the #1 work). When eviction
+ * mode is sigdist and BITNET_ATTN_TAU is unset, a default tau of 5000 is
+ * used (per the #4 finding that fixed tau is acceptable).
+ */
+typedef enum {
+    BITNET_KV_EVICT_NONE = 0,
+    BITNET_KV_EVICT_FIFO,
+    BITNET_KV_EVICT_RANDOM,
+    BITNET_KV_EVICT_SIGDIST,
+} bitnet_kv_evict_mode_t;
+
+static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
+static int g_kv_window = 0;
+static unsigned int g_kv_evict_rng = 0xC0FFEE10u;
+
+static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
+    switch (m) {
+        case BITNET_KV_EVICT_NONE:    return "none";
+        case BITNET_KV_EVICT_FIFO:    return "fifo";
+        case BITNET_KV_EVICT_RANDOM:  return "random";
+        case BITNET_KV_EVICT_SIGDIST: return "sigdist";
+    }
+    return "unknown";
+}
+
+static void bitnet_kv_evict_init_from_env(void) {
+    const char* m = getenv("BITNET_KV_EVICT_MODE");
+    if (m) {
+        if      (!strcasecmp(m, "none"))    g_kv_evict_mode = BITNET_KV_EVICT_NONE;
+        else if (!strcasecmp(m, "fifo"))    g_kv_evict_mode = BITNET_KV_EVICT_FIFO;
+        else if (!strcasecmp(m, "random"))  g_kv_evict_mode = BITNET_KV_EVICT_RANDOM;
+        else if (!strcasecmp(m, "sigdist")) g_kv_evict_mode = BITNET_KV_EVICT_SIGDIST;
+        else fprintf(stderr, "[harness] unknown BITNET_KV_EVICT_MODE=%s, using none\n", m);
+    }
+    const char* w = getenv("BITNET_KV_WINDOW");
+    if (w) {
+        int v = atoi(w);
+        if (v > 0) g_kv_window = v;
+    }
+    /* sigdist requires a tau for K signatures. Use 5000 default if unset
+     * (per #4 finding: fixed tau is acceptable for quality). */
+    if (g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST && g_attn_fixed_tau == 0) {
+        g_attn_fixed_tau = 5000;
+    }
+    if (g_kv_evict_mode != BITNET_KV_EVICT_NONE) {
+        fprintf(stderr, "[harness] KV eviction mode = %s, window = %d\n",
+                bitnet_kv_evict_mode_name(g_kv_evict_mode), g_kv_window);
+    }
+}
+
 /* ── TRIT_ROUTING #8 falsification probe: synthetic-MoE slice masking. ──
  * BitNet's FFN intermediate (6912) is partitioned into N equal slices.
  * Per-token, pick top-k slices and zero out the rest in gate_act before
@@ -349,6 +413,104 @@ static const uint8_t* bitnet_kv_cache_k_sig(
                  (size_t)sig_bytes
                + (size_t)kv_head * (size_t)sig_bytes;
     return cache->k_sig + off;
+}
+
+/* TRIT_ROUTING #10: KV cache eviction helpers. ────────────────────────
+ * After K-write, if alive_count for the layer exceeds the configured
+ * window, mark non-alive positions until alive_count == window. */
+
+static uint8_t* bitnet_kv_cache_evicted_row(bitnet_kv_cache_t* cache, int layer_idx) {
+    return cache->evicted + (size_t)layer_idx * (size_t)cache->max_seq_len;
+}
+
+static int bitnet_kv_cache_ensure_evicted(bitnet_kv_cache_t* cache) {
+    if (cache->evicted != NULL) return 0;
+    size_t total = (size_t)cache->n_layers * (size_t)cache->max_seq_len;
+    cache->evicted = (uint8_t*)calloc(total, 1);
+    return cache->evicted ? 0 : 1;
+}
+
+/* Pick a victim alive position for layer_idx per the configured policy.
+ * Returns -1 if no eviction is needed or no alive position exists.
+ * current_position is the position just written (used by sigdist as the
+ * "direction proxy" — K-sig of the current token approximates Q-direction). */
+static int bitnet_kv_evict_pick_victim(
+    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position)
+{
+    uint8_t* row = bitnet_kv_cache_evicted_row(cache, layer_idx);
+
+    if (g_kv_evict_mode == BITNET_KV_EVICT_FIFO) {
+        for (int p = 0; p < seq_k; p++) {
+            if (!row[p] && p != current_position) return p;
+        }
+        return -1;
+    }
+
+    if (g_kv_evict_mode == BITNET_KV_EVICT_RANDOM) {
+        /* Count alive positions excluding current_position. */
+        int alive = 0;
+        for (int p = 0; p < seq_k; p++) if (!row[p] && p != current_position) alive++;
+        if (alive == 0) return -1;
+        unsigned int r = bitnet_xorshift32(&g_kv_evict_rng);
+        int pick = (int)(r % (unsigned int)alive);
+        int seen = 0;
+        for (int p = 0; p < seq_k; p++) {
+            if (row[p] || p == current_position) continue;
+            if (seen == pick) return p;
+            seen++;
+        }
+        return -1;
+    }
+
+    if (g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST) {
+        /* For each alive p (excluding current_position), compute sum over
+         * kv_heads of popcount(K_sig[p] XOR K_sig[current_position]).
+         * Evict the position with MAX distance. */
+        if (cache->k_sig == NULL) return -1;  /* sig cache must be populated */
+        int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+        int worst_p = -1; int worst_d = -1;
+        for (int p = 0; p < seq_k; p++) {
+            if (row[p] || p == current_position) continue;
+            int dsum = 0;
+            for (int h = 0; h < BITNET_NUM_KV_HEADS; h++) {
+                const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, h);
+                const uint8_t* sb = bitnet_kv_cache_k_sig(cache, layer_idx, current_position, h);
+                /* popcount of (sa XOR sb) over sig_bytes. */
+                for (int i = 0; i < sig_bytes; i++) {
+                    uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                    /* popcount4 lookup is cheaper but inline popcount8 is fine. */
+                    x = (uint8_t)(x - ((x >> 1) & 0x55));
+                    x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                    dsum += (int)(((x + (x >> 4)) & 0x0F));
+                }
+            }
+            if (dsum > worst_d) { worst_d = dsum; worst_p = p; }
+        }
+        return worst_p;
+    }
+
+    return -1;
+}
+
+/* Apply eviction at the given layer to bring alive_count down to window.
+ * Called after K-write + K-sig store. */
+static void bitnet_kv_evict_apply(
+    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position)
+{
+    if (g_kv_evict_mode == BITNET_KV_EVICT_NONE || g_kv_window <= 0) return;
+    if (bitnet_kv_cache_ensure_evicted(cache)) return;
+    uint8_t* row = bitnet_kv_cache_evicted_row(cache, layer_idx);
+
+    /* Count currently alive in [0, seq_k). */
+    int alive = 0;
+    for (int p = 0; p < seq_k; p++) if (!row[p]) alive++;
+
+    while (alive > g_kv_window) {
+        int victim = bitnet_kv_evict_pick_victim(cache, layer_idx, seq_k, current_position);
+        if (victim < 0) break;
+        row[victim] = 1;
+        alive--;
+    }
 }
 
 /* Pick the k positions in [0, seq_k) whose K signatures are CLOSEST to
@@ -800,9 +962,13 @@ void bitnet_forward_block(
             /* TRIT_ROUTING #1: if routed mode is active AND a fixed tau is
              * configured, lazy-allocate K signature cache and populate this
              * position's signatures. Per #4 finding: per-Q tau not load-
-             * bearing for aggregate quality, so fixed-tau caching is safe. */
-            if (g_attn_mode == BITNET_ATTN_ROUTED && g_attn_fixed_tau > 0
-                && !g_attn_no_k_cache) {
+             * bearing for aggregate quality, so fixed-tau caching is safe.
+             * TRIT_ROUTING #10: also populate when sigdist eviction is on. */
+            int want_sig_cache = (g_attn_mode == BITNET_ATTN_ROUTED
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST)
+                                  && g_attn_fixed_tau > 0
+                                  && !g_attn_no_k_cache;
+            if (want_sig_cache) {
                 if (bitnet_kv_cache_ensure_sig(cache, g_attn_fixed_tau)) {
                     /* Cache was just (re-)allocated. Populate ALL positions
                      * up to and including the current one (current_pos may
@@ -814,6 +980,11 @@ void bitnet_forward_block(
                 } else {
                     bitnet_kv_cache_store_k_sig(cache, layer_idx, position, g_attn_fixed_tau);
                 }
+            }
+
+            /* TRIT_ROUTING #10: trigger eviction if window exceeded. */
+            if (g_kv_evict_mode != BITNET_KV_EVICT_NONE && g_kv_window > 0) {
+                bitnet_kv_evict_apply(cache, layer_idx, position + 1, position);
             }
 
             int seq_k = position + 1;
@@ -870,6 +1041,16 @@ void bitnet_forward_block(
                         if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
                         if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
                         scores_int[t] = (m4t_mtfp_t)r;
+                    }
+
+                    /* TRIT_ROUTING #10: mask evicted positions to large
+                     * negative score so softmax weight ≈ 0. */
+                    if (cache->evicted != NULL) {
+                        const uint8_t* evrow = cache->evicted
+                            + (size_t)layer_idx * (size_t)cache->max_seq_len;
+                        for (int t = 0; t < seq_k; t++) {
+                            if (evrow[t]) scores_int[t] = (m4t_mtfp_t)(-M4T_MTFP_MAX_VAL);
+                        }
                     }
 
                     m4t_mtfp_softmax(weights, scores_int, seq_k);
@@ -1274,6 +1455,8 @@ int main(int argc, char** argv) {
     bitnet_attn_mode_init_from_env();
     /* TRIT_ROUTING #8 falsification probe init. */
     bitnet_ffn_mode_init_from_env();
+    /* TRIT_ROUTING #10: KV eviction init. */
+    bitnet_kv_evict_init_from_env();
 
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
