@@ -1,0 +1,42 @@
+=== Phase β (substrate L1 cell-graph metric) ===
+
+Loaded N = 12300 K-signatures, D = 128
+  prompts: ['dump', 'multitoken', 'p1', 'p2', 'p3', 'p4', 'p5']
+
+Pooled measurement at N_eff = 1500
+
+[POOLED] M1 per representation:
+  substrate_L1           [L1       ]  d̂=  97.75  Dmax=256  d̂/Dmax=0.382  (0.2s)
+  B0_Hamming_sub         [Hamming  ]  d̂= 103.24  Dmax=128  d̂/Dmax=0.807  (0.0s)
+  B2_sign                [Hamming  ]  d̂= 134.63  Dmax=203  d̂/Dmax=0.663  (0.0s)
+  B3_sign                [Hamming  ]  d̂= 134.56  Dmax=203  d̂/Dmax=0.663  (0.0s)
+  B4_pca                 [Hamming  ]  d̂= 140.73  Dmax=203  d̂/Dmax=0.693  (0.0s)
+  B5_scrambled_sub       [scrambled]  d̂= 106.04  Dmax=256  d̂/Dmax=0.414  (0.6s)
+
+Bootstrap (B=200, N_sub=500):
+    bootstrap iter 25/200
+    bootstrap iter 50/200
+    bootstrap iter 75/200
+    bootstrap iter 100/200
+    bootstrap iter 125/200
+    bootstrap iter 150/200
+    bootstrap iter 175/200
+    bootstrap iter 200/200
+  bootstrap elapsed: 26.4s
+
+Bootstrap CIs on d̂/Dmax:
+  substrate_L1           mean=0.384  CI=[0.370, 0.397]  (n=200)
+  B0_Hamming_sub         mean=0.818  CI=[0.783, 0.850]  (n=200)
+  B2_sign                mean=0.663  CI=[0.661, 0.664]  (n=200)
+  B3_sign                mean=0.663  CI=[0.661, 0.665]  (n=200)
+  B4_pca                 mean=0.697  CI=[0.695, 0.699]  (n=200)
+  B5_scrambled_sub       mean=0.416  CI=[0.399, 0.430]  (n=200)
+
+[Verdict]
+  P1: substrate_L1 d̂/Dmax=0.384 vs B0_Hamming=0.818  gap=+0.434  disjoint=True  PASS=True
+  P2: substrate_L1=0.384 vs B4=0.697  gap=+0.313  disjoint=True  PASS=True  (lenient: True)
+  P3: substrate_L1=0.384 vs B5_scrambled=0.416  gap=+0.032  disjoint=True  PASS=True
+
+>>> PHASE β VERDICT: VALIDATED  (3/3 P-rules clear) <<<
+
+Results written to experiments/phase_beta/results/phase_beta_results.json
