@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>  /* clock_gettime for gen-loop timing (cost measurement) */
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
@@ -1763,6 +1764,8 @@ int main(int argc, char** argv) {
     /* Phase 2: greedy generation (--gen N). After each forward, take
      * argmax over LM head logits; that token id becomes the next input
      * embedding. Stops at n_generate or when sequence_len fills the cache. */
+    struct timespec gen_t0, gen_t1;
+    clock_gettime(CLOCK_MONOTONIC, &gen_t0);
     for (int g = 0; g < n_generate; g++) {
         int pos = n_positions + g;
         if (pos >= max_seq) break;
@@ -1794,6 +1797,14 @@ int main(int argc, char** argv) {
         }
         int dump_this = (g == n_generate - 1) && dump_path != NULL;
         FORWARD_ONE(pos, dump_this);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &gen_t1);
+    double gen_seconds = (double)(gen_t1.tv_sec - gen_t0.tv_sec)
+                       + (double)(gen_t1.tv_nsec - gen_t0.tv_nsec) / 1e9;
+    if (n_generate > 0) {
+        fprintf(stderr,
+                "[harness] gen_loop_seconds = %.4f  n_generate = %d  seconds_per_token = %.4f  prompt_tokens = %d\n",
+                gen_seconds, n_generate, gen_seconds / n_generate, n_positions);
     }
 
     #undef FORWARD_ONE

@@ -6,6 +6,32 @@ status: 1 application empirically validated (sparse attention); 12 applications 
 
 # Trit-routing primitive — application surface
 
+## Cost-distinct claim — MEASURED 2026-05-11; humbling result
+
+The substrate's "256× fewer attention dots" / "22% of dense's compute"
+framing (originally in commit 68b53ad's Phase A message, retracted
+2188337, then re-extrapolated) has been **measured** in
+`journal/td27_cost_measurement_2026-05-11.md`:
+
+- At seq_k ∈ {64..1056} on BitNet b1.58-2B-4T: dense and routed are
+  **equivalent in wall-clock** (within 1%, ~0.37 s/token).
+- Reason: **attention is not the bottleneck.** BitNet's ternary +
+  integer attention is already cheap; FFN + LM head + projections
+  dominate per-token cost (~84% of total).
+- Theoretical FLOPS speedup of substrate routing emerges only at
+  seq_k > ~4096, which is beyond this codebase's measurable range
+  (BitNet's max_seq is 4096).
+
+**The corrected cost narrative:** substrate's attention savings are
+real FLOPS but asymptotic-at-large-T. At currently testable scales
+they are invisible. The substrate's quality wins (Phase A trainability,
+#10 long-context coherence, #9 cell-prediction headroom) stand; the
+cost story is narrower than originally framed.
+
+Engineering follow-up recorded: NEON-ify `bitnet_sparse_attn_v_combine`
+(currently scalar; the cost barrier in the sparse path) — would
+enable a cleaner cost measurement at large seq_k.
+
 ## What we have
 
 A substrate-distinct primitive: **direction-aware top-k via packed-trit
