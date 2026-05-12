@@ -17,6 +17,31 @@ phase corrects a methodology flaw from the previous one.
 9. `journal/td28_phase_beta_redteam_2026-05-12.md` — Red-team: VALIDATED collapses to MIXED 1/3 under d̂/D_amb.
 10. **`journal/td28_phase_gamma_robustness_2026-05-12.md` — current** — full remediation, robustness matrix.
 
+## **READ FIRST — what the arc actually measured**
+
+The arc compared Python `pairwise_hamming_int8` (categorical Hamming,
+0/1 per cell) vs Python `pairwise_L1_int8` (L1, 0/1/2 per cell) on
+substrate signatures. **Neither corresponds to a switchable production
+choice.** The production substrate distance kernel
+(`m4t/src/m4t_trit_pack.c::m4t_popcount_dist`) computes XOR popcount
+on packed 2-bit trit codes, which equals **L1 path-graph distance**.
+
+So "L1 vs Hamming" across these phases is actually:
+- **Hamming-substrate (the Python baseline)**: never in production. A
+  strawman that captures what substrate eviction would look like
+  with 1-bit-per-cell sign-only packing.
+- **L1-substrate (the Python target)**: equivalent to what
+  production's `m4t_popcount_dist` already computes.
+
+The headline +37-62% L2-error reduction from Phase ε re-casts as:
+**the substrate's 2-bit code design choice is load-bearing for
+attention-output quality, and the safety margin over a hypothetical
+1-bit-sign-only encoding is 38-62% L2 error.** No production switch
+is implied or needed.
+
+See `journal/td28_l1_already_in_production_2026-05-12.md` for the full
+misalignment write-up.
+
 ## Final status (after Phase γ)
 
 The substrate-distinctive claim is not a single PASS/FAIL — it's a
