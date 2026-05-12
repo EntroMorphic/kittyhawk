@@ -811,9 +811,16 @@ static void bitnet_ffn_apply_cell_mask(m4t_mtfp_t* gate_act, int keep) {
 }
 
 /* Sparse attn_v_combine: out[d] = clamp(Σ_i weights[i] · V[indices[i]][d] >> shift).
- * Scalar implementation — this path is experimental (Cycle 2 sparse arms);
- * NOT on the production hot path when BITNET_ATTN_MODE is unset/dense.
- * The dense path remains m4t_mtfp_attn_v_combine (NEON-routed). */
+ *
+ * NEON via gather: copy V[indices[i]] into a contiguous buffer, then call the
+ * NEON `m4t_mtfp_attn_v_combine` with tight stride. Per the foundational
+ * "no scalar in production" rule (memory: feedback_function_over_speed_no_scalar.md):
+ * the gather itself is plain memcpy (not "scalar ops" in the architectural
+ * sense — it's data movement, not the computational kernel), and the
+ * computational kernel IS the existing NEON V combine.
+ *
+ * Previously implemented as a scalar fallback; that violated the
+ * foundational rule and was caught 2026-05-12. */
 static void bitnet_sparse_attn_v_combine(
     m4t_mtfp_t* out, int shift,
     const m4t_mtfp_t* weights,
@@ -821,22 +828,18 @@ static void bitnet_sparse_attn_v_combine(
     int k, int head_dim,
     const int* indices)
 {
-    int64_t* acc = (int64_t*)calloc((size_t)head_dim, sizeof(int64_t));
+    if (k == 0 || head_dim == 0) return;
+    /* Gather V[indices[i]] into a contiguous (k × head_dim) buffer. */
+    m4t_mtfp_t* V_gathered = (m4t_mtfp_t*)malloc((size_t)k * (size_t)head_dim * sizeof(m4t_mtfp_t));
+    assert(V_gathered);
     for (int i = 0; i < k; i++) {
-        int t = indices[i];
-        const m4t_mtfp_t* V_t = V_base + (size_t)t * row_size;
-        int64_t w = (int64_t)weights[i];
-        for (int d = 0; d < head_dim; d++) {
-            acc[d] += w * (int64_t)V_t[d];
-        }
+        const m4t_mtfp_t* V_t = V_base + (size_t)indices[i] * row_size;
+        memcpy(V_gathered + (size_t)i * (size_t)head_dim, V_t,
+               (size_t)head_dim * sizeof(m4t_mtfp_t));
     }
-    for (int d = 0; d < head_dim; d++) {
-        int64_t r = acc[d] >> shift;
-        if (r >  M4T_MTFP_MAX_VAL) r =  M4T_MTFP_MAX_VAL;
-        if (r < -M4T_MTFP_MAX_VAL) r = -M4T_MTFP_MAX_VAL;
-        out[d] = (m4t_mtfp_t)r;
-    }
-    free(acc);
+    /* NEON V combine on the gathered buffer with tight stride. */
+    m4t_mtfp_attn_v_combine(out, shift, weights, V_gathered, (size_t)head_dim, k, head_dim);
+    free(V_gathered);
 }
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
@@ -1121,9 +1124,11 @@ void bitnet_forward_block(
             assert(scores_i64 && scores_int && weights);
 
             /* Cycle 2: branch by attention mode. Dense path is bit-exact
-             * unchanged from production. Sparse arms (random/routed/oracle)
-             * use a separate code path with bitnet_sparse_attn_v_combine
-             * (scalar — experimental, not on production hot path). */
+             * unchanged from production. Sparse arms (random/routed/oracle/
+             * posracle/hybrid) use bitnet_sparse_attn_v_combine which gathers
+             * V[indices] into a contiguous buffer and calls the NEON
+             * m4t_mtfp_attn_v_combine on it. Production-eligible per the
+             * "no scalar in production" foundational rule (2026-05-12). */
             int sparse_active = (g_attn_mode != BITNET_ATTN_DENSE && g_attn_k < seq_k);
 
             for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
