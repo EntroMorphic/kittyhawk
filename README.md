@@ -60,7 +60,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full set of invariants. The hea
 - **No binary floating point** in runtime kernels of `libm4t` or per-query/per-batch paths above it. MTFP (base-3) is the substrate-legal continuous geometry.
 - **No random projections** in image classification — direct ternary quantization of pixels and gradients is the production representation.
 - **No random weights** anywhere — every dimension must represent something specific.
-- **No primitive without named consumer demand** — speculative infrastructure does not earn its place.
+- **No primitive without named consumer demand** — *for derived/composite kernels only*. Foundational primitives named in the vision (the six-primitive floor) are exempt; their demand IS the foundation. See `CONTRIBUTING.md` §5 for the full carve-out and the disclaimer history.
 - **Substrate-level specs are upstream of kernel designs** — re-read the relevant spec section before any design memo.
 - **DELETE = never.** Superseded code moves to an archive directory; it does not get removed.
 

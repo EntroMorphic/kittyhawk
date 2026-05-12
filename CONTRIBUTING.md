@@ -12,7 +12,9 @@ Glyph is a research codebase with strict discipline. Every contribution honors t
 
 4. **No dense resolvers in classification paths.** Cascades stay routed end-to-end. Pixel L1/L2/cosine/centroid resolvers are forbidden in the classifier path.
 
-5. **No primitive without named consumer demand.** New kernels appear when a consumer asks for them. Speculative infrastructure does not earn its place. If you are tempted to build a kernel "because we'll need it," name the consumer first or wait.
+5. **No primitive without named consumer demand — *for derived/composite kernels only*.** New kernels in this class appear when a consumer asks for them. Speculative infrastructure does not earn its place. If you are tempted to build a kernel "because we'll need it," name the consumer first or wait.
+
+   **Exception (load-bearing): this rule does NOT apply to foundational primitives named by the project vision.** The vision claim names a six-primitive floor (add, sub, exp, log, …); those primitives' demand is the foundation itself, not a downstream consumer. Demanding consumer demand for foundational primitives means the substrate forever lags the foundation by exactly one consumer. The user has explicitly disclaimed this framing for foundational research (memory: `feedback_no_consumer_barrier.md`, 2026-05-04, verbatim: *"YES it is wrong for research! Eliminate the consumer barrier with extreme prejudice!"*). Do not paraphrase ("becomes worth doing if/when…", "the value of X is small for current decisions…") — those are the same violation as the literal phrase.
 
 6. **DELETE = never.** Superseded code moves to an archive directory (`01MAY26_archived/` for prior-cycle work, future archive directories for future cycles), or is suffixed `.archived`, or is otherwise preserved. Never `rm`.
 

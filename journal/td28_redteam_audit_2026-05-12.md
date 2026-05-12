@@ -62,11 +62,23 @@ active hazard.
 
 7. **The "six-primitive floor" foundation claim lists ~6 primitives
    including exp and log; the substrate ships add/sub/mul/neg/max/min/eq
-   but exp/log are absent.** Per the "no primitive without named
-   consumer demand" rule this deferral is consistent — but the
-   foundation claim's specificity ("six") doesn't match the four
-   delivered (or six minus exp/log depending on how you count). Either
-   deliver the missing primitives or refine the foundation statement.
+   but exp/log are absent.** This is **straightforwardly: the work
+   hasn't been done yet**. The vision claim #1 explicitly names exp
+   and log; the user has disclaimed (with extreme prejudice — see
+   `feedback_no_consumer_barrier.md`) the "no primitive without demand"
+   framing for foundational primitives. The vision's naming IS the
+   demand. Original framing of this finding cited that rule and was
+   wrong; corrected here.
+
+   The honest gap: exp and log are owed to the foundation; the
+   substrate currently has 4 of the named 6. Plan and ship them, or
+   refine the foundation statement if "six" was approximate.
+
+   *Audit drift note: Audit-4 surfaced this against `CONTRIBUTING.md:15`
+   verbatim ("No primitive without named consumer demand"). I
+   synthesized that into the finding without checking memory. The
+   subagent didn't have access to `feedback_no_consumer_barrier.md`;
+   I did, and missed it. See also remediation item 8 below.*
 
 8. **The Phase β/γ/δ/ε arc's "L1 vs Hamming" narrative is a
    methodological artifact of comparing two Python implementations
@@ -147,7 +159,16 @@ If we were to remediate, in order of leverage:
    readable summary (LOW priority, MEDIUM effort).
 7. **Resolve the six-primitive foundation claim**: either commit to
    delivering exp/log or refine the claim's wording (VISION-level
-   decision).
+   decision). The vision claim names them; the work is owed.
+
+8. **Amend `CONTRIBUTING.md:15` and `README.md:63`** — the "no
+   primitive without named consumer demand" rule keeps causing audit
+   drift. The user has disclaimed it (with extreme prejudice) for
+   foundational primitives (the named six in vision claim #1). The
+   rule still applies to derived/composite kernels. Scope it
+   explicitly in the doc, or remove it if it causes more drift than
+   it prevents. Memory `feedback_no_consumer_barrier.md` has the full
+   disclaimer.
 
 None of these are urgent. Items 1-5 could ship in a single
 "defensive hardening" commit.
