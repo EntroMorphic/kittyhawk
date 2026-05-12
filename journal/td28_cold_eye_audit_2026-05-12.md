@@ -87,6 +87,26 @@ This is the same shape as the td28 misalignment (Python doesn't
 match production semantics), at a different layer. Adding to
 `feedback_verify_production_semantics`.
 
+> **2026-05-12 closeout (post-Phase ζ).** Verified directly against
+> `bitnet_harness.c`:
+> - Line 208-210: when `BITNET_KV_EVICT_MODE=sigdist` is on and τ is
+>   unset, the harness **forces** `g_attn_fixed_tau = 5000`.
+> - Line 649-650: routed-attention scoring then uses
+>   `g_attn_fixed_tau` if >0, else per-Q 1/3-quantile.
+> - Line 1108: K-sig caching is gated on `g_attn_fixed_tau > 0`.
+>
+> So in sigdist mode τ is globally fixed at 5000 for both Q and K.
+> Phase ε's fixed-τ=5000 regime **does match** production sigdist
+> mode; the mismatch I flagged is actually between Phase ε and a
+> "per-Q-adaptive τ with K-sig eviction" combination that production
+> does not support (the K-sig caching requires fixed τ). The
+> hypothetical mismatched-regime rerun would be measuring something
+> that cannot run in current production code paths.
+>
+> The remediation collapses: no rerun is justified by this finding.
+> Phase ζ's negative result already speaks to the territory of the
+> only sigdist-eviction regime that production supports. Closing §2.
+
 ### §3. Production DEFAULT does not exercise substrate eviction
 
 `g_kv_evict_mode` default is **`BITNET_KV_EVICT_NONE`**
