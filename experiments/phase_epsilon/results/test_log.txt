@@ -1,0 +1,78 @@
+PHASE ε TEST + BENCHMARK
+
+
+======================================================================
+[ε-1] Longer-prompt K-cache dumps
+======================================================================
+  prompts found: ['long64', 'long_a', 'long_b', 'long_c', 'long_d']
+  ✓ 5 prompts × [64, 64, 63, 63, 64] positions × 30 layers each: PASS
+  ✓ 318 total (prompt, position) combos → 9540 layer.bin files (expected 9540): PASS
+  ✓ load_qkv returns expected shapes: PASS
+  ✓ K-cache values non-trivial (nz_frac=1.00): PASS
+
+  Microbenchmark:
+  load_qkv full corpus (9540 files): 3691.9 ms total, 387 µs/file
+
+======================================================================
+[ε-2] Per-Q-head oracle vs averaged-Q
+======================================================================
+  layer=14 kv=2 pos=30, k_keep=16, P=30
+  per-head top-k union: 24, intersection: 6
+  ✓ Q-heads disagree on top-k (per-Q-head oracle matters): PASS
+  averaged-Q topk overlap with per-head intersection: 100%
+  averaged-Q topk overlap with per-head union:        100%
+  ✓ averaged-Q oracle differs from per-head: confirms ε-2 fix
+
+  Microbenchmark:
+  per-Q-head oracle (4 heads)                              10.00 µs / call (median of 100)
+  averaged-Q oracle                                         4.67 µs / call (median of 100)
+
+======================================================================
+[ε-3] Softmax-mass preservation metric
+======================================================================
+  ✓ softmax_stable returns valid probability distribution: PASS
+  ✓ softmax_stable shift-invariant (handles large values): PASS
+  ✓ kept_mass + rest_mass = 1.0: PASS
+  ✓ oracle top-k beats random on mass (0.995 vs 0.004): PASS
+
+  Microbenchmark:
+  softmax_stable on P=63 vector                             2.00 µs / call (median of 1000)
+
+======================================================================
+[ε-4] Attention-output L2 error
+======================================================================
+  ✓ k_keep=P-1 gives sane L2 errors: PASS
+  ✓ identical eviction policy gives identical L2 error: PASS
+  L2 errors at k_keep=16 (mean over 30 seeds):
+       hamming: 0.0000
+            l1: 0.0000
+        random: 0.5714
+  ✓ random > L1 on L2 error (as expected): PASS
+
+  Microbenchmark:
+  trial_eviction P=30 k=16                                 82.29 µs / call (median of 100)
+
+======================================================================
+[ε-5] Shuffled-K null control
+======================================================================
+  ✓ shuffle preserves per-row multiset (marginals): PASS
+  column-mean L1 diff after shuffle: 8184.9 (orig: 10479.6, shuf: 2780.2)
+  ✓ shuffle destroys column-level structure: PASS
+  ✓ substrate signature per-row marginals preserved: PASS
+
+  Microbenchmark:
+  shuffle per-row, K_cache shape (30, 128)                 49.29 µs / call (median of 100)
+
+======================================================================
+[Cross-cutting] Hamming vs L1 distance kernels (NumPy ref)
+======================================================================
+             Q⊥K    D  Hamming_µs     L1_µs   L1/Ham
+  Q vs P=32      128        2.42      2.94    1.21x
+  Q vs P=64      128        3.37      5.73    1.70x
+  Q vs P=128     128        5.34      9.31    1.74x
+  Q vs P=256     128        9.07     15.62    1.72x
+  Q vs P=512     128       16.14     28.86    1.79x
+
+======================================================================
+ALL TESTS PASSED
+======================================================================
