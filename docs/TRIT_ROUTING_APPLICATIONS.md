@@ -6,7 +6,41 @@ status: 1 application empirically validated (sparse attention); 12 applications 
 
 # Trit-routing primitive — application surface
 
-## Cost-distinct claim — MEASURED v2 2026-05-12; ~3% wall-clock advantage
+## Cost-distinct claim — MEASURED v3 2026-05-12; scaling crossover, not constant
+
+**Final corrected measurement** (n=3 per config, gen=16, 95% Welch CI,
+attention-attributed via `g_attn_seconds`, scratch-buffer gather):
+
+| seq_k | dense | routed_k4 | Δ% | attn frac |
+|---|---|---|---|---|
+| 80 | 0.3664 ± 0.0003 | 0.3675 ± 0.0004 | **+0.31% slower** | 0.4% |
+| 272 | 0.3725 ± 0.0001 | 0.3709 ± 0.0003 | **−0.43% faster** | 1.5% |
+| 528 | 0.3784 ± 0.0022 | 0.3725 ± 0.0002 | **−1.56% faster** | 3.0% |
+| 1040 | 0.3939 ± 0.0024 | 0.3793 ± 0.0005 | **−3.72% faster** | 6.1% |
+
+All four Δ values have 95% CI excluding zero — statistically significant.
+
+**The honest cost narrative**: substrate is **slower at small seq_k**
+(gather overhead > attention savings) and **faster at large seq_k**
+(savings grow with attention fraction). Scaling is monotonic; at
+seq_k=1040 substrate halves attention compute (−48%) for a 3.72%
+total wall-clock win.
+
+v3 supersedes:
+- v1 (`a29e287`): had 256-token prompt truncation bug → "invisible
+  at testable scales" was artifactual.
+- v2 (`c8e3dd8`): claimed "constant ~3% advantage" from n=1 trial per
+  config → averaged across regime where sign flips.
+
+v3 fixes (committed in `967c22b`, `c8e3dd8`):
+- Sparse V combine NEON via scratch buffer (no malloc-per-call)
+- Prompt buffer 4096 with overflow error
+- Attention-only timing for proper attribution
+- 3 trials per config with Welch CI
+
+Quality wins unchanged. Journal: `journal/td27_cost_measurement_v3_2026-05-12.md`.
+
+## Cost-distinct claim — v2 (SUPERSEDED) 2026-05-12; ~3% wall-clock advantage
 
 The original v1 measurement (`journal/td27_cost_measurement_2026-05-11.md`,
 commit `a29e287`) had a silent bug: the harness `--prompt-tokens` parse
