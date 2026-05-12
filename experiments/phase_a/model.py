@@ -221,6 +221,96 @@ class RandomTopKAttention(nn.Module):
         return self.W_o(out)
 
 
+class SubstrateGumbelAttention(nn.Module):
+    """Top-k=4 attention selection via substrate signature distance, with
+    Gumbel-softmax STE for the selection gradient.
+
+    Forward: hard top-k by signature distance (sign-based, non-diff).
+    Backward: gradient flows through a soft mask = softmax over tanh-
+      relaxed Q·K match scores + Gumbel noise, with STE.
+
+    Compute: DENSE (computes full Q·K). This is the EXPERIMENTAL variant
+    for the H1 vs H2 test in Phase A.1 — NOT a production proposal.
+    Production substrate routing remains sparse-compute (SubstrateRoutedAttention).
+    """
+
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int,
+                 top_k: int = 4, use_rope: bool = False,
+                 tanh_scale: float = 5.0, gumbel_tau: float = 1.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.top_k = top_k
+        self.tanh_scale = tanh_scale
+        self.gumbel_tau = gumbel_tau
+        self.W_qkv = BitLinear(model_dim, 3 * num_heads * head_dim)
+        self.W_o = BitLinear(num_heads * head_dim, model_dim)
+        self.use_rope = use_rope
+        if use_rope:
+            self.register_buffer("rope_freqs", rotary_freqs(head_dim))
+
+    def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        qkv = self.W_qkv(x)
+        qkv = qkv.view(B, T, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.use_rope:
+            q = apply_rotary(q, self.rope_freqs)
+            k = apply_rotary(k, self.rope_freqs)
+
+        top_k = min(self.top_k, T)
+
+        # ── Hard forward selection via substrate signature distance ──
+        q_sig = torch.sign(q.detach())
+        k_sig = torch.sign(k.detach())
+        # (B, H, T_q, 1, d) vs (B, H, 1, T_k, d)
+        diff = (q_sig.unsqueeze(-2) != k_sig.unsqueeze(-3)).float().sum(dim=-1)
+        # Hard top-k by smallest distance
+        _, idx = (-diff).topk(top_k, dim=-1)  # (B, H, T_q, top_k)
+        hard_mask = torch.zeros_like(diff).scatter_(-1, idx, 1.0)  # (B, H, T_q, T_k)
+
+        # ── Soft backward signal via tanh-relaxed match + Gumbel STE ──
+        q_relaxed = torch.tanh(q * self.tanh_scale)
+        k_relaxed = torch.tanh(k * self.tanh_scale)
+        # Pairwise relaxed match (higher = better aligned signs)
+        # (B, H, T_q, d) @ (B, H, d, T_k) -> (B, H, T_q, T_k)
+        match_scores = q_relaxed @ k_relaxed.transpose(-1, -2)
+
+        if self.training:
+            u = torch.rand_like(match_scores).clamp_(min=1e-9, max=1.0 - 1e-9)
+            gumbel = -torch.log(-torch.log(u))
+            match_scores = match_scores + gumbel * self.gumbel_tau
+
+        # Causal mask the soft scores
+        match_scores = match_scores.masked_fill(causal_mask, float("-inf"))
+
+        soft_mask = F.softmax(match_scores / self.gumbel_tau, dim=-1)
+
+        # STE: forward = hard, backward = soft
+        mask = hard_mask + (soft_mask - hard_mask).detach()
+
+        # ── Attention with masked scores ──
+        scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        # Apply STE mask: scores + log(mask) suppresses masked positions
+        # (where mask ~0, log_mask -> -inf; mask=1, log_mask=0)
+        eps = 1e-9
+        log_mask = torch.log(mask.clamp(min=eps))
+        scores = scores + log_mask
+        # Causal mask on scores too (redundant but safe)
+        scores = scores.masked_fill(causal_mask, float("-inf"))
+
+        attn = F.softmax(scores, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)
+
+        out = attn @ v  # (B, H, T, d)
+        out = out.transpose(1, 2).reshape(B, T, self.num_heads * self.head_dim)
+        return self.W_o(out)
+
+
 class SubstrateRoutedAttention(nn.Module):
     """Top-k=4 attention selection via substrate signature distance."""
 
@@ -322,8 +412,10 @@ class TransformerBlock(nn.Module):
             self.attn = SubstrateRoutedAttention(model_dim, num_heads, head_dim, top_k=4, use_rope=use_rope)
         elif variant == "random":
             self.attn = RandomTopKAttention(model_dim, num_heads, head_dim, top_k=4, use_rope=use_rope)
+        elif variant == "substrate_gumbel":
+            self.attn = SubstrateGumbelAttention(model_dim, num_heads, head_dim, top_k=4, use_rope=use_rope)
         else:
-            raise ValueError(f"variant must be 'dense' / 'substrate' / 'random', got {variant}")
+            raise ValueError(f"variant must be 'dense'/'substrate'/'random'/'substrate_gumbel', got {variant}")
         self.norm2 = RMSNorm(model_dim)
         self.ffn = FFN(model_dim, ffn_dim)
 

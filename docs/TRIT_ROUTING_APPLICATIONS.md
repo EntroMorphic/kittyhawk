@@ -359,6 +359,18 @@ dramatically** vs fixed-N's 1.29× step ratio. Two hypotheses
 3-layer or Gumbel-softmax rerun. Result:
 `journal/td27_7_phase_a1_result_2026-05-11.md`.
 
+**Phase A.1 Gumbel test (same setup + Gumbel-softmax STE for substrate):
+H1 SUPPORTED with H2 nuance.** Pre-registered
+(`journal/td27_7_phase_a1_gumbel_prereg_2026-05-11.md`). Result:
+substrate-Gumbel achieves loss 1.4 (vs substrate-STE's 2.0; dense's 0.03),
+accuracy 2% (vs substrate-STE's 0.2%) — meaningful improvement but
+still 0/3 seeds reach 95% threshold. Per pre-reg outcome table: H1
+SUPPORTED (capacity is the bottleneck even with gradient surface fix).
+Per data nuance: **both H1 and H2 are partially supported** —
+Gumbel-substrate makes ~7× progress over STE-substrate but 2-layer
+capacity is still insufficient. Result:
+`journal/td27_7_phase_a1_gumbel_result_2026-05-11.md`.
+
 Journals:
 - `journal/td27_7_phase_a_result_2026-05-11.md` — original PASS writeup.
 - `journal/td27_7_phase_a_remediation_2026-05-11.md` — red-team

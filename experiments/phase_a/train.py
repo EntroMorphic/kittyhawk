@@ -120,7 +120,7 @@ def train(variant: str, seed: int, max_steps: int, log_path: str,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--variant", choices=["dense", "substrate", "random"], required=True)
+    ap.add_argument("--variant", choices=["dense", "substrate", "random", "substrate_gumbel"], required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-steps", type=int, default=10000)
     ap.add_argument("--log", required=True)
