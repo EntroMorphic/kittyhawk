@@ -1,0 +1,13 @@
+prompt_len	mode	k	gen	gen_loop_s	sec_per_token	actual_prompt_tokens
+64	dense	-	8	3.0544	0.3818	64
+64	routed_k16	16	8	2.9450	0.3681	64
+64	routed_k4	4	8	2.9640	0.3705	64
+256	dense	-	8	2.9970	0.3746	256
+256	routed_k16	16	8	2.9918	0.3740	256
+256	routed_k4	4	8	2.9961	0.3745	256
+512	dense	-	8	3.0895	0.3862	512
+512	routed_k16	16	8	3.7788	0.4724	512
+512	routed_k4	4	8	2.9841	0.3730	512
+1024	dense	-	8	3.1397	0.3925	1024
+1024	routed_k16	16	8	3.0322	0.3790	1024
+1024	routed_k4	4	8	3.0362	0.3795	1024

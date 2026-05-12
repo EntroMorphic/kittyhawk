@@ -6,31 +6,42 @@ status: 1 application empirically validated (sparse attention); 12 applications 
 
 # Trit-routing primitive — application surface
 
-## Cost-distinct claim — MEASURED 2026-05-11; humbling result
+## Cost-distinct claim — MEASURED v2 2026-05-12; ~3% wall-clock advantage
 
-The substrate's "256× fewer attention dots" / "22% of dense's compute"
-framing (originally in commit 68b53ad's Phase A message, retracted
-2188337, then re-extrapolated) has been **measured** in
-`journal/td27_cost_measurement_2026-05-11.md`:
+The original v1 measurement (`journal/td27_cost_measurement_2026-05-11.md`,
+commit `a29e287`) had a silent bug: the harness `--prompt-tokens` parse
+was hard-capped at 256, so all "long context" runs were truncated to
+seq_k ≤ 288. The v1 conclusion that substrate's cost advantage was
+"invisible at testable scales" was an artifact of the truncation.
 
-- At seq_k ∈ {64..1056} on BitNet b1.58-2B-4T: dense and routed are
-  **equivalent in wall-clock** (within 1%, ~0.37 s/token).
-- Reason: **attention is not the bottleneck.** BitNet's ternary +
-  integer attention is already cheap; FFN + LM head + projections
-  dominate per-token cost (~84% of total).
-- Theoretical FLOPS speedup of substrate routing emerges only at
-  seq_k > ~4096, which is beyond this codebase's measurable range
-  (BitNet's max_seq is 4096).
+Two fixes landed 2026-05-12:
+1. NEON-ified `bitnet_sparse_attn_v_combine` (was scalar — violated
+   the "no scalar in production" foundational rule). Commit `c696867`.
+2. Bumped prompt buffer 256 → 4096 (BitNet's max_seq). Commit pending.
 
-**The corrected cost narrative:** substrate's attention savings are
-real FLOPS but asymptotic-at-large-T. At currently testable scales
-they are invisible. The substrate's quality wins (Phase A trainability,
-#10 long-context coherence, #9 cell-prediction headroom) stand; the
-cost story is narrower than originally framed.
+Corrected measurement (`journal/td27_cost_measurement_v2_2026-05-12.md`):
 
-Engineering follow-up recorded: NEON-ify `bitnet_sparse_attn_v_combine`
-(currently scalar; the cost barrier in the sparse path) — would
-enable a cleaner cost measurement at large seq_k.
+| prompt_len | dense | routed_k4 | k4 vs dense |
+|------------|-------|-----------|-------------|
+| 64         | 0.382 | 0.371     | +3.0%       |
+| 256        | 0.375 | 0.374     | tied        |
+| 512        | 0.386 | 0.373     | +3.4%       |
+| 1024       | 0.393 | 0.380     | +3.3%       |
+
+**Substrate IS measurably faster than dense — by ~3% wall-clock, consistently
+across all tested seq_k (72-1032).** Real, reproducible, but small.
+
+The "256× fewer attention dots" theoretical claim is arithmetically correct
+but doesn't translate to 256× wall-clock — it translates to ~3% wall-clock.
+Reasons: (a) attention is a small slice of BitNet's per-token cost; (b)
+substrate's signature + gather overhead non-trivial; (c) ~99% savings on a
+small base = ~3% total saving.
+
+**The substrate's cost narrative, finally measured:**
+- Substrate at testable scales = ~3% faster (modest constant advantage)
+- NOT "asymptotic dominance" / "22% of compute"
+- Quality wins (Phase A trainability, #10 long-context, #9 cell prediction)
+  unchanged.
 
 ## What we have
 

@@ -1596,7 +1596,9 @@ int main(int argc, char** argv) {
     int token_id = 1;          /* default: BOS-like token */
     int n_layers = -1;         /* -1 = all loaded layers */
     int n_positions = 1;       /* number of positions to forward (work-unit 7 cache) */
-    int prompt_tokens[256] = {0};
+    /* Sized to BitNet's max_seq = 4096 so long-context measurements aren't
+     * silently truncated. Was 256; caught 2026-05-12 during cost re-test. */
+    int prompt_tokens[4096] = {0};
     int n_prompt_tokens = 0;   /* if >0, overrides --token + --positions */
     int n_generate = 0;        /* generation steps after the prompt (work-unit 8) */
     const char* weights_arg = NULL;
@@ -1634,7 +1636,7 @@ int main(int argc, char** argv) {
             /* Parse comma-separated token ids. */
             const char* p = argv[i+1];
             n_prompt_tokens = 0;
-            while (*p && n_prompt_tokens < 256) {
+            while (*p && n_prompt_tokens < (int)(sizeof(prompt_tokens)/sizeof(prompt_tokens[0]))) {
                 prompt_tokens[n_prompt_tokens++] = atoi(p);
                 while (*p && *p != ',') p++;
                 if (*p == ',') p++;
