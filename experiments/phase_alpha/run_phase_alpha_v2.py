@@ -1,6 +1,13 @@
 """Phase α remediated (v2): full red-team remediation per
 journal/td27_phase_alpha_redteam_2026-05-12.md.
 
+>>> The "M1 reversal" verdict from this script tested the WRONG metric
+    for the vision claim. See journal/td28_phase_alpha_methodology_pivot.
+    Categorical Hamming on ternary destroys the alphabet's path-graph
+    structure; Phase β implements the correct L1 metric.
+
+The b4_pca_sign() helper here is reused by Phase γ as B4.
+
 Changes from run_phase_alpha.py:
 
   [#1 M3 fix] Replace degenerate "longest_bar > 2× B3.p95" rule with

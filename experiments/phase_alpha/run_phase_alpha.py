@@ -4,9 +4,22 @@ close-prototype and far-prototype regimes, with bootstrap CIs.
 
 Per FROZEN spec in journal/td27_geometric_prereg_v2_2026-05-12.md.
 
+>>> SUPERSEDED for vision-claim tests by experiments/phase_beta/ <<<
+
+This run uses categorical Hamming as the substrate distance, which
+flattens the ternary alphabet's path-graph structure (the third state
+loses its geometric role as the natural center). Under that metric,
+the "VALIDATED 2/3" verdict here was downgraded to "MIXED 1/3" by
+red-team and remediation (see journal/td27_phase_alpha_*), and finally
+re-framed as testing-the-wrong-metric by the methodology pivot
+(journal/td28_phase_alpha_methodology_pivot_2026-05-12.md).
+
+The machinery (M2/M3 metrics, bootstrap, regime stratification) is
+reused unchanged by Phase β/γ. The verdict label is not citable for
+the substrate-distinctive vision claim.
+
 Outputs:
   results/phase_alpha_results.json — all numeric results
-  results/phase_alpha_summary.txt — human-readable summary
 """
 from __future__ import annotations
 

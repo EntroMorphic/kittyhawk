@@ -40,6 +40,13 @@ Project-wide invariants enforced: NEON-only production paths; no scalar fallback
 - **Strong-claim L1 cycle** (`journal/tristate_strong_*` + `audit/`). Compares base-3 packing vs B2-B (sign+mask) base-2 alternative. Multi-round red-team established: at fixed 2 bits/cell density, encoding labels are aliases (Path A ≡ Path C); at sub-2-bit density, base-3 wins (Path D 5-in-8 = 1.6 bits/cell, ~1.8× faster than 2-bit packings on Apple Silicon when both are register-tiled). B2-B is structurally floored at 2 bits/cell because sign+mask are independent.
 - **Kernel optimizations** (P0-1 pre-permute X, P0-2 split-LUT decode, P0-3 register-tile by 4 j-cells). Each P0 item went through red-team + remediation. Final cumulative: Path D's wall-clock penalty dropped from 1.16-1.95× to 0.55-0.58× of Path A across all tested regimes (L1-resident through DRAM-bound).
 
+**Substrate-distinctive geometric claim — robustness arc (2026-05-12):**
+- Phase α/β/γ tested the vision's strongest form ("base-3 carries information base-2 collapses") on BitNet K-cache. Six commits and three verdict reversals across categorical Hamming → L1 cell-graph metric → multi-normalization robustness matrix.
+- **Final robust findings:** the centrality of 0 in the path-graph metric is load-bearing across all six methodology variations (ROBUST 6/6); the close-regime substrate compression in within-(layer, kv_head, site) groups is large (47pp d̂/D_amb gap to PCA-binary at equal capacity).
+- **Methodology caveat:** the Macocco intrinsic-dim estimator fails calibration by ~45% on correlated synthetic. Absolute d̂ values for real K-cache are biased low (true ≈ 2× reported); relative comparisons remain valid.
+- **Net for the vision:** the strong claim is not robust to methodology variation; a qualified form (substrate captures close-range geometric similarity under the L1 cell-graph metric anchored at 0) is. Downstream applications should be validated by application-level benchmarks, not by pooled-d̂ comparisons.
+- Per `experiments/README.md` and `journal/td28_phase_gamma_robustness_2026-05-12.md`.
+
 Each kernel layer + science cycle was red-teamed adversarially after landing; remediation cycles caught silent invariant violations, strawman comparisons, tile asymmetry, and trajectory extrapolation errors. Full trail in `journal/`.
 
 The prior implementation is preserved on disk in `01MAY26_archived/` (gitignored) as reference. The substrate's complete narrative is in [`CHANGELOG.md`](CHANGELOG.md).

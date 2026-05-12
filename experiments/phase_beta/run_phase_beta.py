@@ -1,5 +1,13 @@
 """Phase β full run — substrate distance is L1 on trits (cell-graph metric).
 
+>>> The "VALIDATED 3/3" verdict from this script collapsed to MIXED 1/3
+    under d̂/D_ambient normalization (see journal/td28_phase_beta_redteam).
+    Phase γ replaces the single-verdict label with a robustness matrix
+    across {Macocco, corrdim} × {abs, /Dmax, /D_amb} = 6 methodologies.
+    See experiments/phase_gamma/ for the current reading.
+
+The SCRAMBLED_LUT and pairwise_scrambled_int8 here are reused by Phase γ.
+
 Pre-registered tests (FROZEN per td28_phase_beta_prereg_2026-05-12.md):
 
   P1: L1-substrate has lower d̂ / D_max than B0 (Hamming-substrate).

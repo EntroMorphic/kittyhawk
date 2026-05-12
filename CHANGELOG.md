@@ -4,6 +4,36 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Substrate-distinctive geometric claim — robustness matrix (2026-05-12)
+
+Per `experiments/README.md` and `journal/td28_phase_gamma_robustness_2026-05-12.md`
+(commit `773b668`). The arc through Phase α → β → γ tested the
+vision's strongest form ("base-3 carries information base-2 collapses")
+on real BitNet K-cache. Six commits, three verdict reversals, ending
+in a robustness matrix rather than a single label.
+
+**Findings after full red-team and remediation:**
+
+| Claim | Status |
+|---|---|
+| Centrality of 0 in path-graph (P3a, P3b across 6 methodologies) | **ROBUST** |
+| Close-regime substrate compression (within layer/kv_head/site) | **LARGE** (47pp gap to PCA-binary) |
+| L1 reveals structure Hamming hid (P1) | PARTIAL (4/6 methodologies) |
+| Substrate beats structured binary at equal capacity (P2) | PARTIAL (5/6) |
+
+**Critical methodology caveat:** the Macocco fixed-radii estimator
+fails calibration by ~45% on factor-model correlated synthetic.
+Real K-cache has correlations. Absolute d̂ values are biased low
+(true intrinsic dim ≈ 2× reported); RELATIVE comparisons remain
+valid because all representations are biased similarly.
+
+**Net for the project:** the strong vision claim is not robust to
+methodology variation; a qualified form (substrate captures close-
+range geometric similarity that binary loses, via the path-graph
+metric anchored at 0) is. Downstream applications (KV-eviction,
+soft routing, retrieval) should be validated by application-level
+benchmarks, not by another pooled-d̂ comparison.
+
 ### Found — PART-B EVIDENCE on N4 sparse attention (2026-05-10)
 Per `journal/cycle2_full_battery_findings.md` (commit `a40da63`).
 

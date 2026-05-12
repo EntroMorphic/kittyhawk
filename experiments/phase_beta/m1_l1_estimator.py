@@ -11,6 +11,16 @@ configurations with total cost ≤ t. Computed via dynamic programming.
 Macocco fixed-radii estimator (ARCH-A from Phase α) carries over
 unchanged given V_L1; only the shell-volume function differs from
 the categorical-Hamming case.
+
+>>> CALIBRATION CAVEAT (γ-G, journal/td28_phase_gamma_robustness):
+    Validated within 4% on synthetic with INDEPENDENT cells (uniform
+    or K-cache-marginal). FAILS by ~45% on factor-model synthetic
+    with non-trivial cell CORRELATIONS. Real K-cache has correlations.
+    Absolute d̂ values for K-cache are therefore biased LOW (true
+    intrinsic dim is roughly 2× reported). Relative comparisons
+    (P-rules) remain valid because all representations are biased
+    similarly. Don't cite absolute d̂ as a literal intrinsic
+    dimension on real data.
 """
 from __future__ import annotations
 

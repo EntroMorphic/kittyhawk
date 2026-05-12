@@ -1,4 +1,23 @@
-"""M1: Local intrinsic dimensionality under ternary categorical Hamming.
+"""M1 v1 — DEMONSTRABLY BROKEN. Kept as reference.
+
+This is the v1 implementation that FAILED calibration with ~38%
+systematic underestimation for d ≥ 20. The pre-registered stop-
+criterion (FROZEN per `journal/td27_geometric_prereg_v2_2026-05-12.md`)
+fired on first attempt; implementation halted. See
+`journal/td27_phase_alpha_calibration_fail_2026-05-12.md` for the
+diagnosis.
+
+Bug: the pairwise likelihood P(r1, r2 | d) ∝ V(r1) · V(r2) treats r1
+and r2 as independent draws. They aren't: r1 is the minimum over N-1
+candidate distances (extreme-value statistics), and r2 ≥ r1 by
+construction. The correct likelihood needs the survival factor
+S(R)^(M-2) and tie handling. Fixed in m1_estimator_v2.py (ARCH-B).
+Macocco's actual paper uses a different estimator architecture entirely
+(fixed-radii Binomial counts, ARCH-A in v2).
+
+USE m1_estimator_v2.py FOR CATEGORICAL-HAMMING WORK.
+USE phase_beta/m1_l1_estimator.py FOR L1 CELL-GRAPH WORK
+(the metric that respects the ternary alphabet's path-graph structure).
 
 Derivation (FROZEN in journal/td27_geometric_prereg_v2_2026-05-12.md):
 
