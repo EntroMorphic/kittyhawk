@@ -1606,6 +1606,35 @@ static int bitnet_argmax_full_vocab(
     return best_v;
 }
 
+/* Top-2 over full vocab. Used by per-step telemetry to expose argmax
+ * margin (top1_acc - top2_acc) so downstream analysis can tell whether
+ * eviction perturbations are within the safety margin of the argmax
+ * decision (Phase ζ atomic investigation). Returns 0 on success, -1
+ * if lm_head is NULL. */
+static int bitnet_top2_full_vocab(
+    const m4t_mtfp_t* x,
+    const m4t_mtfp_t* lm_head,
+    int* top1_tok, int64_t* top1_acc,
+    int* top2_tok, int64_t* top2_acc)
+{
+    if (lm_head == NULL) return -1;
+    int64_t a1 = INT64_MIN, a2 = INT64_MIN;
+    int v1 = 0, v2 = 0;
+    for (int v = 0; v < BITNET_VOCAB_SIZE; v++) {
+        const m4t_mtfp_t* row = lm_head + (size_t)v * BITNET_HIDDEN_SIZE;
+        int64_t acc = m4t_mtfp_vec_dot_i64(x, row, BITNET_HIDDEN_SIZE);
+        if (acc > a1) {
+            a2 = a1; v2 = v1;
+            a1 = acc; v1 = v;
+        } else if (acc > a2) {
+            a2 = acc; v2 = v;
+        }
+    }
+    *top1_tok = v1; *top1_acc = a1;
+    *top2_tok = v2; *top2_acc = a2;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     /* Cycle 2: read sparse-attention mode from env. No-op when env unset. */
     bitnet_attn_mode_init_from_env();
@@ -1819,7 +1848,26 @@ int main(int argc, char** argv) {
         } else {
             memcpy(x_finalnorm, x, sizeof(x_finalnorm));
         }
-        int next_tok = bitnet_argmax_full_vocab(x_finalnorm, weights.lm_head);
+        int next_tok;
+        {
+            int t1 = -1, t2 = -1;
+            int64_t a1 = 0, a2 = 0;
+            if (weights.lm_head != NULL &&
+                bitnet_top2_full_vocab(x_finalnorm, weights.lm_head,
+                                       &t1, &a1, &t2, &a2) == 0) {
+                next_tok = t1;
+                const char* persp = getenv("BITNET_LOG_PERSTEP");
+                if (persp && *persp && *persp != '0') {
+                    fprintf(stderr,
+                        "[perstep] pos=%d gen=%d top1=%d top1_acc=%lld "
+                        "top2=%d top2_acc=%lld margin=%lld\n",
+                        pos, g, t1, (long long)a1, t2, (long long)a2,
+                        (long long)(a1 - a2));
+                }
+            } else {
+                next_tok = bitnet_argmax_full_vocab(x_finalnorm, weights.lm_head);
+            }
+        }
         if (next_tok < 0) {
             /* Skeleton mode (no LM head): pick a fixed dummy token. */
             next_tok = (token_id + g + 1) % BITNET_VOCAB_SIZE;

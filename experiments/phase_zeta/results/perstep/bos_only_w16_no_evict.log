@@ -1,0 +1,33 @@
+[bitnet_weights] loaded 30 layers (lm_head tied to embedding)
+[bitnet_weights] re-packed ternary weights to 4-in-8 (496 MB) for bit-faithful BitLinear path
+[harness] loaded weights from data/bitnet_b158_2b4t.bin
+[perstep] pos=1 gen=0 top1=323 top1_acc=1608074008749 top2=374 top2_acc=1508102912425 margin=99971096324
+[perstep] pos=2 gen=1 top1=330 top1_acc=2173391621391 top2=279 top2_acc=1973933355233 margin=199458266158
+[perstep] pos=3 gen=2 top1=791 top1_acc=1733724840537 top2=1820 top2_acc=1682837050559 margin=50887789978
+[perstep] pos=4 gen=3 top1=8681 top1_acc=2118271985087 top2=10425 top2_acc=2072858108027 margin=45413877060
+[perstep] pos=5 gen=4 top1=480 top1_acc=1615810457181 top2=46904 top2_acc=1265086359709 margin=350724097472
+[perstep] pos=6 gen=5 top1=36614 top1_acc=1750813245101 top2=1964 top2_acc=857530026106 margin=893283218995
+[perstep] pos=7 gen=6 top1=1 top1_acc=1952993512797 top2=1359 top2_acc=1867349819887 margin=85643692910
+[perstep] pos=8 gen=7 top1=555 top1_acc=2589270925470 top2=527 top2_acc=2493959631178 margin=95311294292
+[perstep] pos=9 gen=8 top1=435 top1_acc=2708092019139 top2=330 top2_acc=2342668712826 margin=365423306313
+[perstep] pos=10 gen=9 top1=13 top1_acc=1505711522390 top2=10016 top2_acc=1020130671958 margin=485580850432
+[perstep] pos=11 gen=10 top1=356 top1_acc=1571302865159 top2=435 top2_acc=1414976625294 margin=156326239865
+[perstep] pos=12 gen=11 top1=13 top1_acc=1327280217678 top2=382 top2_acc=983636171742 margin=343644045936
+[perstep] pos=13 gen=12 top1=62314 top1_acc=1348395920519 top2=10016 top2_acc=1316747733117 margin=31648187402
+[perstep] pos=14 gen=13 top1=13 top1_acc=2231219191825 top2=11 top2_acc=2123954462526 margin=107264729299
+[perstep] pos=15 gen=14 top1=578 top1_acc=2421624837894 top2=4314 top2_acc=2349134943728 margin=72489894166
+[perstep] pos=16 gen=15 top1=1403 top1_acc=3131610214788 top2=1176 top2_acc=3038205274065 margin=93404940723
+[perstep] pos=17 gen=16 top1=32963 top1_acc=3183093704191 top2=6603 top2_acc=3166117105730 margin=16976598461
+[perstep] pos=18 gen=17 top1=527 top1_acc=3261004055975 top2=617 top2_acc=3118604075218 margin=142399980757
+[perstep] pos=19 gen=18 top1=4528 top1_acc=3111617572427 top2=3629 top2_acc=3067690686059 margin=43926886368
+[perstep] pos=20 gen=19 top1=304 top1_acc=2619834962842 top2=11 top2_acc=2282630007860 margin=337204954982
+[perstep] pos=21 gen=20 top1=430 top1_acc=2597618864345 top2=1690 top2_acc=2569230211171 margin=28388653174
+[perstep] pos=22 gen=21 top1=814 top1_acc=2605024471767 top2=2225 top2_acc=2328231673122 margin=276792798645
+[perstep] pos=23 gen=22 top1=2225 top1_acc=3407955851105 top2=527 top2_acc=3221302619509 margin=186653231596
+[perstep] pos=24 gen=23 top1=617 top1_acc=3338924320517 top2=3568 top2_acc=3307548982060 margin=31375338457
+[harness] gen_loop_seconds = 8.6446  n_generate = 24  seconds_per_token = 0.3602  prompt_tokens = 1  attn_seconds = 0.0071  attn_seconds_per_token = 0.0003  attn_fraction = 0.001
+     argmax over full vocab        = 264
+[ok] 30 layer(s) forward pass completed (token_id=1, positions=1, generated=24).
+     post-final-norm x[0..3]      = -334 26 -42 -186
+     logits[0..3]                  = 1386 1512 1035 1016
+     generated tokens             = 323 330 791 8681 480 36614 1 555 435 13 356 13 62314 13 578 1403 32963 527 4528 304 430 814 2225 617
