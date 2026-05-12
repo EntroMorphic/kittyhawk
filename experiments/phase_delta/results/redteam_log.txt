@@ -1,0 +1,49 @@
+======================================================================
+RT-A: prompt-clustered bootstrap (vs flat trial bootstrap)
+
+  prompts: ['multitoken', 'p1', 'p4', 'p5']  (4 clusters)
+
+  k_frac=0.25:
+    flat bootstrap:     mean=+0.0140  CI=[+0.0076, +0.0204]
+    prompt-cluster boot: CI=[+0.0033, +0.0213]
+    leave-one-prompt:    range=[+0.0067, +0.0185]  (n_loo=4)
+    → RT-A passes at k_frac=0.25: clustered CI fully above 0.
+
+  k_frac=0.5:
+    flat bootstrap:     mean=+0.0322  CI=[+0.0260, +0.0383]
+    prompt-cluster boot: CI=[+0.0142, +0.0524]
+    leave-one-prompt:    range=[+0.0221, +0.0371]  (n_loo=4)
+    → RT-A passes at k_frac=0.5: clustered CI fully above 0.
+
+  k_frac=0.75:
+    flat bootstrap:     mean=+0.0310  CI=[+0.0268, +0.0354]
+    prompt-cluster boot: CI=[+0.0205, +0.0371]
+    leave-one-prompt:    range=[+0.0293, +0.0340]  (n_loo=4)
+    → RT-A passes at k_frac=0.75: clustered CI fully above 0.
+
+======================================================================
+RT-C: estimator offset on uniform random ternary (no structure)
+
+      N  d_amb    sub_L1_d̂   B0_Ham_d̂  B4_PCA_d̂
+    200    128       129.38       99.76     146.03
+    500    128       128.58       98.65     142.49
+   1000    128       127.82       98.60     141.57
+
+  Interpretation:
+  - On uniform random ternary (no structure), the TRUE intrinsic dim is
+    128 (all cells independent). Each estimator should report ≈128.
+  - If sub_L1 < B0_Ham and sub_L1 < B4 even here, the gap is ESTIMATOR offset,
+    not a substrate-distinctive structural property.
+
+  → N=200: substrate < B4 by 16.7 on UNIFORM data — this is estimator offset, not data structure.
+  → N=500: substrate < B4 by 13.9 on UNIFORM data — this is estimator offset, not data structure.
+  → N=1000: substrate < B4 by 13.7 on UNIFORM data — this is estimator offset, not data structure.
+======================================================================
+RT-E: L1 vs Hamming kernel cost (Python/NumPy reference impl)
+
+      N    D     Ham_ms      L1_ms   L1/Ham
+    200  128       0.22       1.79    7.95x
+   1000  128       2.34      67.75   28.96x
+   4096  128      63.93    1169.00   18.28x
+
+Results: experiments/phase_delta/results/redteam.json
