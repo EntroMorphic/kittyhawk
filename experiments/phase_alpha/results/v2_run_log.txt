@@ -1,0 +1,74 @@
+=== Phase α REMEDIATED ===
+
+Loading K-signatures from ['data/c_dump', 'data/c_dump_v2'] …
+  N = 12300, D = 128
+  prompts: ['dump', 'multitoken', 'p1', 'p2', 'p3', 'p4', 'p5']
+
+[#7] Calibration on structured synthetic (p_nonzero=0.62)
+  d_true    d_hat      err   t1   t2
+      10     9.91    0.89%    4    5  PASS
+      20    19.95    0.24%   10   11  PASS
+      50    49.74    0.52%   28   30  PASS
+     100    99.19    0.81%   58   61  PASS
+  → Structured calibration: PASS
+
+Building signatures (all baselines, full corpus) …
+  signatures: 0.1s
+  sampled N_eff=1500 for full-corpus measures
+  distances: 0.0s
+
+[POOLED N_eff=1500] M1+M2+M3 per representation:
+  substrate    d̂= 103.24  d̂/D=0.807  recip[k=10]=0.606  Gini[k=10]=0.182  longest_bar=1.00  (0.3s)
+  B1_raw       d̂=   4.49  d̂/D=0.035  recip[k=10]=0.469  Gini[k=10]=0.298  longest_bar=113594.57  (0.6s)
+  B2_sign      d̂= 134.63  d̂/D=0.663  recip[k=10]=0.788  Gini[k=10]=0.097  longest_bar=2.00  (0.3s)
+  B3_sign      d̂= 134.56  d̂/D=0.663  recip[k=10]=0.790  Gini[k=10]=0.097  longest_bar=3.00  (0.3s)
+  B4_pca       d̂= 140.73  d̂/D=0.693  recip[k=10]=0.812  Gini[k=10]=0.092  longest_bar=4.00  (0.3s)
+
+[#1] M3 NEW (Wasserstein between bar distributions):
+  W(substrate, B2) = 0.007
+  W(B3, B2) null   = 0.003
+  W(B4, B2)        = 0.003
+  substrate distinctive (W_sub_B2 > 2× W_B3_B2_null): True
+
+[#3] τ sensitivity sweep:
+       τ  nz_frac   d̂_sub    d̂_B2  abs_gap  norm_pp
+    2000    0.817   110.40   134.63  +18.0%  -0.199
+    5000    0.612   103.24   134.63  +23.3%  -0.143
+   10000    0.362    60.39   134.63  +55.1%  +0.191
+   20000    0.093    11.01   134.63  +91.8%  +0.577
+
+[#6] (t1, t2) quantile sensitivity:
+           qpair     subs       B2       B3       B4
+      q0.03-0.07    92.39   130.41   130.31   137.53
+      q0.05-0.15   103.24   134.63   134.56   140.73
+      q0.10-0.30   114.84   139.23   139.13   143.74
+
+[#5] Bootstrap (B=200, N_sub=500) on M1, M2, M3:
+    bootstrap iter 25/200 done
+    bootstrap iter 50/200 done
+    bootstrap iter 75/200 done
+    bootstrap iter 100/200 done
+    bootstrap iter 125/200 done
+    bootstrap iter 150/200 done
+    bootstrap iter 175/200 done
+    bootstrap iter 200/200 done
+  bootstrap elapsed: 47.0s
+  substrate    d̂= 104.73 [100.18,108.81]  d̂/D=0.818 [0.783,0.850]  recip=0.486
+  B2_sign      d̂= 134.56 [134.22,134.88]  d̂/D=0.663 [0.661,0.664]  recip=0.775
+  B3_sign      d̂= 134.56 [134.24,134.91]  d̂/D=0.663 [0.661,0.665]  recip=0.768
+  B4_pca       d̂= 141.43 [141.13,141.80]  d̂/D=0.697 [0.695,0.699]  recip=0.804
+
+[#2] Revised M1 verdict:
+  vs B2 (random):     abs_gap=+22.2%  norm_pp=-0.155  abs_pass=True  norm_pass=False
+  vs B4 (structured): abs_gap=+26.0%  norm_pp=-0.121  abs_pass=True  norm_pass=False
+  M1 OVERALL PASS (all four required): False
+
+[M2 verdict (FROZEN rule)]:
+  pass_per_k: [False, False, False, False]
+  M2 PASS: False
+
+[M3 verdict (NEW Wasserstein rule)]: True
+
+>>> SUBSTRATE GEOMETRIC CLAIM (remediated): MIXED (1/3 measures clear) <<<
+
+Results written to experiments/phase_alpha/results/phase_alpha_v2_results.json

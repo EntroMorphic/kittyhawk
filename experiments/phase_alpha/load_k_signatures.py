@@ -88,10 +88,12 @@ def read_actv2(path: str) -> dict:
 def parse_filename(fname: str) -> Tuple[str, int, int]:
     """Extract (prompt_id, position, layer) from a dump filename.
 
-    Conventions in data/c_dump/:
+    Conventions:
       dump.layer<L>.bin                 → prompt_id="dump", position=0
       multitoken.layer<L>.bin           → prompt_id="multitoken", position=0
       multitoken.pos<P>.layer<L>.bin    → prompt_id="multitoken", position=P
+      <prompt>.pos<P>.layer<L>.bin      → prompt_id=<prompt>, position=P
+        (used by remediation corpus c_dump_v2/: p1..p5)
     """
     base = os.path.basename(fname)
     m = re.match(r"^(.+?)\.layer(\d+)\.bin$", base)
@@ -101,17 +103,23 @@ def parse_filename(fname: str) -> Tuple[str, int, int]:
     layer = int(m.group(2))
     if prefix == "dump":
         return "dump", 0, layer
-    pos_m = re.match(r"^multitoken\.pos(\d+)$", prefix)
+    pos_m = re.match(r"^(.+)\.pos(\d+)$", prefix)
     if pos_m:
-        return "multitoken", int(pos_m.group(1)), layer
-    if prefix == "multitoken":
-        return "multitoken", 0, layer
+        return pos_m.group(1), int(pos_m.group(2)), layer
     return prefix, 0, layer
 
 
-def iter_k_signatures(dump_dir: str) -> Iterator[KSig]:
-    """Yield every K vector across all layers, prompts, positions, heads, sites."""
-    paths = sorted(glob.glob(os.path.join(dump_dir, "*.layer*.bin")))
+def iter_k_signatures(dump_dirs) -> Iterator[KSig]:
+    """Yield every K vector across all layers, prompts, positions, heads, sites.
+
+    dump_dirs: str or list of str — directories to scan.
+    """
+    if isinstance(dump_dirs, str):
+        dump_dirs = [dump_dirs]
+    paths = []
+    for d in dump_dirs:
+        paths.extend(glob.glob(os.path.join(d, "*.layer*.bin")))
+    paths = sorted(paths)
     for path in paths:
         prompt_id, position, layer = parse_filename(path)
         data = read_actv2(path)
@@ -131,8 +139,11 @@ def iter_k_signatures(dump_dir: str) -> Iterator[KSig]:
                 )
 
 
-def collect_all(dump_dir: str):
-    """Return arrays: K_raw (N, HEAD_DIM) int32, plus metadata columns."""
+def collect_all(dump_dir):
+    """Return arrays: K_raw (N, HEAD_DIM) int32, plus metadata columns.
+
+    dump_dir: str or list of str.
+    """
     sigs = list(iter_k_signatures(dump_dir))
     N = len(sigs)
     K = np.zeros((N, HEAD_DIM), dtype=np.int32)
