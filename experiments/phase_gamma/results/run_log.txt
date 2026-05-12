@@ -1,0 +1,83 @@
+=== Phase γ — full red-team remediation ===
+
+[γ-G] Calibration on correlated-synthetic ternary:
+  d_true  macocco  rel_err  corrdim  verdict
+      10     5.78   42.15%     2.42  FAIL
+      20    11.23   43.84%     3.04  FAIL
+      50    27.67   44.67%     3.40  FAIL
+     100    54.39   45.61%     3.56  FAIL
+
+Loading K-cache corpus from ['data/c_dump', 'data/c_dump_v2'] ...
+  N = 12300
+
+[POOLED, real K, bootstrap]:
+    iter 25/100
+    iter 50/100
+    iter 75/100
+    iter 100/100
+  bootstrap real: 21.9s
+
+[POOLED, SHUFFLED K — γ-F null control]:
+    iter 25/100
+    iter 50/100
+    iter 75/100
+    iter 100/100
+  bootstrap shuffled: 22.5s
+
+[γ-A] Robustness grid (real K):
+  P1:
+    [              macocco_abs_mean]  a=  98.293  b= 104.762  gap=+6.468  disjoint=False  → fail
+    [         macocco_abs_over_Dmax]  a=   0.384  b=   0.818  gap=+0.434  disjoint=True  → PASS
+    [         macocco_abs_over_Damb]  a=   0.768  b=   0.818  gap=+0.051  disjoint=False  → fail
+    [              corrdim_abs_mean]  a=   8.110  b=  12.110  gap=+4.000  disjoint=True  → PASS
+    [         corrdim_abs_over_Dmax]  a=   0.032  b=   0.095  gap=+0.063  disjoint=True  → PASS
+    [         corrdim_abs_over_Damb]  a=   0.063  b=   0.095  gap=+0.031  disjoint=True  → PASS
+  P2:
+    [              macocco_abs_mean]  a=  98.293  b= 141.425  gap=+43.132  disjoint=True  → PASS
+    [         macocco_abs_over_Dmax]  a=   0.384  b=   0.697  gap=+0.313  disjoint=True  → PASS
+    [         macocco_abs_over_Damb]  a=   0.768  b=   0.697  gap=-0.071  disjoint=False  → fail
+    [              corrdim_abs_mean]  a=   8.110  b=  16.626  gap=+8.516  disjoint=True  → PASS
+    [         corrdim_abs_over_Dmax]  a=   0.032  b=   0.082  gap=+0.050  disjoint=True  → PASS
+    [         corrdim_abs_over_Damb]  a=   0.063  b=   0.082  gap=+0.019  disjoint=True  → PASS
+  P3a:
+    [              macocco_abs_mean]  a=  98.293  b= 106.401  gap=+8.108  disjoint=True  → PASS
+    [         macocco_abs_over_Dmax]  a=   0.384  b=   0.416  gap=+0.032  disjoint=True  → PASS
+    [         macocco_abs_over_Damb]  a=   0.768  b=   0.831  gap=+0.063  disjoint=True  → PASS
+    [              corrdim_abs_mean]  a=   8.110  b=  11.516  gap=+3.406  disjoint=True  → PASS
+    [         corrdim_abs_over_Dmax]  a=   0.032  b=   0.045  gap=+0.013  disjoint=True  → PASS
+    [         corrdim_abs_over_Damb]  a=   0.063  b=   0.090  gap=+0.027  disjoint=True  → PASS
+  P3b:
+    [              macocco_abs_mean]  a=  98.293  b= 107.470  gap=+9.176  disjoint=True  → PASS
+    [         macocco_abs_over_Dmax]  a=   0.384  b=   0.420  gap=+0.036  disjoint=True  → PASS
+    [         macocco_abs_over_Damb]  a=   0.768  b=   0.840  gap=+0.072  disjoint=True  → PASS
+    [              corrdim_abs_mean]  a=   8.110  b=  11.810  gap=+3.700  disjoint=True  → PASS
+    [         corrdim_abs_over_Dmax]  a=   0.032  b=   0.046  gap=+0.014  disjoint=True  → PASS
+    [         corrdim_abs_over_Damb]  a=   0.063  b=   0.092  gap=+0.029  disjoint=True  → PASS
+
+[γ-A] Robustness grid (shuffled K — null check):
+  P1 macocco_over_Damb: gap=+0.090  pass=True
+  P2 macocco_over_Damb: gap=-0.127  pass=False
+  P3a macocco_over_Damb: gap=+0.097  pass=True
+  P3b macocco_over_Damb: gap=+0.101  pass=True
+
+[γ-E] τ sweep on substrate L1:
+       τ     nz      mac  corrdim   mac/Damb
+    2000  0.817   118.99    14.23      0.930
+    5000  0.612    97.75     7.92      0.764
+   10000  0.362    75.36     3.97      0.589
+   20000  0.093    49.73     2.18      0.389
+
+[γ-D] Close-regime (within layer/kv/site) under L1:
+  substrate_L1       d̂=  33.15  d̂/D_amb=0.259  t1=29 t2=50 n_pairs=246000
+  B2_sign            d̂=  70.56  d̂/D_amb=0.348  t1=33 t2=46 n_pairs=246000
+  B4_pca             d̂= 146.89  d̂/D_amb=0.724  t1=70 t2=89 n_pairs=246000
+  B5_scrambled       d̂=  50.33  d̂/D_amb=0.393  t1=38 t2=63 n_pairs=246000
+  B5m_mirror         d̂=  52.23  d̂/D_amb=0.408  t1=38 t2=64 n_pairs=246000
+
+[FINAL SYNTHESIS]
+  P1: passes 4/6 → PARTIAL
+  P2: passes 5/6 → PARTIAL
+  P3a: passes 6/6 → ROBUST
+  P3b: passes 6/6 → ROBUST
+
+Results: experiments/phase_gamma/results/phase_gamma_results.json
