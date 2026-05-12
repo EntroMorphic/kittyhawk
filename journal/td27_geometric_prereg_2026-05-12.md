@@ -254,3 +254,180 @@ collapses").
 Whether the substrate earns the vision claim depends on
 implementation results that don't exist yet. This document just
 makes the test feasible.
+
+---
+
+## AMENDMENT 2026-05-12 — adversarial red-team caught critical issues
+
+Same-day adversarial agent ran on this pre-research before any
+implementation. Multiple critical issues that must be addressed
+before this becomes a frozen pre-registration:
+
+### CRITICAL — Macocco estimator doesn't directly apply to substrate's metric
+
+This document cited Macocco/Glielmo/Laio 2023 PRL (arXiv:2207.09688)
+as the "load-bearing methodological grounding" for M1, claiming it
+provides an intrinsic-dimensionality estimator for the substrate's
+Hamming metric.
+
+Red-team verification: the Macocco paper is real (verified PRL 130,
+067401), but its estimator is for **L¹ on integer lattices and binary
+Hamming**. Worked examples use `Z^d` with L¹ or `{0,1}^d` with binary
+Hamming. The substrate uses **categorical Hamming on a ternary alphabet**
+(`m4t_route_pairwise_hamming_sum`: each cell contributes 0 or 1 based
+on equality, irrespective of magnitude — NOT L¹ on {-1,0,+1}^d).
+
+Shell volumes for substrate's categorical-ternary Hamming scale as
+`binomial(D, r) × 2^r` (choose r mismatching positions, each can be
+one of two non-equal values from {-1, 0, +1}). This is NOT a special
+case of Macocco's Ehrhart-polynomial-derived counts. The estimator
+must be re-derived from scratch for the substrate's metric.
+
+**Implication:** The "claimable novelty" framing ("first to estimate
+intrinsic dimension under ternary Hamming") is real, but the project
+must derive its own shell-volume formula AND validate the new
+estimator on synthetic data of known intrinsic dimension before
+applying it to LLM K-cache signatures. That's new methodology, not
+"straightforward extension."
+
+### CRITICAL — B2 baseline is information-asymmetric
+
+The pre-reg specified D=128 trits vs D=128 sign bits. But:
+- Substrate's 128 trits: log₂(3) × 128 ≈ 202 bits of capacity
+- B2's 128 bits: 128 bits of capacity
+
+Substrate has **58% more capacity** at fixed D. Any "lower intrinsic
+dimensionality under substrate" finding could be the trit machinery
+OR could be 58% more bits to spread structure over.
+
+**Fix before freezing:** require equal-bits comparison. D=128 trits
+vs D=202 bits, or D=80 trits vs D=128 bits. Pre-register which.
+
+### CRITICAL — Citation hallucinations
+
+Two citations in this pre-reg had author errors propagated from
+agent 2:
+
+1. "Macocco, Glielmo, Laio (2023)" → actual: **Macocco, Glielmo,
+   Grilli, Laio** (four authors; Grilli dropped from my citation).
+2. "Mattia et al. 2025" (arxiv:2506.01034) → actual: **Ruppik et al.
+   2025** ("Less is More: Local Intrinsic Dimensions of Contextual
+   Language Models", NeurIPS 2025). First author is Benjamin Matthias
+   Ruppik; "Mattia" appears to have come from confusing the second
+   author's middle name "Matthias" with a last name.
+
+**Discipline failure:** my summary called the citations "verified by
+subagent" but the agent confabulated author attributions and I
+propagated them unchecked. Same overclaim pattern caught earlier in
+the session.
+
+### MAJOR — Loki precedent unacknowledged
+
+**Loki** (Singhania et al., NeurIPS 2024, arXiv:2406.02542) measured
+the linear intrinsic dimensionality of attention K-caches via PCA at
+~80-rank on Llama-2 and Mistral with 90% variance captured. This is
+a strong null hypothesis for M1: K-cache geometry is already known
+to be low-rank in Euclidean. The substrate-specific claim has to
+clear "more than Loki found, under a different metric."
+
+The pre-reg cited Loki nowhere despite a direct claim about K-cache
+geometry being a substrate-distinctive measurement.
+
+### MAJOR — DASH-KV precedent unacknowledged
+
+**DASH-KV** (2026) uses Hamming distance on K-cache binary hash codes
+for KV-cache decisions. The pre-reg's claim that "neither uses
+Hamming/trit metrics" is stale. The genuine novelty would be
+"ternary" rather than "Hamming."
+
+### MAJOR — TwoNN finite-sample bias
+
+Levina-Bickel / TwoNN at d~5-80 and N~10K is known to have **5-20%
+positive bias** under noise and curvature (Denti et al. 2022,
+"generalized ratios"). Bootstrap CI catches sampling variance but
+NOT estimator bias.
+
+If substrate's true d=60 and B2's true d=65, the 5-point gap is
+within typical TwoNN bias. **The pre-reg's success rule "CI excluding
+zero" needs to budget for this.** Required mitigation: run estimator
+on synthetic ground-truth-d data of comparable shape AND report
+estimator bias as a calibration anchor before claiming substrate-vs-B2
+differences.
+
+### MAJOR — "Close-prototype regime" doesn't transfer to trained K-cache
+
+P0-3's close-prototype regime was synthesized prototypes 1-9 trits
+apart. K-cache signatures are TRAINED LLM activations; there's no
+a priori "close" vs "far" definition. Candidate operationalizations
+(within-head adjacent-token vs cross-head; same-syntactic-role
+tokens) all yield different splits and different verdicts.
+
+**As written, the regime split is an undefined degree of freedom that
+allows the verdict to be tuned post-hoc** — the exact discipline
+failure this document claimed to guard against.
+
+**Fix before freezing:** either define "close-prototype regime" for
+K-cache signatures unambiguously, or drop the regime split and
+accept a flat comparison.
+
+### MAJOR — N=10K sample arithmetic was optimistic
+
+Subagent's claim of N=10K K-signatures available from existing dumps
+assumed pooling. Honest accounting: 242 dump files × 30 layers × 2
+prompts × ~64 tokens × 2 K-sites = ~7,680 K-signatures per K-site
+type. Achievable IF we explicitly pool across layers/prompts/sites,
+but the pre-reg didn't specify how. Bootstrap CI claim depends on
+honest N.
+
+### MAJOR — Sample-time estimate optimistic by ~5×
+
+Original "1-2 day work-unit" assumed all methodology was settled.
+With the fixes (equal-bits B2, regime definition, calibration on
+synthetic-known-d data, ternary-Hamming derivation, citation cleanup),
+honest estimate is **1-2 weeks**.
+
+### MINOR — M3 "longest/second-longest bar > 2.0" magic number
+
+Where does 2.0 come from? Persistence-bar ratios under H₀ for random
+discrete Hamming graphs are not well-tabulated. Without a null
+distribution from B3 (random Gaussian → sign), 2.0 is arbitrary.
+
+### Required actions before Phase α implementation
+
+1. Resolve the metric question: either reformulate substrate as
+   integer lattice + L¹ (use Macocco directly) OR derive ternary-
+   categorical-Hamming shell-volume formula and document as new work.
+2. Equal-bits B2.
+3. Operationalize or drop "close-prototype regime."
+4. Add calibration baseline with synthetic known-d data.
+5. Audit actual K-signature availability; honest N.
+6. Add Loki and DASH-KV to prior art.
+7. Citation cleanup (Grilli, Ruppik, etc.).
+8. Reset implementation cost estimate to 1-2 weeks.
+
+### What this red-team teaches the project
+
+This is the 8th caught overclaim of this session. The pattern:
+1. I propose / commit a claim
+2. User prompts adversarial check
+3. Adversarial agent catches real issues
+4. Journal amended
+
+The structural fix discussed but not codified: require adversarial
+counter-test BEFORE any PASS commit (or in this case, pre-research
+commit). Without that, my pattern is to ship and get caught.
+
+The agents earned their compute. This pre-research is salvageable
+but **needs the methodology fixes above before it can become a
+frozen pre-registration.**
+
+### Verdict on Phase α implementation timing
+
+The implementation should NOT proceed on the basis of this document
+as currently written. Path forward:
+- Either (a) revise this document with the methodology fixes above
+  → land as a v2 with frozen pre-reg semantics → implement.
+- Or (b) defer Phase α and prioritize other substrate work until the
+  methodology questions are settled.
+
+Both are honest options. Neither is "implement Phase α this week."
