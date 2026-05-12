@@ -1,0 +1,70 @@
+Loading K-signatures …
+  N = 2400, D = 128
+  close groups: 300 (each N≈8 — too small alone)
+  far pool: 2400
+
+[POOLED — all K signatures]
+  [pooled] N = 2400
+    substrate    d̂= 78.59  recip[k=10]=0.646  longest_bar=1.00  (0.8s)
+    B1_raw       d̂=  1.36  recip[k=10]=0.657  longest_bar=90583.23  (1.4s)
+    B2_sign      d̂=134.13  recip[k=10]=0.802  longest_bar=1.00  (0.7s)
+    B3_sign      d̂=134.23  recip[k=10]=0.807  longest_bar=5.00  (0.8s)
+
+[FAR regime: random 500 from full pool]
+  [far_n500] N = 500
+    substrate    d̂= 75.48  recip[k=10]=0.346  longest_bar=2.00  (12.2s)
+    B1_raw       d̂=  1.42  recip[k=10]=0.236  longest_bar=80056.72  (0.1s)
+    B2_sign      d̂=134.21  recip[k=10]=0.759  longest_bar=2.00  (11.0s)
+    B3_sign      d̂=134.32  recip[k=10]=0.765  longest_bar=3.00  (11.1s)
+
+[CLOSE regime: within-group only (same layer/kv/site)]
+  300 groups, each N≈8
+    substrate    d̂_A= 18.39  (t1=11, t2=34, n_pairs=8400)
+    B2_sign      d̂_A= 26.26  (t1=16, t2=37, n_pairs=8400)
+    B3_sign      d̂_A= 26.27  (t1=16, t2=37, n_pairs=8400)
+
+[Layer 0 — N = 80]
+  [layer0] N = 80
+    substrate    d̂= 61.38  recip[k=10]=0.765  longest_bar=6.00  (1.8s)
+    B1_raw       d̂=  1.20  recip[k=10]=0.695  longest_bar=88181.91  (0.0s)
+    B2_sign      d̂= 65.97  recip[k=10]=0.738  longest_bar=20.00  (1.7s)
+    B3_sign      d̂= 66.08  recip[k=10]=0.730  longest_bar=23.00  (1.7s)
+
+[Layer 14 — N = 80]
+  [layer14] N = 80
+    substrate    d̂= 64.84  recip[k=10]=0.762  longest_bar=6.00  (1.5s)
+    B1_raw       d̂=  1.00  recip[k=10]=0.765  longest_bar=7434.20  (0.0s)
+    B2_sign      d̂= 73.86  recip[k=10]=0.807  longest_bar=13.00  (1.8s)
+    B3_sign      d̂= 69.08  recip[k=10]=0.810  longest_bar=8.00  (1.8s)
+
+[Layer 29 — N = 80]
+  [layer29] N = 80
+    substrate    d̂= 65.78  recip[k=10]=0.863  longest_bar=4.00  (1.9s)
+    B1_raw       d̂=  2.25  recip[k=10]=0.805  longest_bar=32060.55  (0.0s)
+    B2_sign      d̂= 66.07  recip[k=10]=0.805  longest_bar=20.00  (1.9s)
+    B3_sign      d̂= 67.35  recip[k=10]=0.795  longest_bar=21.00  (1.9s)
+
+[Bootstrap CIs on M1, B=200]
+    bootstrap iter 25/200 done
+    bootstrap iter 50/200 done
+    bootstrap iter 75/200 done
+    bootstrap iter 100/200 done
+    bootstrap iter 125/200 done
+    bootstrap iter 150/200 done
+    bootstrap iter 175/200 done
+    bootstrap iter 200/200 done
+  bootstrap elapsed: 4.9s
+  substrate    d̂ =  78.91  95% CI [ 73.88,  83.29]  (n_finite=200)
+  B1_raw       d̂ =   1.75  95% CI [  1.40,   2.29]  (n_finite=200)
+  B2_sign      d̂ = 133.80  95% CI [133.02, 134.42]  (n_finite=200)
+  B3_sign      d̂ = 134.12  95% CI [133.25, 134.52]  (n_finite=200)
+
+[Verdict (per FROZEN spec)]
+  M1 pooled:   substrate 78.59 vs B2 134.13 vs B3 134.23 vs B1 1.36
+  M1: substrate vs B2 relative gap = 41.0%, CIs disjoint = True → PASS
+  M2: pass k-counts [False, False, False, False] → FAIL
+  M3: substrate longest_bar 1.00 vs 2×B3.p95 0.00 → PASS
+
+  >>> SUBSTRATE GEOMETRIC CLAIM: VALIDATED  (2/3 measures clear) <<<
+
+Results written to experiments/phase_alpha/results/phase_alpha_results.json
