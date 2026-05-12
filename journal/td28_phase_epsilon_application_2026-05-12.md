@@ -1,5 +1,22 @@
 # Phase ε — full-stack KV-eviction quality, all five red-team gaps closed
 
+> **2026-05-12 amendment after Phase ζ territory test.** The headline
+> framing below ("attention-output L2 error is the most operationally
+> meaningful metric") did NOT survive end-to-end harness measurement.
+> Phase ζ (`td28_phase_zeta_eviction_territory_2026-05-12.md`) ran
+> `BITNET_KV_EVICT_MODE=sigdist` against the full harness and found
+> substrate-distance eviction is **no better than random** on generated
+> tokens at windows 8 and 16, and **worse** on 2 of 5 prompts at
+> window=16. The per-Q-head L2 advantage is real as a property of the
+> oracle, but does not propagate to end-to-end generation quality on
+> this benchmark. Reframe ε-4 as **oracle math, not territory
+> prediction**.
+>
+> Also note (cold-eye §3): the substrate-eviction code paths measured
+> by Phases δ/ε are **opt-in** (`BITNET_KV_EVICT_MODE=sigdist`); the
+> production default is `none`. Findings here have never spoken to
+> the default-mode quality.
+
 Addresses every untested concern from `td28_phase_delta_redteam_2026-05-12.md`.
 The substrate-L1 advantage now has a robust direction across SIX
 independent measurement variations:

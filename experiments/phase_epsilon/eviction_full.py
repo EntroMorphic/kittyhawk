@@ -141,10 +141,13 @@ def trial_eviction(K_cache: np.ndarray, V_cache: np.ndarray,
     K_used = K_cache.copy()
     if shuffle_cache:
         # Shuffle each row independently (destroys learned cross-cell corr,
-        # preserves per-row marginals)
-        rng2 = np.random.default_rng(RNG_SEED + 1)
+        # preserves per-row marginals). Uses the caller's rng so different
+        # trials get different shuffle patterns; the previous fixed-seed
+        # variant applied the same row-permutations across all trials,
+        # which was functionally OK for the ε-5 control but a subtle
+        # quirk caught in journal/td28_cold_eye_audit_2026-05-12.md.
         for i in range(P):
-            K_used[i] = K_used[i, rng2.permutation(HEAD_DIM)]
+            K_used[i] = K_used[i, rng.permutation(HEAD_DIM)]
 
     # Substrate sigs
     K_sigs = substrate_sig(K_used)

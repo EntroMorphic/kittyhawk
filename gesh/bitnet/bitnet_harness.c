@@ -355,8 +355,10 @@ static void bitnet_ffn_apply_cell_mask(m4t_mtfp_t* gate_act, int keep);
                                * of "Shakespeare"). Strict pass rate 15/24
                                * → ~19/24. Per journal/hp_sweep_2026-05-10.md. */
 
-/* ── Cycle 2 sparse-attention helpers (experimental; not on production
- *    path unless BITNET_ATTN_MODE != dense). Per journal/cycle2_design.md. */
+/* ── Cycle 2 sparse-attention helpers. Production-eligible per the
+ *    "no scalar in production" foundational rule (2026-05-12 — see
+ *    line 1139 below). Off by default (BITNET_ATTN_MODE=dense); opt
+ *    into routed/oracle/etc. via env var. Per journal/cycle2_design.md. */
 
 /* xorshift32 for deterministic random index selection (random arm). */
 static inline unsigned int bitnet_xorshift32(unsigned int* state) {
@@ -1206,7 +1208,7 @@ void bitnet_forward_block(
                     m4t_mtfp_attn_v_combine(out_h, 30, weights, V_base, row_size,
                                             seq_k, BITNET_HEAD_DIM);
                 } else {
-                    /* ── SPARSE PATH (Cycle 2 experimental) ─────────────── */
+                    /* ── SPARSE PATH (Cycle 2, production-eligible, opt-in) ── */
                     int k_eff = g_attn_k;  /* sparse_active gate ensures < seq_k */
 
                     int* indices = (int*)malloc((size_t)k_eff * sizeof(int));

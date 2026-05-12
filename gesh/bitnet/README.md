@@ -177,9 +177,10 @@ BITNET_ATTN_MODE=oracle BITNET_ATTN_K=4 ./build/gesh/bitnet_harness ...
 ```
 
 When `BITNET_ATTN_MODE` is unset or = `dense`, the production path runs
-unchanged (bit-exact). The sparse arms use a scalar
-`bitnet_sparse_attn_v_combine` — experimental, not on the production
-hot path.
+unchanged (bit-exact). The sparse arms use the NEON
+`m4t_mtfp_attn_v_combine` and gather V via memcpy; production-eligible
+per the "no scalar in production" foundational rule (2026-05-12).
+Off by default; opt-in via env var.
 
 This subdirectory is **not** in ctest. It's a consumer-side harness, comparable
 to the audit binaries — built by the main CMake but invoked manually.

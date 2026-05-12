@@ -71,9 +71,17 @@ def substrate_cell_pmf(p_nonzero: float = 0.62, p_sign_balance: float = 0.5):
 def cell_pmf_from_data(signatures: np.ndarray) -> np.ndarray:
     """Empirical cell PMF over contributions {0,1,2}.
 
-    Estimates marginals from the data then derives the PMF.
+    Estimates marginals from the data then derives the PMF. Asserts
+    that the input is ternary ({-1, 0, +1}); silent renormalization
+    on non-ternary inputs would mask the kind of contract violation
+    that previously hid the categorical-Hamming-vs-L1 confusion
+    (see journal/td28_l1_already_in_production_2026-05-12.md).
     """
     flat = signatures.flatten()
+    unique = np.unique(flat)
+    assert set(unique.tolist()).issubset({-1, 0, 1}), (
+        f"cell_pmf_from_data expects ternary input; got values {sorted(unique.tolist())}"
+    )
     p_minus = float(np.mean(flat == -1))
     p_zero = float(np.mean(flat == 0))
     p_plus = float(np.mean(flat == 1))
