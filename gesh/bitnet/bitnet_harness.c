@@ -31,6 +31,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>  /* clock_gettime for gen-loop timing (cost measurement) */
+
+/* Attention-only time accumulator for cost measurement. Reset before each
+ * generation loop, printed alongside gen_loop_seconds. Lets the
+ * substrate-vs-dense comparison attribute wall-clock differences to the
+ * attention block specifically vs other path differences. */
+static double g_attn_seconds = 0.0;
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
@@ -812,15 +818,19 @@ static void bitnet_ffn_apply_cell_mask(m4t_mtfp_t* gate_act, int keep) {
 
 /* Sparse attn_v_combine: out[d] = clamp(Σ_i weights[i] · V[indices[i]][d] >> shift).
  *
- * NEON via gather: copy V[indices[i]] into a contiguous buffer, then call the
- * NEON `m4t_mtfp_attn_v_combine` with tight stride. Per the foundational
- * "no scalar in production" rule (memory: feedback_function_over_speed_no_scalar.md):
- * the gather itself is plain memcpy (not "scalar ops" in the architectural
- * sense — it's data movement, not the computational kernel), and the
- * computational kernel IS the existing NEON V combine.
+ * NEON via gather: copy V[indices[i]] into a contiguous scratch buffer, then
+ * call the NEON `m4t_mtfp_attn_v_combine` with tight stride. Per the
+ * foundational "no scalar in production" rule, the gather is data movement
+ * (libc memcpy → SIMD on modern targets) and the computational kernel is the
+ * existing NEON V combine.
  *
- * Previously implemented as a scalar fallback; that violated the
- * foundational rule and was caught 2026-05-12. */
+ * Scratch buffer is file-scope static, sized for the worst case (k_max =
+ * 4096, head_dim_max = BITNET_HEAD_DIM = 128). Inference is single-threaded
+ * so no concurrency issues. This avoids 900+ malloc/free pairs per gen step
+ * that an alloc-per-call version had — caught in red-team 2026-05-12. */
+#define BITNET_SPARSE_GATHER_MAX_K  4096
+static m4t_mtfp_t s_sparse_v_gather[BITNET_SPARSE_GATHER_MAX_K * BITNET_HEAD_DIM];
+
 static void bitnet_sparse_attn_v_combine(
     m4t_mtfp_t* out, int shift,
     const m4t_mtfp_t* weights,
@@ -829,17 +839,16 @@ static void bitnet_sparse_attn_v_combine(
     const int* indices)
 {
     if (k == 0 || head_dim == 0) return;
-    /* Gather V[indices[i]] into a contiguous (k × head_dim) buffer. */
-    m4t_mtfp_t* V_gathered = (m4t_mtfp_t*)malloc((size_t)k * (size_t)head_dim * sizeof(m4t_mtfp_t));
-    assert(V_gathered);
+    assert(k <= BITNET_SPARSE_GATHER_MAX_K);
+    assert(head_dim <= BITNET_HEAD_DIM);
+    /* Gather V[indices[i]] into the scratch buffer. */
     for (int i = 0; i < k; i++) {
         const m4t_mtfp_t* V_t = V_base + (size_t)indices[i] * row_size;
-        memcpy(V_gathered + (size_t)i * (size_t)head_dim, V_t,
+        memcpy(s_sparse_v_gather + (size_t)i * (size_t)head_dim, V_t,
                (size_t)head_dim * sizeof(m4t_mtfp_t));
     }
     /* NEON V combine on the gathered buffer with tight stride. */
-    m4t_mtfp_attn_v_combine(out, shift, weights, V_gathered, (size_t)head_dim, k, head_dim);
-    free(V_gathered);
+    m4t_mtfp_attn_v_combine(out, shift, weights, s_sparse_v_gather, (size_t)head_dim, k, head_dim);
 }
 
 /* ── BitLinear scale composition (work-unit 5) ───────────────────────────
@@ -1131,6 +1140,12 @@ void bitnet_forward_block(
              * "no scalar in production" foundational rule (2026-05-12). */
             int sparse_active = (g_attn_mode != BITNET_ATTN_DENSE && g_attn_k < seq_k);
 
+            /* Attention-only timing: accumulate per-head-loop wall-clock into
+             * g_attn_seconds. Lets us attribute substrate vs dense diffs to
+             * attention specifically. */
+            struct timespec attn_t0, attn_t1;
+            clock_gettime(CLOCK_MONOTONIC, &attn_t0);
+
             for (int h = 0; h < BITNET_NUM_ATTENTION_HEADS; h++) {
                 int kv_head = h / q_per_kv;
                 const m4t_mtfp_t* qh = s->q + (size_t)h * BITNET_HEAD_DIM;
@@ -1317,6 +1332,10 @@ void bitnet_forward_block(
                     free(sub_scores_int); free(sub_weights);
                 }
             }
+
+            clock_gettime(CLOCK_MONOTONIC, &attn_t1);
+            g_attn_seconds += (double)(attn_t1.tv_sec - attn_t0.tv_sec)
+                            + (double)(attn_t1.tv_nsec - attn_t0.tv_nsec) / 1e9;
 
             /* Stash one debug score per head (last position's score),
              * for the activation dump. */
@@ -1633,13 +1652,23 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--layers")    == 0) n_layers    = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--positions") == 0) n_positions = atoi(argv[i+1]);
         else if (strcmp(argv[i], "--prompt-tokens") == 0) {
-            /* Parse comma-separated token ids. */
+            /* Parse comma-separated token ids. Hard error if input exceeds
+             * the buffer — silent truncation was the v1 cost-measurement bug
+             * (caught 2026-05-12). */
+            const int max_prompt = (int)(sizeof(prompt_tokens)/sizeof(prompt_tokens[0]));
             const char* p = argv[i+1];
             n_prompt_tokens = 0;
-            while (*p && n_prompt_tokens < (int)(sizeof(prompt_tokens)/sizeof(prompt_tokens[0]))) {
+            while (*p && n_prompt_tokens < max_prompt) {
                 prompt_tokens[n_prompt_tokens++] = atoi(p);
                 while (*p && *p != ',') p++;
                 if (*p == ',') p++;
+            }
+            if (*p) {
+                fprintf(stderr,
+                    "[harness] ERROR: --prompt-tokens exceeds buffer (max %d tokens); "
+                    "remaining input not parsed. Rebuild with larger prompt_tokens[] or "
+                    "split the prompt.\n", max_prompt);
+                return 2;
             }
             n_positions = n_prompt_tokens;
         }
@@ -1772,6 +1801,7 @@ int main(int argc, char** argv) {
      * argmax over LM head logits; that token id becomes the next input
      * embedding. Stops at n_generate or when sequence_len fills the cache. */
     struct timespec gen_t0, gen_t1;
+    g_attn_seconds = 0.0;  /* reset for this gen loop */
     clock_gettime(CLOCK_MONOTONIC, &gen_t0);
     for (int g = 0; g < n_generate; g++) {
         int pos = n_positions + g;
@@ -1809,9 +1839,14 @@ int main(int argc, char** argv) {
     double gen_seconds = (double)(gen_t1.tv_sec - gen_t0.tv_sec)
                        + (double)(gen_t1.tv_nsec - gen_t0.tv_nsec) / 1e9;
     if (n_generate > 0) {
+        double attn_per_token = g_attn_seconds / n_generate;
+        double attn_frac = (gen_seconds > 0) ? (g_attn_seconds / gen_seconds) : 0.0;
         fprintf(stderr,
-                "[harness] gen_loop_seconds = %.4f  n_generate = %d  seconds_per_token = %.4f  prompt_tokens = %d\n",
-                gen_seconds, n_generate, gen_seconds / n_generate, n_positions);
+                "[harness] gen_loop_seconds = %.4f  n_generate = %d  seconds_per_token = %.4f  "
+                "prompt_tokens = %d  attn_seconds = %.4f  attn_seconds_per_token = %.4f  "
+                "attn_fraction = %.3f\n",
+                gen_seconds, n_generate, gen_seconds / n_generate,
+                n_positions, g_attn_seconds, attn_per_token, attn_frac);
     }
 
     #undef FORWARD_ONE
