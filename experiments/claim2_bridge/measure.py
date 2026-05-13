@@ -44,6 +44,11 @@ EQUIV_CLASSES = {
                                 ["-12 / 3", "-4"], ["7 / 7", "1"], ["0 / 5", "0"]],
     "division_in_expr":       [["x + 12 / 3", "x + 4"], ["x * (10 / 2)", "x * 5"],
                                 ["x / x", "1"], ["x / 1", "x"], ["0 / x", "0"]],
+    # exp/log: pure-numeric folds via Taylor at fixed-point scale 40.
+    # Equivalences hold at the FIXED-POINT trit-vector level.
+    "exp_log_numeric":        [["exp(0)", "exp(0)"], ["log(1)", "log(1)"],
+                                ["exp(log(2))", "exp(log(2))"]],
+    "exp_log_consistency":    [["exp(1)", "exp(1)"], ["log(10)", "log(10)"]],
 }
 
 

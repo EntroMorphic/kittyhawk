@@ -27,9 +27,11 @@ from typing import Any
 try:
     from .parser import parse
     from .numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
+    from .fixed_point import fp_encode, fp_decode, exp_taylor, log_taylor, SCALE_DEFAULT
 except ImportError:
     from parser import parse
     from numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
+    from fixed_point import fp_encode, fp_decode, exp_taylor, log_taylor, SCALE_DEFAULT
 
 
 D_DEFAULT = 128
@@ -41,6 +43,8 @@ def _flatten(node):
     if not isinstance(node, tuple):
         return node
     op = node[0]
+    if op == "fp_const":
+        return node  # leaf — never flatten its payload
     args = [_flatten(a) for a in node[1:]]
     if op in ("add", "mul"):
         flat = []
@@ -56,6 +60,8 @@ def _flatten(node):
         return ("sub", args[0], args[1])
     if op == "div":
         return ("div", args[0], args[1])
+    if op in ("exp", "log"):
+        return (op, args[0])
     if op == "neg":
         # neg(neg(e)) -> e
         a0 = args[0]
@@ -78,6 +84,8 @@ def _sort_canonical(node):
         return ("sub", _sort_canonical(node[1]), _sort_canonical(node[2]))
     if op == "div":
         return ("div", _sort_canonical(node[1]), _sort_canonical(node[2]))
+    if op in ("exp", "log"):
+        return (op, _sort_canonical(node[1]))
     if op == "neg":
         return ("neg", _sort_canonical(node[1]))
     return node
@@ -92,7 +100,62 @@ def _is_pure_numeric(node) -> bool:
         return False
     if op == "const":
         return True
+    if op == "fp_const":
+        return True
     return all(_is_pure_numeric(a) for a in node[1:])
+
+
+def _subtree_needs_fp(node) -> bool:
+    """Does this subtree contain exp/log/fp_const anywhere? If so the
+    pure-numeric fold must use fixed-point arithmetic, not integer."""
+    if not isinstance(node, tuple):
+        return False
+    op = node[0]
+    if op in ("exp", "log", "fp_const"):
+        return True
+    return any(_subtree_needs_fp(a) for a in node[1:])
+
+
+def _fold_to_fp(node, scale: int = SCALE_DEFAULT):
+    """Evaluate a pure-numeric subtree at fixed-point scale, returning
+    a FixedPoint. Used for any pure-numeric subtree that contains
+    exp/log (or other inherently-fractional ops)."""
+    from fixed_point import (FixedPoint, fp_add, fp_sub, fp_neg,
+                              fp_mul, fp_div, fp_from_int)
+    from numeric import D_DEFAULT
+    if not isinstance(node, tuple):
+        raise ValueError(f"unexpected non-tuple {node!r}")
+    op = node[0]
+    if op == "const":
+        return fp_from_int(node[1], scale, D_DEFAULT)
+    if op == "fp_const":
+        # Stored as ('fp_const', trits_tuple, scale)
+        import numpy as np
+        trits = np.array(node[1], dtype=np.int8)
+        if node[2] != scale:
+            raise ValueError(f"scale mismatch: {node[2]} vs {scale}")
+        return FixedPoint(trits, scale)
+    if op == "neg":
+        return fp_neg(_fold_to_fp(node[1], scale))
+    if op == "sub":
+        return fp_sub(_fold_to_fp(node[1], scale), _fold_to_fp(node[2], scale))
+    if op == "div":
+        return fp_div(_fold_to_fp(node[1], scale), _fold_to_fp(node[2], scale))
+    if op == "add":
+        acc = _fold_to_fp(node[1], scale)
+        for child in node[2:]:
+            acc = fp_add(acc, _fold_to_fp(child, scale))
+        return acc
+    if op == "mul":
+        acc = _fold_to_fp(node[1], scale)
+        for child in node[2:]:
+            acc = fp_mul(acc, _fold_to_fp(child, scale))
+        return acc
+    if op == "exp":
+        return exp_taylor(_fold_to_fp(node[1], scale))
+    if op == "log":
+        return log_taylor(_fold_to_fp(node[1], scale))
+    raise ValueError(f"_fold_to_fp: unknown op {op!r}")
 
 
 def _fold_numeric(node):
@@ -178,8 +241,17 @@ def _simplify(node):
         return node
     op = node[0]
     # Pure-numeric subtree → fold through balanced-ternary substrate.
+    # If it contains exp/log, fold at fixed-point; else integer.
     if _is_pure_numeric(node):
+        if _subtree_needs_fp(node):
+            fp = _fold_to_fp(node, SCALE_DEFAULT)
+            return ("fp_const", tuple(int(t) for t in fp.trits), fp.scale)
         return _fold_numeric(node)
+    # Recurse into exp/log when arg is mixed: simplify the argument.
+    if op == "exp":
+        return ("exp", _simplify(node[1]))
+    if op == "log":
+        return ("log", _simplify(node[1]))
     if op == "neg":
         a = _simplify(node[1])
         if isinstance(a, tuple) and a[0] == "neg":
@@ -311,12 +383,18 @@ def _serialize(node) -> str:
         return f"V:{node[1]}"
     if op == "const":
         return f"C:{node[1]}"
+    if op == "fp_const":
+        return f"FP:scale={node[2]}:trits={node[1]}"
     if op == "neg":
         return f"(neg {_serialize(node[1])})"
     if op == "sub":
         return f"(sub {_serialize(node[1])} {_serialize(node[2])})"
     if op == "div":
         return f"(div {_serialize(node[1])} {_serialize(node[2])})"
+    if op == "exp":
+        return f"(exp {_serialize(node[1])})"
+    if op == "log":
+        return f"(log {_serialize(node[1])})"
     if op in ("add", "mul"):
         body = " ".join(_serialize(a) for a in node[1:])
         return f"({op} {body})"

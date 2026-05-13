@@ -105,6 +105,17 @@ class Parser:
             return ("const", int(t[1]))
         if t[0] == "ID":
             self.pos += 1
+            # Function call: exp(...) or log(...)
+            nxt = self.peek()
+            if nxt is not None and nxt[0] == "OP" and nxt[1] == "(":
+                self.pos += 1
+                arg = self.parse_expr()
+                self.eat("OP", ")")
+                if t[1] == "exp":
+                    return ("exp", arg)
+                if t[1] == "log":
+                    return ("log", arg)
+                raise ValueError(f"unknown function {t[1]!r}")
             return ("var", t[1])
         raise ValueError(f"unexpected token {t!r}")
 

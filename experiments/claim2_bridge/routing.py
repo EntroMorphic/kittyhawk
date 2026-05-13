@@ -127,6 +127,8 @@ def _flatten(node):
     if not isinstance(node, tuple):
         return node
     op = node[0]
+    if op == "fp_const":
+        return node
     args = [_flatten(a) for a in node[1:]]
     if op in ("add", "mul"):
         flat = []
@@ -176,7 +178,7 @@ def _is_pure_numeric(node) -> bool:
     op = node[0]
     if op == "var":
         return False
-    if op == "const":
+    if op == "const" or op == "fp_const":
         return True
     return all(_is_pure_numeric(a) for a in node[1:])
 
@@ -225,7 +227,9 @@ def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
     # substrate-routing purity with approach A's algebraic rewriter:
     # the bridge handles both classes of equivalence.
     ast = _canonicalize_ast(ast)
-    if _is_pure_numeric(ast):
+    # canonicalize may produce fp_const (when subtree contains exp/log).
+    # Don't downgrade an fp_const node to an integer const.
+    if isinstance(ast, tuple) and ast[0] != "fp_const" and _is_pure_numeric(ast):
         ast = ("const", _fold_numeric(ast))
     ast = _flatten(ast)
     op = ast[0]
@@ -233,10 +237,34 @@ def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
         return base_sig_var(ast[1], d=d)
     if op == "const":
         return base_sig_const(ast[1], d=d)
+    if op == "fp_const":
+        # The signature IS the fixed-point trit vector directly.
+        return np.array(ast[1], dtype=np.int8)
     if op == "neg":
         return route_neg(signature(ast[1], d=d))
     if op == "sub":
         return route_sub(signature(ast[1], d=d), signature(ast[2], d=d))
+    if op in ("exp", "log"):
+        # Mixed-variable exp/log: SHA fallback over canonical form.
+        import hashlib
+        try:
+            from .canonical import _serialize
+        except ImportError:
+            from canonical import _serialize
+        seed = (f"{op}:" + _serialize(ast)).encode("utf-8")
+        stream = b""
+        c = 0
+        while len(stream) < d * 4:
+            stream += hashlib.sha256(seed + c.to_bytes(4, "big")).digest()
+            c += 1
+        mags  = np.frombuffer(stream[:d], dtype=np.uint8).astype(np.int32)
+        signs = np.frombuffer(stream[d:2*d], dtype=np.uint8).astype(np.int32)
+        sig = np.zeros(d, dtype=np.int8)
+        n_nonzero = int(round(d * TARGET_NONZERO_FRAC))
+        idx = np.argsort(-mags)[:n_nonzero]
+        for i in idx:
+            sig[i] = +1 if signs[i] >= 128 else -1
+        return sig
     if op == "div":
         # Mixed-variable division: no clean element-wise trit routing
         # preserves algebraic identities here (element-wise trit-div
