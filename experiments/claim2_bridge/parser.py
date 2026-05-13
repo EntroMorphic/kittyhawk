@@ -43,7 +43,7 @@ def tokenize(s: str) -> list[Tok]:
             tokens.append(("ID", s[i:j]))
             i = j
             continue
-        if c in "+-*()":
+        if c in "+-*/()":
             tokens.append(("OP", c))
             i += 1
             continue
@@ -81,11 +81,11 @@ class Parser:
         left = self.parse_factor()
         while True:
             t = self.peek()
-            if t is None or t[0] != "OP" or t[1] != "*":
+            if t is None or t[0] != "OP" or t[1] not in ("*", "/"):
                 break
-            self.pos += 1
+            op = t[1]; self.pos += 1
             right = self.parse_factor()
-            left = ("mul", left, right)
+            left = ("mul" if op == "*" else "div", left, right)
         return left
 
     def parse_factor(self):

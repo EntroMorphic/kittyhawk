@@ -26,10 +26,10 @@ from typing import Any
 
 try:
     from .parser import parse
-    from .numeric import encode, balt_add, balt_neg, balt_mul, decode
+    from .numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
 except ImportError:
     from parser import parse
-    from numeric import encode, balt_add, balt_neg, balt_mul, decode
+    from numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
 
 
 D_DEFAULT = 128
@@ -54,6 +54,8 @@ def _flatten(node):
         # x - y  becomes  add(x, neg(y))  for canonical purposes; we keep
         # sub as a distinct node only if it doesn't reduce.
         return ("sub", args[0], args[1])
+    if op == "div":
+        return ("div", args[0], args[1])
     if op == "neg":
         # neg(neg(e)) -> e
         a0 = args[0]
@@ -74,6 +76,8 @@ def _sort_canonical(node):
         return (op, *kids)
     if op == "sub":
         return ("sub", _sort_canonical(node[1]), _sort_canonical(node[2]))
+    if op == "div":
+        return ("div", _sort_canonical(node[1]), _sort_canonical(node[2]))
     if op == "neg":
         return ("neg", _sort_canonical(node[1]))
     return node
@@ -111,6 +115,11 @@ def _fold_numeric(node):
         b = _fold_numeric(node[2])
         sig = balt_add(encode(a[1]), balt_neg(encode(b[1])))
         return ("const", decode(sig))
+    if op == "div":
+        a = _fold_numeric(node[1])
+        b = _fold_numeric(node[2])
+        q_sig, _ = balt_div(encode(a[1]), encode(b[1]))
+        return ("const", decode(q_sig))
     if op == "add":
         kids = [_fold_numeric(a) for a in node[1:]]
         acc = encode(kids[0][1])
@@ -190,6 +199,20 @@ def _simplify(node):
         if a == ("const", 0):
             return _simplify(("neg", b))
         return ("sub", a, b)
+    if op == "div":
+        a = _simplify(node[1])
+        b = _simplify(node[2])
+        # x / 1 -> x
+        if b == ("const", 1):
+            return a
+        # 0 / x -> 0
+        if a == ("const", 0):
+            return ("const", 0)
+        # x / x -> 1  (when x is not zero — we can't statically tell;
+        # assume so for canonicalization purposes)
+        if a == b:
+            return ("const", 1)
+        return ("div", a, b)
     if op == "add":
         kids = [_simplify(a) for a in node[1:]]
         # drop zero terms
@@ -272,6 +295,8 @@ def _serialize(node) -> str:
         return f"(neg {_serialize(node[1])})"
     if op == "sub":
         return f"(sub {_serialize(node[1])} {_serialize(node[2])})"
+    if op == "div":
+        return f"(div {_serialize(node[1])} {_serialize(node[2])})"
     if op in ("add", "mul"):
         body = " ".join(_serialize(a) for a in node[1:])
         return f"({op} {body})"

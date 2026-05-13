@@ -34,10 +34,12 @@ import numpy as np
 
 try:
     from .parser import parse
-    from .numeric import encode, balt_add, balt_neg, balt_mul, decode
+    from .numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
+    from .canonical import canonicalize as _canonicalize_ast
 except ImportError:
     from parser import parse
-    from numeric import encode, balt_add, balt_neg, balt_mul, decode
+    from numeric import encode, balt_add, balt_neg, balt_mul, balt_div, decode
+    from canonical import canonicalize as _canonicalize_ast
 
 
 D_DEFAULT = 128
@@ -190,6 +192,11 @@ def _fold_numeric(node) -> int:
     if op == "sub":
         return decode(balt_add(encode(_fold_numeric(node[1])),
                                 balt_neg(encode(_fold_numeric(node[2])))))
+    if op == "div":
+        a_v = _fold_numeric(node[1])
+        b_v = _fold_numeric(node[2])
+        q_sig, _ = balt_div(encode(a_v), encode(b_v))
+        return decode(q_sig)
     if op == "add":
         acc = encode(_fold_numeric(node[1]))
         for child in node[2:]:
@@ -212,10 +219,13 @@ def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
     abstract routings."""
     if not isinstance(ast, tuple):
         raise ValueError(f"expected tuple AST, got {ast!r}")
+    # Algebraic simplification (identities like x/x=1, x*0=0, neg(neg(x))=x)
+    # via canonical's _simplify. Substrate routings then derive the
+    # signature from the simplified AST. This blends approach B's
+    # substrate-routing purity with approach A's algebraic rewriter:
+    # the bridge handles both classes of equivalence.
+    ast = _canonicalize_ast(ast)
     if _is_pure_numeric(ast):
-        # Substrate-level balanced-ternary computation yields a single
-        # integer; convert via the existing base_sig_const path so the
-        # downstream signature aligns with how other code sees constants.
         ast = ("const", _fold_numeric(ast))
     ast = _flatten(ast)
     op = ast[0]
@@ -227,6 +237,33 @@ def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
         return route_neg(signature(ast[1], d=d))
     if op == "sub":
         return route_sub(signature(ast[1], d=d), signature(ast[2], d=d))
+    if op == "div":
+        # Mixed-variable division: no clean element-wise trit routing
+        # preserves algebraic identities here (element-wise trit-div
+        # collapses to mul-with-zero-fallback, losing structure). For
+        # this iteration: fall back to a canonical-form hash so the
+        # signature is deterministic and distinct from related forms.
+        # Pure-numeric div is handled via _fold_numeric above.
+        import hashlib
+        from canonical import _serialize  # type: ignore
+        try:
+            from .canonical import _serialize  # type: ignore
+        except ImportError:
+            from canonical import _serialize  # type: ignore
+        seed = ("div:" + _serialize(ast)).encode("utf-8")
+        stream = b""
+        c = 0
+        while len(stream) < d * 4:
+            stream += hashlib.sha256(seed + c.to_bytes(4, "big")).digest()
+            c += 1
+        mags  = np.frombuffer(stream[:d], dtype=np.uint8).astype(np.int32)
+        signs = np.frombuffer(stream[d:2*d], dtype=np.uint8).astype(np.int32)
+        sig = np.zeros(d, dtype=np.int8)
+        n_nonzero = int(round(d * TARGET_NONZERO_FRAC))
+        idx = np.argsort(-mags)[:n_nonzero]
+        for i in idx:
+            sig[i] = +1 if signs[i] >= 128 else -1
+        return sig
     if op == "add":
         kids = [signature(a, d=d) for a in ast[1:]]
         # Reduce left-fold; saturating add is NOT associative in general,

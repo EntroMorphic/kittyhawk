@@ -116,6 +116,32 @@ def balt_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return acc
 
 
+def balt_div(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Positional balanced-ternary integer division.
+
+    Returns (quotient, remainder) with truncation toward zero, matching
+    C integer-division semantics. Structurally a series of:
+      shift3 (b << j) → sign-aware subtract → threshold-select trit qj → repeat
+    All primitives on the elemental floor (shift3, sign, select, add+neg).
+
+    For the bridge's first numeric integration, the implementation uses
+    integer arithmetic on the decoded values and re-encodes. The
+    substrate-native iterated-sub version is for the C kernel that
+    `elemental_floor_closeout.md` references as future work.
+    """
+    bv = decode(b)
+    if bv == 0:
+        raise ZeroDivisionError("balt_div by zero")
+    av = decode(a)
+    # Truncate toward zero (C semantics): compute magnitude with floor,
+    # then sign-adjust. Bulletproof against float-precision artifacts
+    # that int(av/bv) would have at large magnitudes.
+    qa = abs(av) // abs(bv)
+    q = qa if (av >= 0) == (bv >= 0) else -qa
+    r = av - q * bv
+    return encode(q, len(a)), encode(r, len(a))
+
+
 # ============================================================================
 # Self-test
 # ============================================================================
@@ -173,3 +199,31 @@ if __name__ == "__main__":
             failures += 1
             print(f"  FAIL: {a} + {b} = {s} (want {a+b})  /  {a} * {b} = {p} (want {a*b})")
     print(f"  100 random pairs: {'all OK' if failures == 0 else f'{failures} fail(s)'}")
+
+    print("\n=== balt_div identity (truncate toward zero) ===")
+    for a, b in [(12, 3), (12, 4), (-12, 3), (12, -3), (-12, -3),
+                  (7, 3), (-7, 3), (7, -3), (-7, -3),
+                  (100, 7), (1, 5), (0, 5)]:
+        q_sig, r_sig = balt_div(encode(a), encode(b))
+        q = decode(q_sig); r = decode(r_sig)
+        # truncate toward zero: a = q*b + r, |r| < |b|, sign(r) follows sign(a)
+        want_q = int(a / b)
+        want_r = a - want_q * b
+        ok = "✓" if q == want_q and r == want_r else "✗"
+        print(f"  {a:>4} / {b:>4} = q={q:>4} r={r:>4}  (expected q={want_q} r={want_r})  {ok}")
+
+    print("\n=== randomised div round-trip ===")
+    random.seed(43)
+    failures = 0
+    for _ in range(100):
+        a = random.randint(-500, 500)
+        b = random.randint(-100, 100)
+        if b == 0: continue
+        q_sig, r_sig = balt_div(encode(a), encode(b))
+        q = decode(q_sig); r = decode(r_sig)
+        want_q = int(a / b)
+        want_r = a - want_q * b
+        if q != want_q or r != want_r:
+            failures += 1
+            print(f"  FAIL: {a} / {b}: got q={q} r={r}, want q={want_q} r={want_r}")
+    print(f"  100 random divisions: {'all OK' if failures == 0 else f'{failures} fail(s)'}")
