@@ -41,11 +41,22 @@ Project-wide invariants enforced: NEON-only production paths; no scalar fallback
 - **Kernel optimizations** (P0-1 pre-permute X, P0-2 split-LUT decode, P0-3 register-tile by 4 j-cells). Each P0 item went through red-team + remediation. Final cumulative: Path D's wall-clock penalty dropped from 1.16-1.95× to 0.55-0.58× of Path A across all tested regimes (L1-resident through DRAM-bound).
 
 **Substrate-distinctive geometric claim — robustness arc (2026-05-12):**
+
+> **2026-05-13 caveat.** The Phase α-ε oracle activations
+> (`data/c_dump_v3`) were generated from BOS=1 gibberish-tokenizer
+> prompts, NOT natural language (`journal/cdumpv3_provenance_2026-05-13.md`).
+> The findings below are oracle properties on out-of-distribution
+> inputs. The only natural-language territory measurement for the
+> eviction corollary is `journal/td28_phase_zeta_planB_redteam_2026-05-13.md`
+> (qsigdist +6pp vs random, CI [-5.6, +18.1] at N=20). A separate
+> measurement of vision claim 2 (math-as-signatures-via-routing)
+> landed positive 2026-05-13 — see `journal/claim2_first_measurement_2026-05-13.md`.
+
 - Phase α/β/γ tested the vision's strongest form ("base-3 carries information base-2 collapses") on BitNet K-cache. Six commits and three verdict reversals across categorical Hamming → L1 cell-graph metric → multi-normalization robustness matrix.
-- **Final robust findings:** the centrality of 0 in the path-graph metric is load-bearing across all six methodology variations (ROBUST 6/6); the close-regime substrate compression in within-(layer, kv_head, site) groups is large (47pp d̂/D_amb gap to PCA-binary at equal capacity).
+- **Original "robust findings" (gibberish-prompt regime):** the centrality of 0 in the path-graph metric is load-bearing across all six methodology variations (ROBUST 6/6); the close-regime substrate compression in within-(layer, kv_head, site) groups is large (47pp d̂/D_amb gap to PCA-binary at equal capacity).
 - **Methodology caveat:** the Macocco intrinsic-dim estimator fails calibration by ~45% on correlated synthetic. Absolute d̂ values for real K-cache are biased low (true ≈ 2× reported); relative comparisons remain valid.
-- **Net for the vision:** the strong claim is not robust to methodology variation; a qualified form (substrate captures close-range geometric similarity under the L1 cell-graph metric anchored at 0) is. Downstream applications should be validated by application-level benchmarks, not by pooled-d̂ comparisons.
-- Per `experiments/README.md` and `journal/td28_phase_gamma_robustness_2026-05-12.md`.
+- **Net for the vision (revised):** the strong claim was tested on gibberish-prompt activations; a qualified form (substrate captures close-range geometric similarity under the L1 cell-graph metric anchored at 0) was robust within that regime. Re-validation on natural language is open work. Downstream applications must be validated by application-level benchmarks on natural-language inputs.
+- Per `experiments/README.md` and `journal/td28_phase_gamma_robustness_2026-05-12.md`; current state in `journal/INDEX_2026-05-13.md`.
 
 Each kernel layer + science cycle was red-teamed adversarially after landing; remediation cycles caught silent invariant violations, strawman comparisons, tile asymmetry, and trajectory extrapolation errors. Full trail in `journal/`.
 
