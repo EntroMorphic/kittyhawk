@@ -159,6 +159,12 @@ typedef enum {
     BITNET_KV_EVICT_FIFO,
     BITNET_KV_EVICT_RANDOM,
     BITNET_KV_EVICT_SIGDIST,
+    BITNET_KV_EVICT_QSIGDIST,  /* Plan B (2026-05-12): Q-aware eviction.
+                                 * Uses L1(Q-sig per Q-head, K-sig) summed
+                                 * over all Q-heads × KV-heads as the
+                                 * eviction cost. Implements the operation
+                                 * Phase ε measured (Q-K oracle) — distinct
+                                 * from SIGDIST's K-K proxy. */
 } bitnet_kv_evict_mode_t;
 
 static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
@@ -176,6 +182,7 @@ static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
         case BITNET_KV_EVICT_FIFO:    return "fifo";
         case BITNET_KV_EVICT_RANDOM:  return "random";
         case BITNET_KV_EVICT_SIGDIST: return "sigdist";
+        case BITNET_KV_EVICT_QSIGDIST: return "qsigdist";
     }
     return "unknown";
 }
@@ -187,6 +194,7 @@ static void bitnet_kv_evict_init_from_env(void) {
         else if (!strcasecmp(m, "fifo"))    g_kv_evict_mode = BITNET_KV_EVICT_FIFO;
         else if (!strcasecmp(m, "random"))  g_kv_evict_mode = BITNET_KV_EVICT_RANDOM;
         else if (!strcasecmp(m, "sigdist")) g_kv_evict_mode = BITNET_KV_EVICT_SIGDIST;
+        else if (!strcasecmp(m, "qsigdist")) g_kv_evict_mode = BITNET_KV_EVICT_QSIGDIST;
         else fprintf(stderr, "[harness] unknown BITNET_KV_EVICT_MODE=%s, using none\n", m);
     }
     const char* w = getenv("BITNET_KV_WINDOW");
@@ -204,8 +212,11 @@ static void bitnet_kv_evict_init_from_env(void) {
     if (sd) { unsigned int v = (unsigned int)strtoul(sd, NULL, 0);
               if (v != 0) g_kv_evict_rng = v; }
     /* sigdist requires a tau for K signatures. Use 5000 default if unset
-     * (per #4 finding: fixed tau is acceptable for quality). */
-    if (g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST && g_attn_fixed_tau == 0) {
+     * (per #4 finding: fixed tau is acceptable for quality). qsigdist
+     * (Plan B) uses the same regime — K-sigs at fixed tau, Q-sig computed
+     * per-Q-head on the fly. */
+    if ((g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST ||
+         g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST) && g_attn_fixed_tau == 0) {
         g_attn_fixed_tau = 5000;
     }
     if (g_kv_evict_mode != BITNET_KV_EVICT_NONE) {
@@ -486,7 +497,8 @@ static int bitnet_kv_cache_ensure_evicted(bitnet_kv_cache_t* cache) {
  * current_position is the position just written (used by sigdist as the
  * "direction proxy" — K-sig of the current token approximates Q-direction). */
 static int bitnet_kv_evict_pick_victim(
-    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position)
+    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position,
+    const m4t_mtfp_t* q_all_heads /* (NUM_ATTENTION_HEADS, HEAD_DIM) or NULL */ )
 {
     uint8_t* row = bitnet_kv_cache_evicted_row(cache, layer_idx);
 
@@ -592,13 +604,68 @@ static int bitnet_kv_evict_pick_victim(
         return worst_p;
     }
 
+    if (g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST) {
+        /* Plan B (2026-05-12): Q-aware eviction. For each alive
+         * candidate position p, sum L1 distance between each Q-head's
+         * signature and the K-signature at (p, that Q-head's KV-head).
+         * Evict the position with MAX total distance — implementing the
+         * operation Phase ε measured (Q-K oracle), aggregated across
+         * the full GQA structure (20 Q-heads × 5 KV-heads).
+         *
+         * Q-sigs are computed per Q-head at the same fixed tau used
+         * for K-sigs (g_attn_fixed_tau, forced to 5000 in this mode).
+         * Distance is popcount(XOR on packed 2-bit codes) = L1 on the
+         * underlying ternary signatures, matching SIGDIST's distance
+         * loop bit-for-bit. */
+        if (cache->k_sig == NULL || q_all_heads == NULL) return -1;
+        int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+        const int q_per_kv = BITNET_NUM_ATTENTION_HEADS / BITNET_NUM_KV_HEADS;
+
+        /* Precompute Q-sigs per Q-head once. */
+        uint8_t* q_sigs = (uint8_t*)malloc(
+            (size_t)BITNET_NUM_ATTENTION_HEADS * (size_t)sig_bytes);
+        if (!q_sigs) return -1;
+        int64_t* q_tmp = (int64_t*)malloc((size_t)BITNET_HEAD_DIM * sizeof(int64_t));
+        if (!q_tmp) { free(q_sigs); return -1; }
+        for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+            const m4t_mtfp_t* q = q_all_heads + (size_t)qh * BITNET_HEAD_DIM;
+            for (int d = 0; d < BITNET_HEAD_DIM; d++) q_tmp[d] = (int64_t)q[d];
+            int64_t tau = (int64_t)cache->k_sig_tau;
+            m4t_route_threshold_extract(
+                q_sigs + (size_t)qh * sig_bytes, q_tmp, tau, BITNET_HEAD_DIM);
+        }
+        free(q_tmp);
+
+        int worst_p = -1; int worst_d = -1;
+        for (int p = 0; p < seq_k; p++) {
+            if (row[p] || p == current_position) continue;
+            int dsum = 0;
+            for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+                int kvh = qh / q_per_kv;
+                const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, kvh);
+                const uint8_t* sb = q_sigs + (size_t)qh * sig_bytes;
+                for (int i = 0; i < sig_bytes; i++) {
+                    uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                    x = (uint8_t)(x - ((x >> 1) & 0x55));
+                    x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                    dsum += (int)(((x + (x >> 4)) & 0x0F));
+                }
+            }
+            if (dsum > worst_d) { worst_d = dsum; worst_p = p; }
+        }
+        free(q_sigs);
+        return worst_p;
+    }
+
     return -1;
 }
 
 /* Apply eviction at the given layer to bring alive_count down to window.
- * Called after K-write + K-sig store. */
+ * Called after K-write + K-sig store. q_all_heads is required for
+ * QSIGDIST mode; safely NULL for other modes. */
 static void bitnet_kv_evict_apply(
-    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position)
+    bitnet_kv_cache_t* cache, int layer_idx, int seq_k, int current_position,
+    const m4t_mtfp_t* q_all_heads)
 {
     if (g_kv_evict_mode == BITNET_KV_EVICT_NONE || g_kv_window <= 0) return;
     if (bitnet_kv_cache_ensure_evicted(cache)) return;
@@ -609,7 +676,8 @@ static void bitnet_kv_evict_apply(
     for (int p = 0; p < seq_k; p++) if (!row[p]) alive++;
 
     while (alive > g_kv_window) {
-        int victim = bitnet_kv_evict_pick_victim(cache, layer_idx, seq_k, current_position);
+        int victim = bitnet_kv_evict_pick_victim(cache, layer_idx, seq_k,
+                                                  current_position, q_all_heads);
         if (victim < 0) break;
         row[victim] = 1;
         alive--;
@@ -1104,7 +1172,8 @@ void bitnet_forward_block(
              * bearing for aggregate quality, so fixed-tau caching is safe.
              * TRIT_ROUTING #10: also populate when sigdist eviction is on. */
             int want_sig_cache = (g_attn_mode == BITNET_ATTN_ROUTED
-                                  || g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST)
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST)
                                   && g_attn_fixed_tau > 0
                                   && !g_attn_no_k_cache;
             if (want_sig_cache) {
@@ -1121,9 +1190,11 @@ void bitnet_forward_block(
                 }
             }
 
-            /* TRIT_ROUTING #10: trigger eviction if window exceeded. */
+            /* TRIT_ROUTING #10: trigger eviction if window exceeded.
+             * Plan B (2026-05-12): pass s->q so QSIGDIST can use the
+             * Q-direction; other modes ignore it. */
             if (g_kv_evict_mode != BITNET_KV_EVICT_NONE && g_kv_window > 0) {
-                bitnet_kv_evict_apply(cache, layer_idx, position + 1, position);
+                bitnet_kv_evict_apply(cache, layer_idx, position + 1, position, s->q);
             }
 
             int seq_k = position + 1;

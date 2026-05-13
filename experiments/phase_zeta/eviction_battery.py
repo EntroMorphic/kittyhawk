@@ -49,6 +49,9 @@ def mode_env(mode: str, window: int) -> dict:
     if mode == "sigdist":
         return {"BITNET_KV_EVICT_MODE": "sigdist", "BITNET_KV_WINDOW": str(window),
                 "BITNET_ATTN_FIXED_TAU": "5000"}
+    if mode == "qsigdist":
+        return {"BITNET_KV_EVICT_MODE": "qsigdist", "BITNET_KV_WINDOW": str(window),
+                "BITNET_ATTN_FIXED_TAU": "5000"}
     if mode == "random":
         return {"BITNET_KV_EVICT_MODE": "random", "BITNET_KV_WINDOW": str(window),
                 "BITNET_KV_EVICT_SEED": "42"}
@@ -131,7 +134,7 @@ def match_rate_vs_baseline(base: list[int], cand: list[int]) -> float:
 
 
 def main():
-    modes = ["no_evict", "fifo", "random", "sigdist"]
+    modes = ["no_evict", "fifo", "random", "sigdist", "qsigdist"]
     all_results: list[dict] = []
     for window in WINDOWS:
         print(f"\n{'='*70}")
@@ -166,7 +169,7 @@ def main():
             if base is None: continue
             base_distinct = distinct_count(base)
             print(f"{label:<16} {'(base)':<9} {'-':>8} {'-':>8} {base_distinct:>8d}")
-            for mode in ("fifo", "random", "sigdist"):
+            for mode in ("fifo", "random", "sigdist", "qsigdist"):
                 toks = by_lm[(label, mode)]["tokens"]
                 if toks is None: continue
                 div = divergence_point(base, toks)
@@ -178,7 +181,7 @@ def main():
         # Aggregate match-rate per mode for this window
         import numpy as np
         print(f"=== window={window} aggregate (mean across prompts) ===")
-        for mode in ("fifo", "random", "sigdist"):
+        for mode in ("fifo", "random", "sigdist", "qsigdist"):
             divs, mrs, dists = [], [], []
             for label in PROMPTS:
                 base = by_lm[(label, "no_evict")]["tokens"]
