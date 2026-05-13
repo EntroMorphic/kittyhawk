@@ -9,15 +9,9 @@ from transformers import AutoTokenizer
 
 REPO = "microsoft/bitnet-b1.58-2B-4T-bf16"
 
-# 20-prompt diverse battery for plan B red-team. Mix:
-# - factual questions (capital_france-style)
-# - definitions and explanations
-# - continuations
-# - math
-# - common phrases / idioms
-# - reasoning
-# - dialog / instruction
-# - long descriptive
+# 50-prompt diverse battery for plan B settlement (Track B of
+# glyph_gaps_2026-05-13_synthesize.md). Original 20 + 30 new across
+# code, poetry, dialog, technical jargon, error messages, multi-turn.
 PROMPTS = [
     ("q_capital_france",   "What is the capital of France?"),
     ("q_capital_japan",    "What is the capital of Japan?"),
@@ -39,6 +33,37 @@ PROMPTS = [
     ("long_lab",           "The scientist carefully adjusted the microscope, examining the slide for any sign of"),
     ("long_recipe",        "To make a perfect omelet, first crack two large eggs into a bowl and whisk them together with"),
     ("long_argument",      "Although critics have argued that the policy is too costly, supporters maintain that"),
+    # +30 to reach N=50
+    ("code_python_fn",     "def fibonacci(n):\n    if n <= 1:\n        return n\n    return"),
+    ("code_loop",          "for i in range(10):\n    print("),
+    ("code_class",         "class Animal:\n    def __init__(self, name):\n        self.name ="),
+    ("code_import",        "import numpy as np\n\ndef mean(arr):\n    return"),
+    ("code_sql",           "SELECT name, age FROM users WHERE age > 18 ORDER BY"),
+    ("poetry_haiku",       "Cherry blossoms fall\nSoftly on the quiet pond"),
+    ("poetry_iambic",      "Shall I compare thee to a summer's day?\nThou art more lovely and more"),
+    ("dialog_qa",          "Q: How do plants get energy?\nA: Plants get energy through"),
+    ("dialog_multi",       "Alice: I've been thinking about that book.\nBob: Which one?\nAlice:"),
+    ("technical_ml",       "A transformer is a neural network architecture that uses self-attention to"),
+    ("technical_physics",  "The second law of thermodynamics states that"),
+    ("technical_chem",     "Sodium chloride dissolves in water because"),
+    ("error_traceback",    "Traceback (most recent call last):\n  File \"app.py\", line 12, in <module>\n    result = compute("),
+    ("error_message",      "Error: Cannot read property 'name' of undefined"),
+    ("instruct_step",      "Step 1: Open the package.\nStep 2: Remove the protective film.\nStep 3:"),
+    ("instruct_recipe",    "First, preheat the oven to 350 degrees. Then,"),
+    ("hypothesis",         "If the cost of solar panels continues to fall, then"),
+    ("comparison",         "Unlike traditional methods, which rely on manual review, this approach"),
+    ("negation",           "It is not the case that all birds can fly; for example,"),
+    ("quantifier",         "Every student in the class submitted their assignment except for"),
+    ("temporal",           "Yesterday I went to the store, today I am working from home, and tomorrow I will"),
+    ("conditional",        "If it rains tomorrow, we will need to"),
+    ("causal",             "Because the engine overheated, the car"),
+    ("definition_term",    "Machine learning is a subset of artificial intelligence that involves"),
+    ("history_fact",       "World War II ended in"),
+    ("geography_river",    "The longest river in the world is the"),
+    ("biology_cell",       "The mitochondria of a cell are responsible for"),
+    ("idiom_spill",        "When she said 'spill the beans,' she meant"),
+    ("idiom_back",         "He said it was a piece of cake, meaning that the task was"),
+    ("longform_essay",     "The Industrial Revolution fundamentally transformed human society through three primary mechanisms: first, the mechanization of production processes; second,"),
 ]
 
 
