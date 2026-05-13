@@ -32,3 +32,6 @@ Testing/
 
 # Datasets (downloaded locally; the archive holds reference copies)
 data/
+
+__pycache__/
+*.pyc
