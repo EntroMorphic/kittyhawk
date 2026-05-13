@@ -198,6 +198,16 @@ def _simplify(node):
         # 0 - x -> neg(x)
         if a == ("const", 0):
             return _simplify(("neg", b))
+        # (e + b) - b  →  e   (additive cancellation in mixed expr)
+        if isinstance(a, tuple) and a[0] == "add":
+            for i, k in enumerate(a[1:], start=1):
+                if k == b:
+                    rest = [c for j, c in enumerate(a[1:], start=1) if j != i]
+                    if not rest:
+                        return ("const", 0)
+                    if len(rest) == 1:
+                        return rest[0]
+                    return _simplify(("add", *rest))
         return ("sub", a, b)
     if op == "div":
         a = _simplify(node[1])
@@ -212,6 +222,16 @@ def _simplify(node):
         # assume so for canonicalization purposes)
         if a == b:
             return ("const", 1)
+        # (e * b) / b  →  e   (multiplicative cancellation)
+        if isinstance(a, tuple) and a[0] == "mul":
+            for i, k in enumerate(a[1:], start=1):
+                if k == b:
+                    rest = [c for j, c in enumerate(a[1:], start=1) if j != i]
+                    if not rest:
+                        return ("const", 1)
+                    if len(rest) == 1:
+                        return rest[0]
+                    return _simplify(("mul", *rest))
         return ("div", a, b)
     if op == "add":
         kids = [_simplify(a) for a in node[1:]]

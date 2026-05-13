@@ -266,17 +266,18 @@ def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
         return sig
     if op == "add":
         kids = [signature(a, d=d) for a in ast[1:]]
-        # Reduce left-fold; saturating add is NOT associative in general,
-        # but we use a deterministic order: sort by signature L1 norm
-        # then by lexicographic order of the underlying AST.
-        # To make commutativity hold reliably, sort children by their
-        # (signature bytes) before reducing.
-        order = sorted(range(len(kids)), key=lambda i: kids[i].tobytes())
-        kids = [kids[i] for i in order]
-        out = kids[0]
-        for k in kids[1:]:
-            out = route_add(out, k)
-        return out
+        # n-ary add: sum-then-saturate (associativity by construction).
+        # Sequential pairwise saturating add would break deep
+        # distributivity ((a+b)*(c+d) ≠ ac+ad+bc+bd) because of
+        # intermediate saturations. Computing the full sum first and
+        # saturating at the end makes the operation truly
+        # commutative-associative on the substrate.
+        if not kids:
+            return np.zeros(d, dtype=np.int8)
+        s = np.zeros(d, dtype=np.int32)
+        for k in kids:
+            s += k.astype(np.int32)
+        return np.clip(s, -1, 1).astype(np.int8)
     if op == "mul":
         kids = [signature(a, d=d) for a in ast[1:]]
         order = sorted(range(len(kids)), key=lambda i: kids[i].tobytes())
