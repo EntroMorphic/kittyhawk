@@ -172,7 +172,7 @@ def fp_from_int(n: int, scale: int = SCALE_DEFAULT,
 # Taylor exp
 # ─────────────────────────────────────────────────────────────────────
 
-def exp_taylor(x: FixedPoint, n_terms: int = 40) -> FixedPoint:
+def exp_taylor(x: FixedPoint, n_terms: int = 200) -> FixedPoint:
     """Compute exp(x) via Taylor series: 1 + x + x²/2! + x³/3! + ...
 
     Terminates when the next term's magnitude falls below 3^-scale
@@ -212,8 +212,13 @@ def exp_taylor(x: FixedPoint, n_terms: int = 40) -> FixedPoint:
 # First iteration: accept x > 0 in any range, take up to n_terms.
 # ─────────────────────────────────────────────────────────────────────
 
-def log_taylor(x: FixedPoint, n_terms: int = 100) -> FixedPoint:
-    """Compute log(x) via 2·atanh((x-1)/(x+1)) series."""
+def log_taylor(x: FixedPoint, n_terms: int = 200) -> FixedPoint:
+    """Compute log(x) via 2·atanh((x-1)/(x+1)) series. Raises
+    ValueError on non-positive x (log undefined at 0, complex for
+    negatives)."""
+    x_val = fp_decode(x)
+    if x_val <= 0:
+        raise ValueError(f"log_taylor requires positive x, got {x_val}")
     one = fp_from_int(1, x.scale, len(x.trits))
     u = fp_div(fp_sub(x, one), fp_add(x, one))   # (x-1)/(x+1)
     u_sq = fp_mul(u, u)

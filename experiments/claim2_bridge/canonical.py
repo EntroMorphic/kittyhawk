@@ -311,6 +311,10 @@ def _simplify(node):
         kids = [k for k in kids if k != ("const", 0)]
         # fold pure-numeric children via balanced-ternary substrate
         kids = _partition_fold(kids, "add")
+        # log identity: add(log(a), log(b), ...) -> log(mul(a, b, ...))
+        if kids and all(isinstance(k, tuple) and k[0] == "log" for k in kids):
+            args = [k[1] for k in kids]
+            return _simplify(("log", ("mul", *args)))
         # cancel x + neg(x)
         out = []
         used = [False] * len(kids)
@@ -355,12 +359,52 @@ def _simplify(node):
             return ("const", 1)
         if len(kids) == 1:
             return kids[0]
+        # exp identity: mul(exp(a), exp(b), ...) -> exp(add(a, b, ...))
+        if all(isinstance(k, tuple) and k[0] == "exp" for k in kids):
+            args = [k[1] for k in kids]
+            return _simplify(("exp", ("add", *args)))
         return ("mul", *kids)
     return node
 
 
+def _rewrite_explog_identities(node):
+    """Bottom-up rewrite of exp/log algebraic identities:
+       mul(exp(a), exp(b), ...) -> exp(add(a, b, ...))
+       add(log(a), log(b), ...) -> log(mul(a, b, ...))
+    Applied as a pre-pass so pure-numeric folding doesn't short-circuit
+    before the rewrite fires."""
+    if not isinstance(node, tuple):
+        return node
+    op = node[0]
+    if op == "fp_const":
+        return node
+    args = [_rewrite_explog_identities(a) for a in node[1:]]
+    if op == "mul" and len(args) >= 2 and all(
+            isinstance(a, tuple) and a[0] == "exp" for a in args):
+        sum_args = [a[1] for a in args]
+        return _rewrite_explog_identities(("exp", ("add", *sum_args)))
+    if op == "add" and len(args) >= 2 and all(
+            isinstance(a, tuple) and a[0] == "log" for a in args):
+        prod_args = [a[1] for a in args]
+        return _rewrite_explog_identities(("log", ("mul", *prod_args)))
+    # exp(log(e)) -> e, log(exp(e)) -> e
+    if op == "exp" and isinstance(args[0], tuple) and args[0][0] == "log":
+        return args[0][1]
+    if op == "log" and isinstance(args[0], tuple) and args[0][0] == "exp":
+        return args[0][1]
+    # 1 / exp(a) -> exp(-a) and -1 / exp(a) -> -exp(-a)
+    if op == "div" and len(args) == 2 and args[0] == ("const", 1):
+        b = args[1]
+        if isinstance(b, tuple) and b[0] == "exp":
+            return _rewrite_explog_identities(("exp", ("neg", b[1])))
+    return (op, *args)
+
+
 def canonicalize(node):
     """Run flatten → simplify → sort to fixed point."""
+    # Pre-pass: rewrite exp/log identities so pure-numeric folding
+    # produces the same canonical form regardless of input shape.
+    node = _rewrite_explog_identities(node)
     prev = None
     cur = node
     for _ in range(20):  # bounded iteration
