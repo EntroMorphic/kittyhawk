@@ -26,8 +26,10 @@ from typing import Any
 
 try:
     from .parser import parse
+    from .numeric import encode, balt_add, balt_neg, balt_mul, decode
 except ImportError:
     from parser import parse
+    from numeric import encode, balt_add, balt_neg, balt_mul, decode
 
 
 D_DEFAULT = 128
@@ -77,11 +79,98 @@ def _sort_canonical(node):
     return node
 
 
+def _is_pure_numeric(node) -> bool:
+    """A subtree is pure-numeric if it has no variable references."""
+    if not isinstance(node, tuple):
+        return False
+    op = node[0]
+    if op == "var":
+        return False
+    if op == "const":
+        return True
+    return all(_is_pure_numeric(a) for a in node[1:])
+
+
+def _fold_numeric(node):
+    """Evaluate a pure-numeric subtree using balanced-ternary substrate
+    routings. Returns ('const', value). Used when the entire subtree is
+    constants — exercises balt_add/balt_neg/balt_mul as the actual
+    computation, then decodes back to the integer constant for the
+    canonical AST."""
+    if not isinstance(node, tuple):
+        return node
+    op = node[0]
+    if op == "const":
+        return node
+    if op == "neg":
+        inner = _fold_numeric(node[1])
+        sig = balt_neg(encode(inner[1]))
+        return ("const", decode(sig))
+    if op == "sub":
+        a = _fold_numeric(node[1])
+        b = _fold_numeric(node[2])
+        sig = balt_add(encode(a[1]), balt_neg(encode(b[1])))
+        return ("const", decode(sig))
+    if op == "add":
+        kids = [_fold_numeric(a) for a in node[1:]]
+        acc = encode(kids[0][1])
+        for k in kids[1:]:
+            acc = balt_add(acc, encode(k[1]))
+        return ("const", decode(acc))
+    if op == "mul":
+        kids = [_fold_numeric(a) for a in node[1:]]
+        acc = encode(kids[0][1])
+        for k in kids[1:]:
+            acc = balt_mul(acc, encode(k[1]))
+        return ("const", decode(acc))
+    raise ValueError(f"_fold_numeric: unknown op {op!r}")
+
+
+def _partition_fold(kids, op):
+    """For an n-ary add/mul, fold the pure-numeric children into a
+    single constant using balanced-ternary routings, leave the rest
+    untouched. Returns the (possibly shorter) kids list."""
+    numeric_vals = []
+    mixed = []
+    for k in kids:
+        if _is_pure_numeric(k):
+            n = _fold_numeric(k)
+            # n is now ('const', value); extract value
+            numeric_vals.append(n[1])
+        else:
+            mixed.append(k)
+    if not numeric_vals:
+        return mixed
+    if op == "add":
+        acc = encode(numeric_vals[0])
+        for v in numeric_vals[1:]:
+            acc = balt_add(acc, encode(v))
+        folded = decode(acc)
+    else:  # mul
+        acc = encode(numeric_vals[0])
+        for v in numeric_vals[1:]:
+            acc = balt_mul(acc, encode(v))
+        folded = decode(acc)
+    # If folded numeric is the identity for this op, drop it.
+    if op == "add" and folded == 0:
+        return mixed
+    if op == "mul" and folded == 1:
+        return mixed
+    if op == "mul" and folded == 0:
+        return [("const", 0)]
+    if not mixed:
+        return [("const", folded)]
+    return mixed + [("const", folded)]
+
+
 def _simplify(node):
     """Apply identity / absorbing element rules."""
     if not isinstance(node, tuple):
         return node
     op = node[0]
+    # Pure-numeric subtree → fold through balanced-ternary substrate.
+    if _is_pure_numeric(node):
+        return _fold_numeric(node)
     if op == "neg":
         a = _simplify(node[1])
         if isinstance(a, tuple) and a[0] == "neg":
@@ -105,6 +194,8 @@ def _simplify(node):
         kids = [_simplify(a) for a in node[1:]]
         # drop zero terms
         kids = [k for k in kids if k != ("const", 0)]
+        # fold pure-numeric children via balanced-ternary substrate
+        kids = _partition_fold(kids, "add")
         # cancel x + neg(x)
         out = []
         used = [False] * len(kids)
@@ -139,6 +230,12 @@ def _simplify(node):
             return ("const", 0)
         # drop ones
         kids = [k for k in kids if k != ("const", 1)]
+        if not kids:
+            return ("const", 1)
+        # fold pure-numeric children
+        kids = _partition_fold(kids, "mul")
+        if any(k == ("const", 0) for k in kids):
+            return ("const", 0)
         if not kids:
             return ("const", 1)
         if len(kids) == 1:

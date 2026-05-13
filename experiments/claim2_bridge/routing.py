@@ -34,8 +34,10 @@ import numpy as np
 
 try:
     from .parser import parse
+    from .numeric import encode, balt_add, balt_neg, balt_mul, decode
 except ImportError:
     from parser import parse
+    from numeric import encode, balt_add, balt_neg, balt_mul, decode
 
 
 D_DEFAULT = 128
@@ -118,7 +120,8 @@ def route_neg(a: np.ndarray) -> np.ndarray:
 def _flatten(node):
     """Flatten nested ('add', ...) and ('mul', ...) into n-ary form so
     that downstream sort-and-reduce gives a canonical commutative
-    result regardless of how the parser nested the chain."""
+    result regardless of how the parser nested the chain. Also folds
+    pure-numeric children via balanced-ternary substrate routings."""
     if not isinstance(node, tuple):
         return node
     op = node[0]
@@ -130,14 +133,90 @@ def _flatten(node):
                 flat.extend(a[1:])
             else:
                 flat.append(a)
+        # Partition pure-numeric children, fold them via balt routings.
+        numeric_vals = []
+        mixed = []
+        for k in flat:
+            if _is_pure_numeric(k):
+                numeric_vals.append(_fold_numeric(k))
+            else:
+                mixed.append(k)
+        if numeric_vals:
+            if op == "add":
+                acc = encode(numeric_vals[0])
+                for v in numeric_vals[1:]:
+                    acc = balt_add(acc, encode(v))
+                folded = decode(acc)
+                if folded == 0 and mixed:
+                    return (op, *mixed) if len(mixed) > 1 else mixed[0]
+                if not mixed:
+                    return ("const", folded)
+                return (op, *mixed, ("const", folded))
+            if op == "mul":
+                acc = encode(numeric_vals[0])
+                for v in numeric_vals[1:]:
+                    acc = balt_mul(acc, encode(v))
+                folded = decode(acc)
+                if folded == 0:
+                    return ("const", 0)
+                if folded == 1 and mixed:
+                    return (op, *mixed) if len(mixed) > 1 else mixed[0]
+                if not mixed:
+                    return ("const", folded)
+                return (op, *mixed, ("const", folded))
         return (op, *flat)
     return (op, *args)
 
 
+def _is_pure_numeric(node) -> bool:
+    if not isinstance(node, tuple):
+        return False
+    op = node[0]
+    if op == "var":
+        return False
+    if op == "const":
+        return True
+    return all(_is_pure_numeric(a) for a in node[1:])
+
+
+def _fold_numeric(node) -> int:
+    if not isinstance(node, tuple):
+        raise ValueError(f"unexpected non-tuple {node!r}")
+    op = node[0]
+    if op == "const":
+        return node[1]
+    if op == "neg":
+        return decode(balt_neg(encode(_fold_numeric(node[1]))))
+    if op == "sub":
+        return decode(balt_add(encode(_fold_numeric(node[1])),
+                                balt_neg(encode(_fold_numeric(node[2])))))
+    if op == "add":
+        acc = encode(_fold_numeric(node[1]))
+        for child in node[2:]:
+            acc = balt_add(acc, encode(_fold_numeric(child)))
+        return decode(acc)
+    if op == "mul":
+        acc = encode(_fold_numeric(node[1]))
+        for child in node[2:]:
+            acc = balt_mul(acc, encode(_fold_numeric(child)))
+        return decode(acc)
+    raise ValueError(f"_fold_numeric: unknown op {op!r}")
+
+
 def signature(ast, d: int = D_DEFAULT) -> np.ndarray:
-    """Bottom-up evaluation of the AST through the routing primitives."""
+    """Bottom-up evaluation of the AST through the routing primitives.
+
+    Pure-numeric subtrees are folded through balanced-ternary
+    substrate routings (`numeric.balt_*`) and become single ('const', n)
+    leaves. Mixed (variable-containing) subtrees use the element-wise
+    abstract routings."""
     if not isinstance(ast, tuple):
         raise ValueError(f"expected tuple AST, got {ast!r}")
+    if _is_pure_numeric(ast):
+        # Substrate-level balanced-ternary computation yields a single
+        # integer; convert via the existing base_sig_const path so the
+        # downstream signature aligns with how other code sees constants.
+        ast = ("const", _fold_numeric(ast))
     ast = _flatten(ast)
     op = ast[0]
     if op == "var":
