@@ -245,6 +245,17 @@ def _simplify(node):
     if _is_pure_numeric(node):
         if _subtree_needs_fp(node):
             fp = _fold_to_fp(node, SCALE_DEFAULT)
+            # If the folded value rounds to an integer within tolerance,
+            # demote to an integer const so it aligns with integer-
+            # literal signatures (closing the fp-vs-integer design
+            # tension). Absolute tolerance 1e-9: tight enough that
+            # math.exp(30)=10686474581524.463 won't demote (distance
+            # 0.463), loose enough to absorb Taylor convergence noise
+            # (much smaller than 1e-9 at scale 3^-40).
+            v = fp_decode(fp)
+            r = round(v)
+            if abs(v - r) < 1e-9:
+                return ("const", int(r))
             return ("fp_const", tuple(int(t) for t in fp.trits), fp.scale)
         return _fold_numeric(node)
     # Recurse into exp/log when arg is mixed: simplify the argument.
@@ -367,10 +378,51 @@ def _simplify(node):
     return node
 
 
+def _is_definitely_positive(node) -> bool:
+    """Static check: can we prove this subtree always evaluates to
+    a positive real? Returns False if we can't prove it (conservative).
+
+    Cases we recognize:
+      - integer const n with n > 0.
+      - fp_const whose decoded value > 0.
+      - exp(_) of anything (exp is always positive in reals).
+      - mul/add of provably-positive operands.
+      - variable — pragmatically treat as positive (preserves the
+        common algebraic-identity case for symbolic variables; the
+        caller asserts positivity by writing log(var)).
+    Everything else: False (be conservative; let log_taylor raise at
+    runtime if the value turns out non-positive)."""
+    if not isinstance(node, tuple):
+        return False
+    op = node[0]
+    if op == "const":
+        return node[1] > 0
+    if op == "fp_const":
+        # decode without importing fp_decode to avoid cycle: trits at scale.
+        v = 0
+        p = 1
+        for c in node[1]:
+            v += int(c) * p
+            p *= 3
+        return v > 0
+    if op == "exp":
+        return True
+    if op == "var":
+        return True  # pragmatic: caller asserts positivity by using log(var)
+    if op == "mul":
+        return all(_is_definitely_positive(a) for a in node[1:])
+    if op == "add":
+        return all(_is_definitely_positive(a) for a in node[1:])
+    return False
+
+
 def _rewrite_explog_identities(node):
     """Bottom-up rewrite of exp/log algebraic identities:
        mul(exp(a), exp(b), ...) -> exp(add(a, b, ...))
        add(log(a), log(b), ...) -> log(mul(a, b, ...))
+       exp(log(e)) -> e   ONLY when e is provably positive.
+       log(exp(e)) -> e   (always safe; exp > 0 always).
+       1 / exp(a) -> exp(-a)
     Applied as a pre-pass so pure-numeric folding doesn't short-circuit
     before the rewrite fires."""
     if not isinstance(node, tuple):
@@ -387,12 +439,18 @@ def _rewrite_explog_identities(node):
             isinstance(a, tuple) and a[0] == "log" for a in args):
         prod_args = [a[1] for a in args]
         return _rewrite_explog_identities(("log", ("mul", *prod_args)))
-    # exp(log(e)) -> e, log(exp(e)) -> e
+    # exp(log(e)) -> e  only when log(e) is well-defined (e > 0).
+    # For e ≤ 0, leave the expression alone so log_taylor raises.
     if op == "exp" and isinstance(args[0], tuple) and args[0][0] == "log":
-        return args[0][1]
+        inner = args[0][1]
+        if _is_definitely_positive(inner):
+            return inner
+        # else: keep the exp(log(e)) form; downstream log_taylor will
+        # raise ValueError if e ≤ 0 at evaluation time.
+    # log(exp(e)) -> e  always safe (exp is always positive in reals).
     if op == "log" and isinstance(args[0], tuple) and args[0][0] == "exp":
         return args[0][1]
-    # 1 / exp(a) -> exp(-a) and -1 / exp(a) -> -exp(-a)
+    # 1 / exp(a) -> exp(-a)  always safe (exp > 0).
     if op == "div" and len(args) == 2 and args[0] == ("const", 1):
         b = args[1]
         if isinstance(b, tuple) and b[0] == "exp":
