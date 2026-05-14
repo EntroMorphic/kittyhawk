@@ -1,0 +1,76 @@
+{
+  "anchors": [
+    {
+      "w": [
+        0,
+        0,
+        0
+      ],
+      "delta": 0.0,
+      "source": "random (definitional baseline)"
+    },
+    {
+      "w": [
+        -1,
+        0,
+        0
+      ],
+      "delta": -5.5,
+      "source": "fifo (N=100 closeout)"
+    },
+    {
+      "w": [
+        0,
+        1,
+        0
+      ],
+      "delta": -7.0,
+      "source": "sigdist (N=100 closeout)"
+    },
+    {
+      "w": [
+        0,
+        0,
+        1
+      ],
+      "delta": 6.4,
+      "source": "qsigdist (N=100 closeout)"
+    },
+    {
+      "w": [
+        0,
+        -1,
+        1
+      ],
+      "delta": -3.0,
+      "source": "meta(0,-1,+1) (2026-05-14 iteration 1)"
+    },
+    {
+      "w": [
+        0,
+        1,
+        1
+      ],
+      "delta": 2.0,
+      "source": "meta_iterate iteration 2; predicted +15.8pp"
+    },
+    {
+      "w": [
+        1,
+        1,
+        1
+      ],
+      "delta": 4.25,
+      "source": "meta_iterate iteration 3; predicted +9.8pp"
+    },
+    {
+      "w": [
+        0,
+        -1,
+        0
+      ],
+      "delta": -13.875000000000002,
+      "source": "meta_iterate iteration 4; predicted +7.0pp"
+    }
+  ]
+}

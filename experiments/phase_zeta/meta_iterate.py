@@ -124,16 +124,25 @@ def select_model(n_anchors: int):
 
 
 def fit_model(anchors: list[dict]):
-    """Returns (predict_fn, model_label)."""
+    """Returns (predict_fn, model_label, coeffs).
+
+    Always uses lstsq (min-norm) so the fit succeeds even when the
+    design matrix is singular — which happens whenever the anchor set
+    doesn't span the feature space (e.g., 7 anchors but the w_r·w_kk
+    and w_r·w_qk columns are linearly dependent because w_r is 0
+    everywhere except at one anchor where both interactions = 1).
+
+    When singular, min-norm gives a unique answer but it's an
+    UNDERDETERMINED fit — many feature combinations could explain the
+    data equally well. The label includes a note when this happens
+    so the user knows the model isn't fully pinned."""
     feat, label = select_model(len(anchors))
     X = np.array([feat(tuple(a["w"])) for a in anchors])
     y = np.array([a["delta"] for a in anchors])
-    if X.shape[0] == X.shape[1]:
-        # Exactly determined
-        coeffs = np.linalg.solve(X, y)
-    else:
-        # Over- or underdetermined: min-norm lstsq
-        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    coeffs, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
+    n_params = X.shape[1]
+    if rank < n_params:
+        label = label + f"  [WARNING: design rank {rank}/{n_params} — partly underdetermined]"
 
     def predict(w):
         return float(np.dot(feat(tuple(w)), coeffs))
