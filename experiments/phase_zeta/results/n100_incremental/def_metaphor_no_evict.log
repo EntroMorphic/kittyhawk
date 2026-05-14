@@ -1,0 +1,9 @@
+[bitnet_weights] loaded 30 layers (lm_head tied to embedding)
+[bitnet_weights] re-packed ternary weights to 4-in-8 (496 MB) for bit-faithful BitLinear path
+[harness] loaded weights from data/bitnet_b158_2b4t.bin
+[harness] gen_loop_seconds = 8.8070  n_generate = 24  seconds_per_token = 0.3670  prompt_tokens = 9  attn_seconds = 0.0103  attn_seconds_per_token = 0.0004  attn_fraction = 0.001
+     argmax over full vocab        = 1102
+[ok] 30 layer(s) forward pass completed (token_id=1, positions=9, generated=24).
+     post-final-norm x[0..3]      = 136 373 264 1791
+     logits[0..3]                  = 231 -31 205 -291
+     generated tokens             = 43565 1403 20426 2574 555 5605 832 3245 374 1093 2500 13 1102 374 264 12593 315 1403 2574 430 527 539 27083 13
