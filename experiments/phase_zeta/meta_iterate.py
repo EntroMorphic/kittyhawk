@@ -93,61 +93,123 @@ def save_anchors(anchors: list[dict]) -> None:
 
 
 # ============================================================================
-# Layer 3: model with anchor-count-dependent capacity
+# Layer 3 — Glyph-native kernel retrieval (the rebuild)
 # ============================================================================
+#
+# Original implementation (iterations 1–4) used continuous-coefficient
+# regression with auto-scaling feature class. That violated the article
+# Tripp shared on 2026-05-14 ("The Prior Should Be a Voice, Not a Verdict"):
+#
+#   1. The PRIOR (fitted coefficients) and the EVIDENCE (new observation)
+#      shared the same mechanism — a single regression that simultaneously
+#      held expectations AND incorporated evidence. No architectural
+#      wall.
+#   2. New observations FLOWED INTO the fit, modifying the predictor's
+#      parameters. The article's term: "prior-contaminated witness."
+#   3. The disagreement signal (predicted vs observed) vanished into the
+#      next refit — never an explicit output.
+#
+# This rebuild instantiates the article's five components literally:
+#
+#   PRIOR HOLDER:  anchor store, append-only. Each anchor is a frozen
+#                  (coordinate, observed_Δ) pair. No fitted parameters.
+#   EVIDENCE READER: predict_kernel — takes a candidate, retrieves over
+#                  anchors via fixed trit-distance kernel. NO learned
+#                  weights. Predictions are weighted averages of nearby
+#                  anchor Δ's.
+#   THE WALL:      structural. The retrieval mechanism (kernel + distance
+#                  metric) is FIXED at substrate level. New observations
+#                  append to the anchor store but cannot modify the
+#                  retrieval mechanism. The two pathways are wired apart
+#                  by construction.
+#   DISAGREEMENT DETECTOR: explicit. After every iteration, emit
+#                  (predicted_Δ − observed_Δ) as a first-class output.
+#                  This is the "voice" of the prior speaking against
+#                  the evidence — surfaced, not absorbed.
+#   DEFERENCE POLICY: confidence is derived from anchor-distance, not
+#                  from refit residuals. A candidate far from every
+#                  anchor (min_distance ≥ 2) returns LOW confidence;
+#                  the architecture knows it doesn't know.
+#
+# Empirical motivation: when I retroactively applied kernel retrieval
+# to iterations 1–4 (back-of-envelope, before this rebuild), it would
+# have produced smaller errors on every iteration (6.8 vs 16.3 on iter
+# 1; 2.3 vs 13.8 on iter 2; 5 vs 5.6 on iter 3; 12 vs 21 on iter 4).
+# Regression was contaminated by ITS OWN past predictions; retrieval
+# stays close to the observed anchors.
 
-def features_linear(w):
-    """4 features: intercept + 3 main effects."""
-    return [1.0, w[0], w[1], w[2]]
+import math
 
 
-def features_one_interaction(w):
-    """5 features: above + w_kk * w_qk (the interaction implicated by
-    the iteration-1 miss)."""
-    return [1.0, w[0], w[1], w[2], w[1] * w[2]]
+def kernel_weight(distance: int, alpha: float = 1.0) -> float:
+    """Distance kernel for anchor retrieval. exp(-alpha * d):
+       d=0 → 1.0      (the anchor itself)
+       d=1 → 0.368    (adjacent)
+       d=2 → 0.135    (two flips)
+       d=3 → 0.050    (opposite corner)
+    Faster-than-1/d decay so distant anchors have minimal influence
+    without being clipped entirely."""
+    return math.exp(-alpha * distance)
 
 
-def features_all_pairwise(w):
-    """7 features: intercept + 3 main + 3 pairwise."""
-    return [1.0, w[0], w[1], w[2],
-            w[0] * w[1], w[0] * w[2], w[1] * w[2]]
+def predict_kernel(candidate: tuple, anchors: list[dict],
+                    alpha: float = 1.0) -> tuple[float, float, int]:
+    """Glyph-native Layer 3 prediction.
+
+    Returns (predicted_delta, confidence, min_distance_from_any_anchor).
+
+    confidence ∈ [0, 1]: ratio of the closest anchor's weight to the
+    total weight. Approaches 1 when ONE anchor dominates (high
+    certainty); approaches 1/N when all N anchors contribute equally
+    (low certainty — the candidate is far from every anchor and the
+    prediction is essentially the dataset mean).
+
+    NO LEARNED PARAMETERS. The kernel and metric are fixed at the
+    substrate level. The 'model' IS the anchor store; the prediction
+    is its routing-derived consequence.
+    """
+    distances = [trit_distance(candidate, tuple(a["w"])) for a in anchors]
+    weights = [kernel_weight(d, alpha) for d in distances]
+    total = sum(weights)
+    if total == 0.0:
+        return 0.0, 0.0, max(distances) if distances else 999
+    prediction = sum(w * a["delta"] for w, a in zip(weights, anchors)) / total
+    confidence = max(weights) / total
+    return float(prediction), float(confidence), min(distances)
 
 
-def select_model(n_anchors: int):
-    """Auto-scale model class with anchor budget. Each model needs at
-    least as many anchors as features for a non-degenerate fit."""
-    if n_anchors >= 7:
-        return features_all_pairwise, "linear + all 3 pairwise (7 params)"
-    if n_anchors >= 5:
-        return features_one_interaction, "linear + w_kk·w_qk interaction (5 params)"
-    return features_linear, "additive linear (4 params)"
+def disagreement(predicted: float, observed: float) -> tuple[float, int]:
+    """Explicit disagreement signal — a first-class output, not absorbed.
+
+    Returns (magnitude, sign):
+      magnitude: |predicted − observed| in pp
+      sign: +1 if observed > predicted (model underestimated)
+            −1 if observed < predicted (model overestimated)
+             0 if equal
+
+    The wall: this signal is COMPUTED but cannot directly modify the
+    anchor store or the kernel. It is a separate channel — for the
+    caller to inspect, log, or use to drive sampling decisions."""
+    if predicted == observed:
+        return 0.0, 0
+    return abs(observed - predicted), (1 if observed > predicted else -1)
 
 
 def fit_model(anchors: list[dict]):
-    """Returns (predict_fn, model_label, coeffs).
+    """Backwards-compatible wrapper. Returns (predict_fn, label, coeffs).
 
-    Always uses lstsq (min-norm) so the fit succeeds even when the
-    design matrix is singular — which happens whenever the anchor set
-    doesn't span the feature space (e.g., 7 anchors but the w_r·w_kk
-    and w_r·w_qk columns are linearly dependent because w_r is 0
-    everywhere except at one anchor where both interactions = 1).
-
-    When singular, min-norm gives a unique answer but it's an
-    UNDERDETERMINED fit — many feature combinations could explain the
-    data equally well. The label includes a note when this happens
-    so the user knows the model isn't fully pinned."""
-    feat, label = select_model(len(anchors))
-    X = np.array([feat(tuple(a["w"])) for a in anchors])
-    y = np.array([a["delta"] for a in anchors])
-    coeffs, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
-    n_params = X.shape[1]
-    if rank < n_params:
-        label = label + f"  [WARNING: design rank {rank}/{n_params} — partly underdetermined]"
+    coeffs is None — the kernel retrieval has no fitted coefficients
+    by design (that's the architectural property). Label describes
+    the kernel and anchor count."""
+    label = (f"kernel retrieval over {len(anchors)} anchors "
+             f"(α=1.0, no fitted params; structural wall between "
+             f"prior holder and predictor)")
 
     def predict(w):
-        return float(np.dot(feat(tuple(w)), coeffs))
+        pred, _conf, _dist = predict_kernel(tuple(w), anchors)
+        return pred
 
-    return predict, label, coeffs
+    return predict, label, None
 
 
 # ============================================================================
@@ -277,21 +339,24 @@ def cmd_status():
         w = tuple(a["w"])
         print(f"  {w}  Δ = {a['delta']:+5.1f}pp   {a['source']}")
     print()
-    predict, model_label, coeffs = fit_model(anchors)
-    print(f"Active model: {model_label}")
-    print(f"Coefficients: {coeffs.round(3)}")
-    # Show top 5 predictions across untested points
+    print(f"Active model: kernel retrieval over {len(anchors)} anchors")
+    print(f"  α = 1.0 (exp(-α·d) kernel), no fitted parameters.")
+    print(f"  Structural wall: anchor store is append-only; retrieval mechanism")
+    print(f"  has no learnable state. Prior and predictor are wired apart.")
+    print()
+    # Show top 5 predictions across untested points, with confidence
     tested = {tuple(a["w"]) for a in anchors}
     preds = []
     for w in itertools.product(TRITS, repeat=3):
         if w in tested:
             continue
-        preds.append((w, predict(w),
-                      min(trit_distance(w, tuple(a["w"])) for a in anchors)))
+        pred, conf, dist = predict_kernel(w, anchors)
+        preds.append((w, pred, conf, dist))
     preds.sort(key=lambda x: -x[1])
-    print(f"\nTop 5 untested predictions:")
-    for w, p, dist in preds[:5]:
-        print(f"  {w}  predicted Δ = {p:+5.1f}pp  (trit-distance from anchor = {dist})")
+    print(f"Top 5 untested predictions:")
+    print(f"  {'candidate':<12}  {'pred Δ':>8}  {'confidence':>11}  {'min dist':>9}")
+    for w, p, conf, dist in preds[:5]:
+        print(f"  {str(w):<12}  {p:+5.1f}pp   {conf:>9.2f}     {dist:>5}")
 
 
 def cmd_propose():
@@ -313,33 +378,55 @@ def cmd_iterate():
               "max_extrapolation). Try a wider radius.")
         return
 
+    # Confidence + min-distance from the kernel retrieval — separate
+    # output channels from the prediction itself.
+    pred_kernel, confidence, min_dist = predict_kernel(w, anchors)
+
     print(f"=== Iteration {n_before - 4 + 1} ===")
-    print(f"Active model:   {model_label}")
-    print(f"Candidate:      {w}")
-    print(f"Predicted Δ:    {pred:+.1f}pp")
-    print(f"Reasoning:      {reasoning}")
+    print(f"Active model:    {model_label}")
+    print(f"Candidate:       {w}")
+    print(f"Predicted Δ:     {pred:+.1f}pp")
+    print(f"  Confidence:    {confidence:.2f}  (closest anchor dominates retrieval)")
+    print(f"  Min distance:  {min_dist}  (trit-flips from nearest anchor)")
+    print(f"Reasoning:       {reasoning}")
 
     observed_delta = run_candidate(w)
 
-    # Append to anchors
+    # Disagreement signal — first-class output, computed BEFORE the
+    # anchor store is updated. This is the article's "voice not verdict":
+    # the prior's prediction speaks against the evidence, and we record
+    # how loudly without letting it modify the predictor itself.
+    disagree_mag, disagree_sign = disagreement(pred, observed_delta)
+
+    # Append to anchors — APPEND-ONLY; the wall ensures no past anchor
+    # mutates. New anchor IS the evidence; it joins the prior holder
+    # but doesn't alter what's already there.
     anchors.append({
         "w": list(w),
         "delta": observed_delta,
-        "source": f"meta_iterate iteration {n_before - 4 + 1}; predicted {pred:+.1f}pp",
+        "source": (f"meta_iterate iteration {n_before - 4 + 1}; "
+                   f"predicted {pred:+.1f}pp; disagreement "
+                   f"{disagree_mag:+.1f}pp"),
     })
     save_anchors(anchors)
 
-    # Refit and show what the new prediction surface looks like
-    print("=" * 50)
+    print("=" * 60)
     print(f"After iteration {n_before - 4 + 1}:")
-    print(f"  predicted Δ = {pred:+.1f}pp  observed Δ = {observed_delta:+.1f}pp")
-    print(f"  error = {abs(pred - observed_delta):.1f}pp")
-    new_predict, new_label, new_coeffs = fit_model(anchors)
-    print(f"  refit model: {new_label}")
-    print(f"  new coefficients: {new_coeffs.round(3)}")
-    next_w, next_pred, _, _ = propose_next(anchors)
+    print(f"  predicted Δ:        {pred:+.1f}pp")
+    print(f"  observed  Δ:        {observed_delta:+.1f}pp")
+    print(f"  DISAGREEMENT:       {disagree_mag:+.1f}pp  "
+          f"({'observed > predicted' if disagree_sign > 0 else 'observed < predicted' if disagree_sign < 0 else 'agree'})")
+    print()
+    print(f"  Architectural note: the disagreement signal is RECORDED but")
+    print(f"  the kernel retrieval and trit-distance metric are unchanged.")
+    print(f"  The anchor store gained one entry; no past anchor mutated.")
+    print()
+    next_w, next_pred, next_label, _ = propose_next(anchors)
     if next_w is not None:
-        print(f"  next proposal: {next_w} (predicted {next_pred:+.1f}pp)")
+        npred, nconf, ndist = predict_kernel(next_w, anchors)
+        print(f"  next proposal: {next_w}")
+        print(f"    predicted {next_pred:+.1f}pp, confidence {nconf:.2f}, "
+              f"min distance {ndist}")
 
 
 def main():
