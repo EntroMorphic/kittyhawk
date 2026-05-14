@@ -71,6 +71,51 @@
       ],
       "delta": -13.875000000000002,
       "source": "meta_iterate iteration 4; predicted +7.0pp"
+    },
+    {
+      "w": [
+        -1,
+        1,
+        1
+      ],
+      "delta": 3.5416666666666674,
+      "source": "meta_iterate iteration 5; predicted +4.3pp"
+    },
+    {
+      "w": [
+        1,
+        0,
+        1
+      ],
+      "delta": 5.0,
+      "source": "meta_iterate iteration 6; predicted +2.0pp; disagreement +3.0pp"
+    },
+    {
+      "w": [
+        -1,
+        0,
+        1
+      ],
+      "delta": 5.833333333333333,
+      "source": "meta_iterate iteration 7; predicted +0.8pp; disagreement +5.1pp"
+    },
+    {
+      "w": [
+        1,
+        -1,
+        1
+      ],
+      "delta": -4.208333333333334,
+      "source": "iter 8 alpha-prime; isotropic predicted +0.4pp, anisotropic predicted +2.9pp; disagreement 4.6pp (iso) / 7.1pp (anis); first directional miss"
+    },
+    {
+      "w": [
+        1,
+        -1,
+        0
+      ],
+      "delta": -13.666666666666666,
+      "source": "iter delta; predicted -4.7pp (iso) / -6.3pp (anis); disagreement 9.0pp (iso) / 7.3pp (anis); confirms (0,-1,0)=-13.9 was regional, not local — death zone in w_kk=-1, w_qk=0"
     }
   ]
 }

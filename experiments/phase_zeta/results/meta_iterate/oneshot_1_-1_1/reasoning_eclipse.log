@@ -1,0 +1,11 @@
+[harness] KV eviction mode = meta, window = 16
+[harness] meta weights: w_r=+1, w_kk=-1, w_qk=+1
+[bitnet_weights] loaded 30 layers (lm_head tied to embedding)
+[bitnet_weights] re-packed ternary weights to 4-in-8 (496 MB) for bit-faithful BitLinear path
+[harness] loaded weights from data/bitnet_b158_2b4t.bin
+[harness] gen_loop_seconds = 8.9318  n_generate = 24  seconds_per_token = 0.3722  prompt_tokens = 9  attn_seconds = 0.0113  attn_seconds_per_token = 0.0005  attn_fraction = 0.001
+     argmax over full vocab        = 1990
+[ok] 30 layer(s) forward pass completed (token_id=1, positions=9, generated=24).
+     post-final-norm x[0..3]      = -6 -487 -61 1608
+     logits[0..3]                  = 805 814 557 622
+     generated tokens             = 1990 279 9420 323 279 7160 13 578 18266 374 2744 304 279 1890 6138 505 279 9578 323 279 7160 13 578 6138
