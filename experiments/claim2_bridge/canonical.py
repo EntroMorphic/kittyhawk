@@ -1,17 +1,47 @@
 """Approach A: canonicalize the AST then hash to a trit signature.
 
-Canonicalization rules (semantics-preserving):
-  - Flatten nested ('add', ...) and ('mul', ...) into n-ary.
-  - Sort children of n-ary ('add', 'mul') by their canonical-form
-    hash (commutativity, associativity).
-  - Simplify identities and absorbing elements:
-      e + 0    -> e
-      e * 1    -> e
-      e * 0    -> 0
-      e - e    -> 0
-      neg(neg(e)) -> e
-      e + neg(e) -> 0
-  - Recurse to fixed point.
+Pipeline (called from canonicalize()):
+  1. _expand_products: a pre-pass that
+       - converts sub(a, b) -> add(a, neg(b)) so subtraction unifies with
+         the add path
+       - distributes mul over add via cartesian product
+       - pushes neg through add (neg(add(a, b)) -> add(neg(a), neg(b)))
+       - folds pure-numeric integer subtrees into the const_product factor
+  2. _rewrite_explog_identities: exp/log inverse, product/sum, and
+     reciprocal rewrites. Honors POSITIVITY_MODE (permissive default,
+     strict opt-in). See journal/claim2_unsoundness_designtension_fixes_*
+     for why this is gated.
+  3. Loop to fixed point: _flatten -> _simplify -> _expand_products
+     -> _flatten -> _sort_canonical. _expand_products runs inside the
+     loop (not just once) because _simplify's neg-pulling rule
+     (mul(neg(X), Y) -> neg(mul(X, Y))) can re-introduce mul-of-add
+     structures that need redistribution. Without this, canonicalize
+     would not be idempotent.
+
+_simplify applies the substrate-level rewrites:
+  - drop e+0, e*1; absorb e*0; double-neg cancel; sub/div cancellation.
+  - n-ary mul: pull negs and negative-constant factors out (with
+    even-pair cancellation).
+  - n-ary add: _combine_like_terms — group by monomial shape, sum
+    coefficients. Same-shape terms with coefficients summing to 0
+    drop out (subsumes the older explicit x+neg(x) cancel loop).
+  - Pure-numeric subtrees fold through the substrate routings
+    (balanced-ternary integer ops, or fixed-point exp/log via Taylor).
+  - fp_const demotes to ('const', n) when the decoded value is within
+    INTEGER_DEMOTE_TOL of an integer (closes the fp-vs-int design
+    tension; see tolerance_sensitivity.py for the sweep).
+
+Architectural notes:
+  - n-copy expansion (the old "2*x -> x+x" path) was retired because of
+    asymmetric behavior at the N_MAX boundary. Today's _expand_products
+    keeps every coefficient as a mul(C:n, monomial) factor; combine-
+    like-terms then coalesces same-shape terms uniformly. See
+    journal/claim2_100of100_remediation_2026-05-13.md for the trace.
+  - Routing-derived signatures (routing.py, approach B) collide
+    distinct values under saturating add (e.g., x*x+y*y vs (x+y)^2).
+    For consumer-grade equivalence detection use this module
+    (approach A); the SHA over the canonical AST is faithful. See
+    memory entry feedback_routing_vs_canonical_hash_signature.md.
 
 Hashing:
   Canonical AST is serialized to a canonical string and SHA-256 is
@@ -36,6 +66,26 @@ except ImportError:
 
 D_DEFAULT = 128
 TARGET_NONZERO_FRAC = 0.62
+
+# Integer-demotion tolerance for fp_const → ('const', n).
+#
+# Picked by the sweep in tolerance_sensitivity.py. The constraints:
+#   - LOWER: must absorb Taylor convergence noise, which empirically
+#     tops out at ~1.1e-16 (worst case: log(e) where atanh series
+#     converges slowly at u ≈ 0.462). Tolerance must be > 1.1e-16.
+#   - UPPER: must NOT absorb deliberately-small user values. A user
+#     who types 1.0 + 1e-12 means it; their value should not collapse
+#     to 1. Tolerance must be < 1e-12.
+#
+# The window (1.1e-16, 1e-12) is wide enough that any value in [1e-13,
+# 1e-15] is safe. We pick 1e-12 as the canonical choice: it's right
+# at the upper boundary (slightly aggressive on user values, generous
+# on Taylor noise), and any value < 1e-12 is preserved.
+#
+# The earlier value 1e-9 was demonstrably too loose: it would demote
+# user-typed 1e-10 to 0. That was a defensible choice for research
+# code but is tightened here for principled behavior.
+INTEGER_DEMOTE_TOL = 1e-12
 
 
 def _flatten(node):
@@ -235,6 +285,87 @@ def _partition_fold(kids, op):
     return mixed + [("const", folded)]
 
 
+def _term_shape_and_coef(node):
+    """Extract (shape, integer_coefficient) from an add-summand.
+
+    A "shape" is the monomial AST stripped of its integer coefficient;
+    the coefficient is the product of all integer-const factors. Two
+    terms with the same shape can be combined by summing coefficients.
+
+      var x                  -> (var x, 1)
+      const(n)               -> (const(1), n)         # n*1
+      neg(t)                 -> (shape, -coef)        # propagate
+      mul(C:n, ..., other)   -> (mul(...others...), n)
+      mul(other, other)      -> (mul(...), 1)
+      other op               -> (node, 1)             # treat opaquely
+    """
+    if not isinstance(node, tuple):
+        return (node, 1)
+    op = node[0]
+    if op == "const":
+        return (("const", 1), node[1])
+    if op == "neg":
+        s, c = _term_shape_and_coef(node[1])
+        return (s, -c)
+    if op == "mul":
+        coef = 1
+        non_const = []
+        for k in node[1:]:
+            if isinstance(k, tuple) and k[0] == "const":
+                coef *= k[1]
+            else:
+                non_const.append(k)
+        if not non_const:
+            return (("const", 1), coef)
+        if len(non_const) == 1:
+            return (non_const[0], coef)
+        return (("mul", *non_const), coef)
+    return (node, 1)
+
+
+def _combine_like_terms(kids):
+    """Group add-children by monomial shape and sum their coefficients.
+
+    Returns a new list of kids with same-shape terms merged. Pure-
+    numeric collapses to a single const term; coefficient ±1 yields
+    bare shape or neg(shape); other coefficients yield mul(C:n, shape).
+    """
+    if len(kids) < 2:
+        return kids
+    groups: dict[str, tuple] = {}
+    order: list[str] = []
+    for k in kids:
+        shape, coef = _term_shape_and_coef(k)
+        key = _serialize(shape)
+        if key in groups:
+            s, c = groups[key]
+            groups[key] = (s, c + coef)
+        else:
+            groups[key] = (shape, coef)
+            order.append(key)
+    out = []
+    for key in order:
+        shape, coef = groups[key]
+        if coef == 0:
+            continue
+        if shape == ("const", 1):
+            # Pure constant term
+            out.append(("const", coef))
+            continue
+        if coef == 1:
+            out.append(shape)
+        elif coef == -1:
+            out.append(("neg", shape))
+        else:
+            # Embed coefficient as a const factor in a mul. _flatten /
+            # _simplify in subsequent passes will sort and partition.
+            if isinstance(shape, tuple) and shape[0] == "mul":
+                out.append(("mul", ("const", coef), *shape[1:]))
+            else:
+                out.append(("mul", ("const", coef), shape))
+    return out
+
+
 def _simplify(node):
     """Apply identity / absorbing element rules."""
     if not isinstance(node, tuple):
@@ -248,13 +379,10 @@ def _simplify(node):
             # If the folded value rounds to an integer within tolerance,
             # demote to an integer const so it aligns with integer-
             # literal signatures (closing the fp-vs-integer design
-            # tension). Absolute tolerance 1e-9: tight enough that
-            # math.exp(30)=10686474581524.463 won't demote (distance
-            # 0.463), loose enough to absorb Taylor convergence noise
-            # (much smaller than 1e-9 at scale 3^-40).
+            # tension). See INTEGER_DEMOTE_TOL above for the rationale.
             v = fp_decode(fp)
             r = round(v)
-            if abs(v - r) < 1e-9:
+            if abs(v - r) < INTEGER_DEMOTE_TOL:
                 return ("const", int(r))
             return ("fp_const", tuple(int(t) for t in fp.trits), fp.scale)
         return _fold_numeric(node)
@@ -326,33 +454,15 @@ def _simplify(node):
         if kids and all(isinstance(k, tuple) and k[0] == "log" for k in kids):
             args = [k[1] for k in kids]
             return _simplify(("log", ("mul", *args)))
-        # cancel x + neg(x)
-        out = []
-        used = [False] * len(kids)
-        for i, k in enumerate(kids):
-            if used[i]:
-                continue
-            paired = False
-            for j in range(i + 1, len(kids)):
-                if used[j]:
-                    continue
-                if (isinstance(kids[j], tuple) and kids[j][0] == "neg"
-                        and kids[j][1] == k):
-                    used[i] = used[j] = True
-                    paired = True
-                    break
-                if (isinstance(k, tuple) and k[0] == "neg"
-                        and k[1] == kids[j]):
-                    used[i] = used[j] = True
-                    paired = True
-                    break
-            if not paired:
-                out.append(k)
-        if not out:
+        # Combine like terms by monomial shape (subsumes the older
+        # explicit x + neg(x) cancel loop: shape x with coefficients
+        # +1 and -1 sum to 0 and drop out).
+        kids = _combine_like_terms(kids)
+        if not kids:
             return ("const", 0)
-        if len(out) == 1:
-            return out[0]
-        return ("add", *out)
+        if len(kids) == 1:
+            return kids[0]
+        return ("add", *kids)
     if op == "mul":
         kids = [_simplify(a) for a in node[1:]]
         # zero absorbs
@@ -368,30 +478,95 @@ def _simplify(node):
             return ("const", 0)
         if not kids:
             return ("const", 1)
+        # Pull negations and negative-integer constants out of mul.
+        # mul(neg(a), b) -> neg(mul(a, b));  mul(C:-n, x) -> neg(mul(C:n, x)).
+        # Even count of negs cancels (e.g. mul(neg(x), neg(y)) -> mul(x, y)).
+        # This makes (x-y)*(x-y) equivalent to expand((x-y)**2) =
+        # x*x - 2*x*y + y*y at the canonical-AST level.
+        neg_count = 0
+        stripped = []
+        for k in kids:
+            if isinstance(k, tuple) and k[0] == "neg":
+                neg_count += 1
+                stripped.append(k[1])
+            elif isinstance(k, tuple) and k[0] == "const" and k[1] < 0:
+                neg_count += 1
+                if k[1] != -1:
+                    stripped.append(("const", -k[1]))
+                # else: -1 is absorbed entirely into the neg_count.
+            else:
+                stripped.append(k)
+        # Drop +1 consts that may have been left behind.
+        stripped = [k for k in stripped if k != ("const", 1)]
+        kids = stripped
+        # If everything got absorbed into neg_count, the value is +/-1.
+        if not kids:
+            return ("const", -1) if neg_count % 2 == 1 else ("const", 1)
         if len(kids) == 1:
+            if neg_count % 2 == 1:
+                return _simplify(("neg", kids[0]))
             return kids[0]
         # exp identity: mul(exp(a), exp(b), ...) -> exp(add(a, b, ...))
         if all(isinstance(k, tuple) and k[0] == "exp" for k in kids):
             args = [k[1] for k in kids]
-            return _simplify(("exp", ("add", *args)))
-        return ("mul", *kids)
+            result = _simplify(("exp", ("add", *args)))
+            if neg_count % 2 == 1:
+                return _simplify(("neg", result))
+            return result
+        result = ("mul", *kids)
+        if neg_count % 2 == 1:
+            return _simplify(("neg", result))
+        return result
     return node
 
 
-def _is_definitely_positive(node) -> bool:
+# --- Positivity contract -----------------------------------------------------
+#
+# The rewrite exp(log(e)) → e is mathematically valid only when e is
+# positive (log is undefined for e ≤ 0). _is_definitely_positive is a
+# conservative static predicate: it returns True only when the subtree
+# is provably positive.
+#
+# The treatment of `var` is a CONTRACT, not a mathematical fact:
+#
+#   - Default mode ("permissive"): a bare variable is assumed positive.
+#     This matches how symbolic algebra systems handle ambiguous
+#     identities (assume the principal-branch interpretation). It
+#     means exp(log(x)) canonicalizes to x even when x could be ≤ 0.
+#     Convenient for most algebraic manipulation; unsafe if downstream
+#     code requires log_taylor to raise on x ≤ 0.
+#
+#   - Strict mode: a bare variable is NOT assumed positive. The
+#     rewrite exp(log(x)) → x only fires when x is structurally
+#     provably positive (e.g., x = exp(something), x = positive
+#     constant). For arbitrary variables, the rewrite is suppressed,
+#     and runtime log_taylor will raise on non-positive values.
+#
+# Toggle via POSITIVITY_MODE module variable or canonicalize(...,
+# strict_positivity=True) parameter.
+POSITIVITY_PERMISSIVE = "permissive"  # default: var assumed positive
+POSITIVITY_STRICT = "strict"          # var NOT assumed positive
+POSITIVITY_MODE = POSITIVITY_PERMISSIVE
+
+
+def _is_definitely_positive(node, mode: str | None = None) -> bool:
     """Static check: can we prove this subtree always evaluates to
     a positive real? Returns False if we can't prove it (conservative).
 
-    Cases we recognize:
+    Cases we recognize (mode-independent):
       - integer const n with n > 0.
       - fp_const whose decoded value > 0.
       - exp(_) of anything (exp is always positive in reals).
-      - mul/add of provably-positive operands.
-      - variable — pragmatically treat as positive (preserves the
-        common algebraic-identity case for symbolic variables; the
-        caller asserts positivity by writing log(var)).
-    Everything else: False (be conservative; let log_taylor raise at
+      - mul/add of provably-positive operands (recursive).
+
+    Mode-dependent:
+      - variable: True in permissive mode (default), False in strict
+        mode. See contract comments above.
+
+    Everything else: False (conservative; let log_taylor raise at
     runtime if the value turns out non-positive)."""
+    if mode is None:
+        mode = POSITIVITY_MODE
     if not isinstance(node, tuple):
         return False
     op = node[0]
@@ -408,19 +583,161 @@ def _is_definitely_positive(node) -> bool:
     if op == "exp":
         return True
     if op == "var":
-        return True  # pragmatic: caller asserts positivity by using log(var)
+        return mode == POSITIVITY_PERMISSIVE
     if op == "mul":
-        return all(_is_definitely_positive(a) for a in node[1:])
+        return all(_is_definitely_positive(a, mode) for a in node[1:])
     if op == "add":
-        return all(_is_definitely_positive(a) for a in node[1:])
+        return all(_is_definitely_positive(a, mode) for a in node[1:])
     return False
 
 
-def _rewrite_explog_identities(node):
+def _expand_products(node):
+    """Distribute products of sums: mul(add(a, b), add(c, d), ...) ->
+    sum of monomials by cartesian product. Also:
+      - Converts sub(a, b) -> add(a, neg(b)) so subtraction participates
+        in distribution (and downstream cancellation rules see it).
+      - Folds pure-numeric integer subtrees (e.g., neg(const(2))) into
+        the const_product accumulator.
+      - Expands n * expr for small positive integer n into repeated
+        addition (so 2*x*y matches x*y + x*y after canonical sort).
+      - Recurses on each product after distribution so nested
+        mul(const, var) gets expanded too (e.g., mul(2, x) becomes
+        add(x, x) inside a larger distribution).
+    Bounded by a size limit so we don't blow up large expressions."""
+    import itertools
+    SIZE_LIMIT = 200   # cap on output term count from a single expansion
+    N_MAX = 20         # cap on n for "n * expr -> n copies" rewrite
+
+    if not isinstance(node, tuple):
+        return node
+    op = node[0]
+    if op == "fp_const":
+        return node
+    args = [_expand_products(a) for a in node[1:]]
+
+    # Convert sub(a, b) -> add(a, neg(b)) so subtraction can be
+    # distributed and cancelled uniformly through the add path.
+    if op == "sub":
+        return ("add", args[0], ("neg", args[1]))
+
+    # Push neg through add: neg(add(a, b, ...)) -> add(neg(a), neg(b), ...).
+    # This is the additive analogue of distributing mul over add, and
+    # makes -1*(x+y) and -(x+y) canonicalize to the same form.
+    if op == "neg":
+        inner = args[0]
+        if isinstance(inner, tuple) and inner[0] == "add":
+            negated = [_expand_products(("neg", a)) for a in inner[1:]]
+            return ("add", *negated)
+        # neg(neg(e)) -> e  (handled here for completeness; _flatten/_simplify
+        # also handle it, but folding early helps _expand_products see the
+        # underlying structure).
+        if isinstance(inner, tuple) and inner[0] == "neg":
+            return inner[1]
+        return ("neg", inner)
+
+    if op == "mul":
+        # Separate integer-valued factors (const or pure-numeric integer
+        # subtree like neg(const(n))) from genuinely non-constant
+        # factors.
+        const_product = 1
+        non_const = []
+        for a in args:
+            if isinstance(a, tuple) and a[0] == "const":
+                const_product *= a[1]
+            elif (isinstance(a, tuple) and _is_pure_numeric(a)
+                  and not _subtree_needs_fp(a)):
+                folded = _fold_numeric(a)
+                const_product *= folded[1]
+            else:
+                non_const.append(a)
+
+        # If product is zero, result is zero.
+        if const_product == 0:
+            return ("const", 0)
+
+        # If no non-constant factors, the result is a constant.
+        if not non_const:
+            return ("const", const_product)
+
+        # Distribute over any sum factors among non_const.
+        # Cartesian product of summands. We collect summands recursively
+        # so nested adds (produced by left-associative parsing) all get
+        # distributed in a single pass.
+        def _collect_summands(f):
+            if not (isinstance(f, tuple) and f[0] == "add"):
+                return [f]
+            out = []
+            for elem in f[1:]:
+                out.extend(_collect_summands(elem))
+            return out
+
+        factor_summands = [_collect_summands(f) for f in non_const]
+
+        # Predicted term count after distribution
+        term_count = 1
+        for fs in factor_summands:
+            term_count *= len(fs)
+        if term_count > SIZE_LIMIT:
+            # Too big; keep folded
+            rebuild = list(non_const)
+            if const_product != 1:
+                rebuild.append(("const", const_product))
+            if len(rebuild) == 1:
+                return rebuild[0]
+            return ("mul", *rebuild)
+
+        products = []
+        for combo in itertools.product(*factor_summands):
+            if len(combo) == 1:
+                prod = combo[0]
+            else:
+                prod = ("mul", *combo)
+            # Recurse only when the combo contains an integer-valued
+            # factor (const or pure-numeric integer subtree); that's
+            # the only case where re-expansion can change the structure
+            # (n*expr -> add of n copies). Unconditional recursion
+            # would infinite-loop on mul(x, y) which returns itself.
+            if any(
+                (isinstance(c, tuple) and c[0] == "const") or
+                (isinstance(c, tuple) and _is_pure_numeric(c)
+                 and not _subtree_needs_fp(c))
+                for c in combo
+            ):
+                prod = _expand_products(prod)
+            products.append(prod)
+
+        # Apply the const_product. We do NOT expand n*monomial into n
+        # copies — that approach causes asymmetry around the N_MAX
+        # boundary (3*7 expands to 21 copies via nested calls, but
+        # mul(C:21, ...) doesn't, so 3*7*expr and 21*expr canonicalize
+        # differently). Instead, every coefficient is preserved as a
+        # mul(C:n, ...) factor; combine_like_terms in _simplify-add
+        # then groups identical shapes and sums their coefficients,
+        # giving a unique normal form regardless of how the user
+        # wrote the const factor.
+        if const_product == 1:
+            if len(products) == 1:
+                return products[0]
+            return ("add", *products)
+        if const_product == -1:
+            if len(products) == 1:
+                return ("neg", products[0])
+            return ("add", *[("neg", t) for t in products])
+        # General case: multiply the const into each distributed product.
+        # Wrapping in mul(C:n, term) keeps the canonical form uniform;
+        # combine_like_terms later coalesces identical shapes.
+        if len(products) == 1:
+            return ("mul", ("const", const_product), products[0])
+        return ("add", *[("mul", ("const", const_product), t) for t in products])
+
+    return (op, *args)
+
+
+def _rewrite_explog_identities(node, mode: str | None = None):
     """Bottom-up rewrite of exp/log algebraic identities:
        mul(exp(a), exp(b), ...) -> exp(add(a, b, ...))
        add(log(a), log(b), ...) -> log(mul(a, b, ...))
-       exp(log(e)) -> e   ONLY when e is provably positive.
+       exp(log(e)) -> e   ONLY when e is provably positive (mode-gated).
        log(exp(e)) -> e   (always safe; exp > 0 always).
        1 / exp(a) -> exp(-a)
     Applied as a pre-pass so pure-numeric folding doesn't short-circuit
@@ -430,20 +747,21 @@ def _rewrite_explog_identities(node):
     op = node[0]
     if op == "fp_const":
         return node
-    args = [_rewrite_explog_identities(a) for a in node[1:]]
+    args = [_rewrite_explog_identities(a, mode) for a in node[1:]]
     if op == "mul" and len(args) >= 2 and all(
             isinstance(a, tuple) and a[0] == "exp" for a in args):
         sum_args = [a[1] for a in args]
-        return _rewrite_explog_identities(("exp", ("add", *sum_args)))
+        return _rewrite_explog_identities(("exp", ("add", *sum_args)), mode)
     if op == "add" and len(args) >= 2 and all(
             isinstance(a, tuple) and a[0] == "log" for a in args):
         prod_args = [a[1] for a in args]
-        return _rewrite_explog_identities(("log", ("mul", *prod_args)))
+        return _rewrite_explog_identities(("log", ("mul", *prod_args)), mode)
     # exp(log(e)) -> e  only when log(e) is well-defined (e > 0).
-    # For e ≤ 0, leave the expression alone so log_taylor raises.
+    # For e ≤ 0 (or unprovable in strict mode), leave the expression
+    # alone so log_taylor raises at runtime.
     if op == "exp" and isinstance(args[0], tuple) and args[0][0] == "log":
         inner = args[0][1]
-        if _is_definitely_positive(inner):
+        if _is_definitely_positive(inner, mode):
             return inner
         # else: keep the exp(log(e)) form; downstream log_taylor will
         # raise ValueError if e ≤ 0 at evaluation time.
@@ -454,15 +772,29 @@ def _rewrite_explog_identities(node):
     if op == "div" and len(args) == 2 and args[0] == ("const", 1):
         b = args[1]
         if isinstance(b, tuple) and b[0] == "exp":
-            return _rewrite_explog_identities(("exp", ("neg", b[1])))
+            return _rewrite_explog_identities(("exp", ("neg", b[1])), mode)
     return (op, *args)
 
 
-def canonicalize(node):
-    """Run flatten → simplify → sort to fixed point."""
-    # Pre-pass: rewrite exp/log identities so pure-numeric folding
-    # produces the same canonical form regardless of input shape.
-    node = _rewrite_explog_identities(node)
+def canonicalize(node, strict_positivity: bool = False):
+    """Run flatten → simplify → expand → sort to fixed point.
+
+    Pre-passes in order:
+      1. _expand_products: distribute mul over add (and neg over add).
+      2. _rewrite_explog_identities: exp/log inverse and product/sum
+         rewrites. Applied AFTER expansion so the rewrites see the
+         normalized monomial form. Honors strict_positivity: if True,
+         exp(log(var)) → var is suppressed.
+
+    _expand_products is also called inside the loop because
+    _simplify's neg-pulling rule can re-introduce mul-of-add structures
+    (mul(neg(X), Y) → neg(mul(X, Y)), where X might be an add). Without
+    re-running expansion inside the loop, canonicalize would not be
+    idempotent.
+    """
+    mode = POSITIVITY_STRICT if strict_positivity else POSITIVITY_PERMISSIVE
+    node = _expand_products(node)
+    node = _rewrite_explog_identities(node, mode)
     prev = None
     cur = node
     for _ in range(20):  # bounded iteration
@@ -471,6 +803,7 @@ def canonicalize(node):
         prev = cur
         cur = _flatten(cur)
         cur = _simplify(cur)
+        cur = _expand_products(cur)  # re-distribute after simplify
         cur = _flatten(cur)  # simplify may unflatten via collapses
         cur = _sort_canonical(cur)
     return cur
@@ -504,7 +837,8 @@ def _serialize(node) -> str:
 
 
 def signature_from_canonical(ast, d: int = D_DEFAULT,
-                              target_nonzero: float = TARGET_NONZERO_FRAC) -> np.ndarray:
+                              target_nonzero: float = TARGET_NONZERO_FRAC,
+                              strict_positivity: bool = False) -> np.ndarray:
     """SHA-256 the serialized canonical form, expand to D trits.
 
     Sparsity targeting: we pick the N most-extreme positions (by their
@@ -512,7 +846,7 @@ def signature_from_canonical(ast, d: int = D_DEFAULT,
     N = round(d * target_nonzero). The sign is determined by another
     byte of the hash stream.
     """
-    canon = canonicalize(ast)
+    canon = canonicalize(ast, strict_positivity=strict_positivity)
     ser = _serialize(canon)
     # Produce enough hash bytes to fill d positions × 2 bytes each
     stream = b""
@@ -534,8 +868,10 @@ def signature_from_canonical(ast, d: int = D_DEFAULT,
     return sig
 
 
-def signature_from_expr(expr_str: str, d: int = D_DEFAULT) -> np.ndarray:
-    return signature_from_canonical(parse(expr_str), d=d)
+def signature_from_expr(expr_str: str, d: int = D_DEFAULT,
+                         strict_positivity: bool = False) -> np.ndarray:
+    return signature_from_canonical(parse(expr_str), d=d,
+                                     strict_positivity=strict_positivity)
 
 
 if __name__ == "__main__":
