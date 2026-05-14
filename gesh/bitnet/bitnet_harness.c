@@ -165,6 +165,17 @@ typedef enum {
                                  * eviction cost. Implements the operation
                                  * Phase ε measured (Q-K oracle) — distinct
                                  * from SIGDIST's K-K proxy. */
+    BITNET_KV_EVICT_META,      /* Meta-routing prototype (2026-05-14): a
+                                 * parameterized policy combining recency,
+                                 * K-K distance, and Q-K distance with
+                                 * trit weights {-1, 0, +1} per component
+                                 * (BITNET_KV_EVICT_W_R/W_KK/W_QK env vars,
+                                 * Python convention from meta_routing.py).
+                                 * The four hand-coded policies (fifo,
+                                 * sigdist, qsigdist, random) are recoverable
+                                 * by setting the appropriate weights;
+                                 * non-anchor combinations are what layer 3
+                                 * is searching to validate. */
 } bitnet_kv_evict_mode_t;
 
 static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
@@ -176,6 +187,19 @@ static unsigned int g_kv_evict_rng = 0xC0FFEE10u;
  * extracts signature from the mean. Per #10 red-team finding M5. */
 static int g_kv_evict_m = 1;
 
+/* Meta-routing trit weights (Python convention). Score(slot) =
+ * w_r·age + w_kk·KK_sim + w_qk·QK_sim, evict slot with LOWEST score.
+ * Set to {-1, 0, +1} via BITNET_KV_EVICT_W_R / _W_KK / _W_QK. The
+ * existing modes correspond to specific weight tuples:
+ *   fifo:     (-1,  0,  0)
+ *   sigdist:  ( 0, +1,  0)
+ *   qsigdist: ( 0,  0, +1)
+ *   random:   ( 0,  0,  0)
+ * Other combinations (e.g., (0, -1, +1)) are layer-3 predictions. */
+static int g_kv_evict_w_r  = 0;
+static int g_kv_evict_w_kk = 0;
+static int g_kv_evict_w_qk = 0;
+
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
         case BITNET_KV_EVICT_NONE:    return "none";
@@ -183,6 +207,7 @@ static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
         case BITNET_KV_EVICT_RANDOM:  return "random";
         case BITNET_KV_EVICT_SIGDIST: return "sigdist";
         case BITNET_KV_EVICT_QSIGDIST: return "qsigdist";
+        case BITNET_KV_EVICT_META:    return "meta";
     }
     return "unknown";
 }
@@ -195,8 +220,23 @@ static void bitnet_kv_evict_init_from_env(void) {
         else if (!strcasecmp(m, "random"))  g_kv_evict_mode = BITNET_KV_EVICT_RANDOM;
         else if (!strcasecmp(m, "sigdist")) g_kv_evict_mode = BITNET_KV_EVICT_SIGDIST;
         else if (!strcasecmp(m, "qsigdist")) g_kv_evict_mode = BITNET_KV_EVICT_QSIGDIST;
+        else if (!strcasecmp(m, "meta"))    g_kv_evict_mode = BITNET_KV_EVICT_META;
         else fprintf(stderr, "[harness] unknown BITNET_KV_EVICT_MODE=%s, using none\n", m);
     }
+    /* Meta-routing trit weights. Validated to {-1, 0, +1}; out-of-range
+     * values are clamped to 0 with a warning. */
+    const char* wr_s  = getenv("BITNET_KV_EVICT_W_R");
+    const char* wkk_s = getenv("BITNET_KV_EVICT_W_KK");
+    const char* wqk_s = getenv("BITNET_KV_EVICT_W_QK");
+    if (wr_s)  { int v = atoi(wr_s);
+                 if (v >= -1 && v <= 1) g_kv_evict_w_r = v;
+                 else fprintf(stderr, "[harness] BITNET_KV_EVICT_W_R out of {-1,0,+1}, using 0\n"); }
+    if (wkk_s) { int v = atoi(wkk_s);
+                 if (v >= -1 && v <= 1) g_kv_evict_w_kk = v;
+                 else fprintf(stderr, "[harness] BITNET_KV_EVICT_W_KK out of {-1,0,+1}, using 0\n"); }
+    if (wqk_s) { int v = atoi(wqk_s);
+                 if (v >= -1 && v <= 1) g_kv_evict_w_qk = v;
+                 else fprintf(stderr, "[harness] BITNET_KV_EVICT_W_QK out of {-1,0,+1}, using 0\n"); }
     const char* w = getenv("BITNET_KV_WINDOW");
     if (w) {
         int v = atoi(w);
@@ -216,12 +256,17 @@ static void bitnet_kv_evict_init_from_env(void) {
      * (Plan B) uses the same regime — K-sigs at fixed tau, Q-sig computed
      * per-Q-head on the fly. */
     if ((g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST ||
-         g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST) && g_attn_fixed_tau == 0) {
+         g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST ||
+         g_kv_evict_mode == BITNET_KV_EVICT_META) && g_attn_fixed_tau == 0) {
         g_attn_fixed_tau = 5000;
     }
     if (g_kv_evict_mode != BITNET_KV_EVICT_NONE) {
         fprintf(stderr, "[harness] KV eviction mode = %s, window = %d\n",
                 bitnet_kv_evict_mode_name(g_kv_evict_mode), g_kv_window);
+    }
+    if (g_kv_evict_mode == BITNET_KV_EVICT_META) {
+        fprintf(stderr, "[harness] meta weights: w_r=%+d, w_kk=%+d, w_qk=%+d\n",
+                g_kv_evict_w_r, g_kv_evict_w_kk, g_kv_evict_w_qk);
     }
 }
 
@@ -655,6 +700,102 @@ static int bitnet_kv_evict_pick_victim(
         }
         free(q_sigs);
         return worst_p;
+    }
+
+    if (g_kv_evict_mode == BITNET_KV_EVICT_META) {
+        /* Meta-routing: parameterized scoring policy with trit weights.
+         *
+         * Python convention (matching meta_routing.py): score = w_r·age
+         * + w_kk·KK_sim + w_qk·QK_sim, evict slot with LOWEST score.
+         * Translated to the C convention used here (distance, evict
+         * argmax): we evict the slot with HIGHEST
+         *
+         *   c_score(p) = -w_r·age(p) + w_kk·KK_dist(p) + w_qk·QK_dist(p)
+         *
+         * The negation on w_r comes from age (Python) ↔ -recency
+         * (similarity-like, where younger = higher); on w_kk/w_qk the
+         * sign carries through because sim = -dist + const and the
+         * constant drops out under argmax.
+         *
+         * Existing modes recovered:
+         *   fifo:     w_r=-1 (python) → c_score = +age, evict oldest.    ✓
+         *   sigdist:  w_kk=+1 → c_score = +KK_dist, evict max-dist.       ✓
+         *   qsigdist: w_qk=+1 → c_score = +QK_dist, evict max-dist.       ✓
+         *
+         * Candidate from the layer-3 prediction (2026-05-14):
+         *   (w_r=0, w_kk=-1, w_qk=+1) — "qsigdist but KEEP K-K-similar
+         *   slots." c_score = -KK_dist + QK_dist, evict slot with HIGH
+         *   QK_dist AND LOW KK_dist. Semantic: "redundant with current
+         *   K AND irrelevant to Q." */
+        if (cache->k_sig == NULL) return -1;
+        int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+        const int q_per_kv = BITNET_NUM_ATTENTION_HEADS / BITNET_NUM_KV_HEADS;
+
+        /* Precompute Q-sigs once if w_qk != 0 and Q is available. */
+        uint8_t* q_sigs = NULL;
+        if (g_kv_evict_w_qk != 0 && q_all_heads != NULL) {
+            q_sigs = (uint8_t*)malloc(
+                (size_t)BITNET_NUM_ATTENTION_HEADS * (size_t)sig_bytes);
+            if (!q_sigs) return -1;
+            int64_t* q_tmp = (int64_t*)malloc((size_t)BITNET_HEAD_DIM * sizeof(int64_t));
+            if (!q_tmp) { free(q_sigs); return -1; }
+            for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+                const m4t_mtfp_t* q = q_all_heads + (size_t)qh * BITNET_HEAD_DIM;
+                for (int d = 0; d < BITNET_HEAD_DIM; d++) q_tmp[d] = (int64_t)q[d];
+                int64_t tau = (int64_t)cache->k_sig_tau;
+                m4t_route_threshold_extract(
+                    q_sigs + (size_t)qh * sig_bytes, q_tmp, tau, BITNET_HEAD_DIM);
+            }
+            free(q_tmp);
+        }
+
+        int best_p = -1;
+        int64_t best_score = INT64_MIN;
+        /* If all weights are zero, behave like random (any alive slot
+         * has score 0, ties broken by first-encountered iteration order
+         * — caller can layer randomization). */
+        for (int p = 0; p < seq_k; p++) {
+            if (row[p] || p == current_position) continue;
+
+            int kk_dist = 0;
+            if (g_kv_evict_w_kk != 0) {
+                for (int h = 0; h < BITNET_NUM_KV_HEADS; h++) {
+                    const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, h);
+                    const uint8_t* sb = bitnet_kv_cache_k_sig(cache, layer_idx,
+                                                              current_position, h);
+                    for (int i = 0; i < sig_bytes; i++) {
+                        uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                        x = (uint8_t)(x - ((x >> 1) & 0x55));
+                        x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                        kk_dist += (int)(((x + (x >> 4)) & 0x0F));
+                    }
+                }
+            }
+
+            int qk_dist = 0;
+            if (g_kv_evict_w_qk != 0 && q_sigs) {
+                for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+                    int kvh = qh / q_per_kv;
+                    const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, kvh);
+                    const uint8_t* sb = q_sigs + (size_t)qh * sig_bytes;
+                    for (int i = 0; i < sig_bytes; i++) {
+                        uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                        x = (uint8_t)(x - ((x >> 1) & 0x55));
+                        x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                        qk_dist += (int)(((x + (x >> 4)) & 0x0F));
+                    }
+                }
+            }
+
+            int age = current_position - p;
+            int64_t score = (int64_t)(-g_kv_evict_w_r) * (int64_t)age
+                          + (int64_t)g_kv_evict_w_kk  * (int64_t)kk_dist
+                          + (int64_t)g_kv_evict_w_qk  * (int64_t)qk_dist;
+
+            if (score > best_score) { best_score = score; best_p = p; }
+        }
+        free(q_sigs);
+        return best_p;
     }
 
     return -1;
@@ -1173,7 +1314,8 @@ void bitnet_forward_block(
              * TRIT_ROUTING #10: also populate when sigdist eviction is on. */
             int want_sig_cache = (g_attn_mode == BITNET_ATTN_ROUTED
                                   || g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST
-                                  || g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST)
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_META)
                                   && g_attn_fixed_tau > 0
                                   && !g_attn_no_k_cache;
             if (want_sig_cache) {
