@@ -4,6 +4,50 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### Integrative qsig_filter — new best KV-eviction policy on tech workloads (2026-05-14)
+
+Per `journal/integrative_qsig_filter_2026-05-14.md` and
+`journal/integrative_qsig_filter_lmm_2026-05-14.md`. Tripp's
+"competing vs integrative systems" reframe rotated the per-prompt
+routing arc 90°; one harness mode tested the conjunctive integration
+hypothesis (filter slots by K-K similarity, then rank by Q-K
+distance) and beat all prior competition-frame results.
+
+**New harness mode:** `BITNET_KV_EVICT_MODE=qsig_filter` with
+parameter `BITNET_KV_EVICT_KK_PROTECT_K` (integer ≥ 0). K=0
+reproduces qsigdist exactly; K=1 is the recommended setting for
+technical/scientific workloads.
+
+**Workload-stratified results (N=100, window=16, gen=24):**
+
+| workload         | K=1 Δ vs qsigdist | 95% CI                |
+|------------------|-------------------|------------------------|
+| **tech-heavy**   | **+9.21pp**       | **[+1.97, +18.42] ✓** |
+| logic/reasoning  | +3.06pp           | [-1.11, +8.61]         |
+| dialog-heavy     | +2.43pp           | [-6.08, +11.81]        |
+| balanced full    | +2.12pp           | [-1.38, +5.75]         |
+| short factual    | -0.30pp           | [-7.44, +7.74]         |
+| code-heavy       | -2.18pp           | [-8.73, +2.78]         |
+| long-form        | -3.33pp           | [-11.11, +6.11]        |
+
+**Architectural lesson:** Integration > selective routing > competition,
+held-out. Always-on K=1 (+2.12pp, trending) > selective category-
+routing of K=1 (-0.67pp, CI excludes 0) > category-mode competition
+among 11 policies (-2.42pp, L1.1). The integrative architecture
+sidesteps the routing-confidence problem by applying its rule
+uniformly. Per-prompt routing failed held-out; per-WORKLOAD
+configuration chosen at deploy time is the right granularity.
+
+**Mechanism:** Protecting the single most-K-similar slot preserves
+technical writing's redundancy structure (recurring keywords/
+concepts). Hurts on code/narrative where each token is more
+independent. K=1 is the curve sweet spot — K∈{2, 4} give partial
+gains, K=8 hurts (forces qsigdist to evict from a shrinking pool).
+
+**Red-team complete:** harness fixed-point identicality (30/30
+PASS), determinism (6/6 PASS), score-function math audit (PASS by
+inspection). Harness clean.
+
 ### Substrate-distinctive geometric claim — robustness matrix (2026-05-12)
 
 Per `experiments/README.md` and `journal/td28_phase_gamma_robustness_2026-05-12.md`

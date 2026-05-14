@@ -177,19 +177,44 @@ typedef enum {
                                  * by setting the appropriate weights;
                                  * non-anchor combinations are what layer 3
                                  * is searching to validate. */
-    BITNET_KV_EVICT_QSIG_FILTER, /* Integrative test (2026-05-14): qsigdist
-                                  * with a K-K-similarity FILTER. Among
-                                  * candidate slots, mark the K most-similar
-                                  * to current K (lowest KK_dist) as
-                                  * PROTECTED. Among unprotected, evict
-                                  * argmax(QK_dist) — same as qsigdist.
-                                  * Fallback: if all candidates protected
-                                  * (window ≤ K+1), use plain qsigdist.
-                                  * K=0 reproduces qsigdist exactly.
-                                  * Parameter: BITNET_KV_EVICT_KK_PROTECT_K.
+    BITNET_KV_EVICT_QSIG_FILTER, /* Integrative eviction (2026-05-14):
+                                  * qsigdist with a K-K-similarity FILTER.
+                                  * Among candidate slots, mark the K
+                                  * most-similar to current K (lowest
+                                  * KK_dist) as PROTECTED. Among
+                                  * unprotected, evict argmax(QK_dist) —
+                                  * same as qsigdist. Fallback: if all
+                                  * candidates protected (window ≤ K+1),
+                                  * use plain qsigdist. K=0 reproduces
+                                  * qsigdist exactly.
+                                  *
+                                  * Parameter: BITNET_KV_EVICT_KK_PROTECT_K
+                                  * (integer ≥ 0).
+                                  *
                                   * Tests CONJUNCTIVE integration: the
                                   * linear-additive trit family can't
-                                  * express "filter then rank." */
+                                  * express "filter then rank."
+                                  *
+                                  * Workload guidance (N=100 closeout,
+                                  * window=16, gen=24, single-seed):
+                                  *
+                                  *   workload     | recommended K | gain vs qsigdist
+                                  *   tech/science |       1       | +9.21pp [+1.97, +18.42] ✓
+                                  *   logic/reason |       1       | +3.06pp (trending)
+                                  *   dialog/Q&A   |       1       | +2.43pp (trending)
+                                  *   short fact   |       0       | -0.30pp (neutral)
+                                  *   code-heavy   |       0       | -2.18pp (avoid K=1)
+                                  *   long-form    |       0       | -3.33pp (avoid K=1)
+                                  *
+                                  * Per-prompt routing among policies
+                                  * fails held-out CV (-2.42pp); the right
+                                  * granularity is per-WORKLOAD config
+                                  * chosen at deploy time, not per-prompt
+                                  * routing.
+                                  *
+                                  * See journal/integrative_qsig_filter_2026-05-14.md
+                                  * and journal/integrative_qsig_filter_lmm_2026-05-14.md
+                                  * for full arc + LMM. */
 } bitnet_kv_evict_mode_t;
 
 static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
