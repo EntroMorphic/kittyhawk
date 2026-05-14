@@ -1,0 +1,22 @@
+{
+  "qsigdist_delta_pp": 6.375,
+  "full_oracle_pp": 22.95833333333333,
+  "full_oracle_ci_pp": [
+    18.375,
+    27.500000000000004
+  ],
+  "leave_best_policy_out_pp": 14.124999999999998,
+  "second_best_pp": 14.124999999999998,
+  "median_policy_pp": -1.8749999999999996,
+  "common_knowledge_oracle_pp": 5.791666666666667,
+  "pp_winner_eq_ck_winner_count": 24,
+  "specialization_fraction_pct": 76.0,
+  "split_half_oracle_mean_pp": 22.99825,
+  "split_half_oracle_std_pp": 2.380897005040561,
+  "split_half_oracle_p25_p50_p75_pp": [
+    21.333333333333336,
+    23.083333333333332,
+    24.520833333333336
+  ],
+  "split_half_mean_abs_diff_pp": 3.8288333333333333
+}

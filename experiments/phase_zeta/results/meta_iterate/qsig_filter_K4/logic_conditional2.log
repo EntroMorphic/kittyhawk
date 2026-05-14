@@ -1,0 +1,11 @@
+[harness] KV eviction mode = qsig_filter, window = 16
+[harness] qsig_filter: kk_protect_k=4
+[bitnet_weights] loaded 30 layers (lm_head tied to embedding)
+[bitnet_weights] re-packed ternary weights to 4-in-8 (496 MB) for bit-faithful BitLinear path
+[harness] loaded weights from data/bitnet_b158_2b4t.bin
+[harness] gen_loop_seconds = 9.0117  n_generate = 24  seconds_per_token = 0.3755  prompt_tokens = 13  attn_seconds = 0.0128  attn_seconds_per_token = 0.0005  attn_fraction = 0.001
+     argmax over full vocab        = 279
+[ok] 30 layer(s) forward pass completed (token_id=1, positions=13, generated=24).
+     post-final-norm x[0..3]      = -709 258 -136 1011
+     logits[0..3]                  = 1538 1243 1316 1121
+     generated tokens             = 323 279 74721 1253 21165 13 578 3090 5674 649 387 16781 11 323 433 649 387 34348 311 13023 13 763 5369 11

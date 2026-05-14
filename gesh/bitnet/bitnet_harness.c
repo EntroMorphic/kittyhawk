@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <time.h>  /* clock_gettime for gen-loop timing (cost measurement) */
 
 /* Attention-only time accumulator for cost measurement. Reset before each
@@ -176,6 +177,19 @@ typedef enum {
                                  * by setting the appropriate weights;
                                  * non-anchor combinations are what layer 3
                                  * is searching to validate. */
+    BITNET_KV_EVICT_QSIG_FILTER, /* Integrative test (2026-05-14): qsigdist
+                                  * with a K-K-similarity FILTER. Among
+                                  * candidate slots, mark the K most-similar
+                                  * to current K (lowest KK_dist) as
+                                  * PROTECTED. Among unprotected, evict
+                                  * argmax(QK_dist) — same as qsigdist.
+                                  * Fallback: if all candidates protected
+                                  * (window ≤ K+1), use plain qsigdist.
+                                  * K=0 reproduces qsigdist exactly.
+                                  * Parameter: BITNET_KV_EVICT_KK_PROTECT_K.
+                                  * Tests CONJUNCTIVE integration: the
+                                  * linear-additive trit family can't
+                                  * express "filter then rank." */
 } bitnet_kv_evict_mode_t;
 
 static bitnet_kv_evict_mode_t g_kv_evict_mode = BITNET_KV_EVICT_NONE;
@@ -200,6 +214,10 @@ static int g_kv_evict_w_r  = 0;
 static int g_kv_evict_w_kk = 0;
 static int g_kv_evict_w_qk = 0;
 
+/* QSIG_FILTER: number of K-K-similar slots to PROTECT from eviction.
+ * Set via BITNET_KV_EVICT_KK_PROTECT_K. K=0 reproduces qsigdist. */
+static int g_kv_evict_kk_protect_k = 0;
+
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
         case BITNET_KV_EVICT_NONE:    return "none";
@@ -208,6 +226,7 @@ static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
         case BITNET_KV_EVICT_SIGDIST: return "sigdist";
         case BITNET_KV_EVICT_QSIGDIST: return "qsigdist";
         case BITNET_KV_EVICT_META:    return "meta";
+        case BITNET_KV_EVICT_QSIG_FILTER: return "qsig_filter";
     }
     return "unknown";
 }
@@ -221,6 +240,7 @@ static void bitnet_kv_evict_init_from_env(void) {
         else if (!strcasecmp(m, "sigdist")) g_kv_evict_mode = BITNET_KV_EVICT_SIGDIST;
         else if (!strcasecmp(m, "qsigdist")) g_kv_evict_mode = BITNET_KV_EVICT_QSIGDIST;
         else if (!strcasecmp(m, "meta"))    g_kv_evict_mode = BITNET_KV_EVICT_META;
+        else if (!strcasecmp(m, "qsig_filter")) g_kv_evict_mode = BITNET_KV_EVICT_QSIG_FILTER;
         else fprintf(stderr, "[harness] unknown BITNET_KV_EVICT_MODE=%s, using none\n", m);
     }
     /* Meta-routing trit weights. Validated to {-1, 0, +1}; out-of-range
@@ -237,6 +257,11 @@ static void bitnet_kv_evict_init_from_env(void) {
     if (wqk_s) { int v = atoi(wqk_s);
                  if (v >= -1 && v <= 1) g_kv_evict_w_qk = v;
                  else fprintf(stderr, "[harness] BITNET_KV_EVICT_W_QK out of {-1,0,+1}, using 0\n"); }
+    /* QSIG_FILTER: number of K-K-similar slots to PROTECT. */
+    const char* kpk_s = getenv("BITNET_KV_EVICT_KK_PROTECT_K");
+    if (kpk_s) { int v = atoi(kpk_s);
+                 if (v >= 0) g_kv_evict_kk_protect_k = v;
+                 else fprintf(stderr, "[harness] BITNET_KV_EVICT_KK_PROTECT_K must be ≥0, using 0\n"); }
     const char* w = getenv("BITNET_KV_WINDOW");
     if (w) {
         int v = atoi(w);
@@ -257,7 +282,8 @@ static void bitnet_kv_evict_init_from_env(void) {
      * per-Q-head on the fly. */
     if ((g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST ||
          g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST ||
-         g_kv_evict_mode == BITNET_KV_EVICT_META) && g_attn_fixed_tau == 0) {
+         g_kv_evict_mode == BITNET_KV_EVICT_META ||
+         g_kv_evict_mode == BITNET_KV_EVICT_QSIG_FILTER) && g_attn_fixed_tau == 0) {
         g_attn_fixed_tau = 5000;
     }
     if (g_kv_evict_mode != BITNET_KV_EVICT_NONE) {
@@ -267,6 +293,10 @@ static void bitnet_kv_evict_init_from_env(void) {
     if (g_kv_evict_mode == BITNET_KV_EVICT_META) {
         fprintf(stderr, "[harness] meta weights: w_r=%+d, w_kk=%+d, w_qk=%+d\n",
                 g_kv_evict_w_r, g_kv_evict_w_kk, g_kv_evict_w_qk);
+    }
+    if (g_kv_evict_mode == BITNET_KV_EVICT_QSIG_FILTER) {
+        fprintf(stderr, "[harness] qsig_filter: kk_protect_k=%d\n",
+                g_kv_evict_kk_protect_k);
     }
 }
 
@@ -699,6 +729,135 @@ static int bitnet_kv_evict_pick_victim(
             if (dsum > worst_d) { worst_d = dsum; worst_p = p; }
         }
         free(q_sigs);
+        return worst_p;
+    }
+
+    if (g_kv_evict_mode == BITNET_KV_EVICT_QSIG_FILTER) {
+        /* QSIG_FILTER (2026-05-14, integrative test): qsigdist with
+         * a K-K-similarity FILTER. The hypothesis: qsigdist
+         * sometimes evicts slots that are K-K-similar to current K
+         * (representing the same context as the current write).
+         * Removing them loses redundant-but-coherent signal. The
+         * conjunctive filter prevents this:
+         *   1. Compute KK_dist for every candidate slot.
+         *   2. Mark the K candidates with LOWEST KK_dist as PROTECTED
+         *      (most similar to current K).
+         *   3. Among unprotected, evict argmax(QK_dist) — qsigdist's
+         *      criterion.
+         *   4. Fallback: if all candidates are protected (e.g.
+         *      window-1 ≤ K), evict argmax(QK_dist) over ALL
+         *      candidates — i.e., behave like qsigdist.
+         *
+         * This is structurally distinct from the linear-additive
+         * trit-weight family: the filter is a CONJUNCTION (slot
+         * survives IF KK_dist > threshold AND eviction-by-QK
+         * applies), which can't be expressed as
+         *   c_score = w_kk·KK_dist + w_qk·QK_dist
+         * for any choice of weights.
+         *
+         * K = g_kv_evict_kk_protect_k. K=0 ≡ qsigdist exactly. */
+        if (cache->k_sig == NULL || q_all_heads == NULL) return -1;
+        int sig_bytes = M4T_TRIT_PACKED_BYTES(BITNET_HEAD_DIM);
+        const int q_per_kv = BITNET_NUM_ATTENTION_HEADS / BITNET_NUM_KV_HEADS;
+
+        /* Precompute Q-sigs per Q-head once. */
+        uint8_t* q_sigs = (uint8_t*)malloc(
+            (size_t)BITNET_NUM_ATTENTION_HEADS * (size_t)sig_bytes);
+        if (!q_sigs) return -1;
+        int64_t* q_tmp = (int64_t*)malloc((size_t)BITNET_HEAD_DIM * sizeof(int64_t));
+        if (!q_tmp) { free(q_sigs); return -1; }
+        for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+            const m4t_mtfp_t* q = q_all_heads + (size_t)qh * BITNET_HEAD_DIM;
+            for (int d = 0; d < BITNET_HEAD_DIM; d++) q_tmp[d] = (int64_t)q[d];
+            int64_t tau = (int64_t)cache->k_sig_tau;
+            m4t_route_threshold_extract(
+                q_sigs + (size_t)qh * sig_bytes, q_tmp, tau, BITNET_HEAD_DIM);
+        }
+        free(q_tmp);
+
+        /* Pass 1: collect candidates and their KK_dists + QK_dists. */
+        int max_cands = seq_k;
+        int* cand_p     = (int*)malloc((size_t)max_cands * sizeof(int));
+        int* cand_kk    = (int*)malloc((size_t)max_cands * sizeof(int));
+        int* cand_qk    = (int*)malloc((size_t)max_cands * sizeof(int));
+        if (!cand_p || !cand_kk || !cand_qk) {
+            free(q_sigs); free(cand_p); free(cand_kk); free(cand_qk);
+            return -1;
+        }
+        int n_cand = 0;
+        for (int p = 0; p < seq_k; p++) {
+            if (row[p] || p == current_position) continue;
+            int kk_dist = 0;
+            for (int h = 0; h < BITNET_NUM_KV_HEADS; h++) {
+                const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, h);
+                const uint8_t* sb = bitnet_kv_cache_k_sig(cache, layer_idx,
+                                                          current_position, h);
+                for (int i = 0; i < sig_bytes; i++) {
+                    uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                    x = (uint8_t)(x - ((x >> 1) & 0x55));
+                    x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                    kk_dist += (int)(((x + (x >> 4)) & 0x0F));
+                }
+            }
+            int qk_dist = 0;
+            for (int qh = 0; qh < BITNET_NUM_ATTENTION_HEADS; qh++) {
+                int kvh = qh / q_per_kv;
+                const uint8_t* sa = bitnet_kv_cache_k_sig(cache, layer_idx, p, kvh);
+                const uint8_t* sb = q_sigs + (size_t)qh * sig_bytes;
+                for (int i = 0; i < sig_bytes; i++) {
+                    uint8_t x = (uint8_t)(sa[i] ^ sb[i]);
+                    x = (uint8_t)(x - ((x >> 1) & 0x55));
+                    x = (uint8_t)((x & 0x33) + ((x >> 2) & 0x33));
+                    qk_dist += (int)(((x + (x >> 4)) & 0x0F));
+                }
+            }
+            cand_p[n_cand] = p;
+            cand_kk[n_cand] = kk_dist;
+            cand_qk[n_cand] = qk_dist;
+            n_cand++;
+        }
+        free(q_sigs);
+
+        int K = g_kv_evict_kk_protect_k;
+        int worst_p = -1; int worst_qk = -1;
+
+        if (K <= 0 || n_cand <= K) {
+            /* No filtering, or all candidates would be protected.
+             * Fallback to plain qsigdist over ALL candidates. */
+            for (int i = 0; i < n_cand; i++) {
+                if (cand_qk[i] > worst_qk) {
+                    worst_qk = cand_qk[i];
+                    worst_p = cand_p[i];
+                }
+            }
+        } else {
+            /* Find K smallest kk_dists via partial selection. n_cand
+             * is small (≤ window), so O(K·n_cand) is fine. Tie-break:
+             * earliest-encountered (deterministic). */
+            uint8_t* protected_arr = (uint8_t*)calloc((size_t)n_cand, sizeof(uint8_t));
+            if (!protected_arr) {
+                free(cand_p); free(cand_kk); free(cand_qk);
+                return -1;
+            }
+            for (int k = 0; k < K; k++) {
+                int min_i = -1; int min_v = INT_MAX;
+                for (int i = 0; i < n_cand; i++) {
+                    if (protected_arr[i]) continue;
+                    if (cand_kk[i] < min_v) { min_v = cand_kk[i]; min_i = i; }
+                }
+                if (min_i >= 0) protected_arr[min_i] = 1;
+            }
+            /* Among unprotected, evict argmax(QK_dist). Tie-break: first. */
+            for (int i = 0; i < n_cand; i++) {
+                if (protected_arr[i]) continue;
+                if (cand_qk[i] > worst_qk) {
+                    worst_qk = cand_qk[i];
+                    worst_p = cand_p[i];
+                }
+            }
+            free(protected_arr);
+        }
+        free(cand_p); free(cand_kk); free(cand_qk);
         return worst_p;
     }
 
@@ -1315,7 +1474,8 @@ void bitnet_forward_block(
             int want_sig_cache = (g_attn_mode == BITNET_ATTN_ROUTED
                                   || g_kv_evict_mode == BITNET_KV_EVICT_SIGDIST
                                   || g_kv_evict_mode == BITNET_KV_EVICT_QSIGDIST
-                                  || g_kv_evict_mode == BITNET_KV_EVICT_META)
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_META
+                                  || g_kv_evict_mode == BITNET_KV_EVICT_QSIG_FILTER)
                                   && g_attn_fixed_tau > 0
                                   && !g_attn_no_k_cache;
             if (want_sig_cache) {
