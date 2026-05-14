@@ -1,0 +1,374 @@
+{
+  "categories": {
+    "biology": [
+      "biology_cell"
+    ],
+    "causal": [
+      "causal"
+    ],
+    "code": [
+      "code_bash_loop",
+      "code_class",
+      "code_html_tag",
+      "code_import",
+      "code_js_arrow",
+      "code_loop",
+      "code_python_dict",
+      "code_python_fn",
+      "code_rust_fn",
+      "code_sql",
+      "code_sql_join"
+    ],
+    "color": [
+      "color_sky"
+    ],
+    "comparison": [
+      "comparison"
+    ],
+    "conditional": [
+      "conditional"
+    ],
+    "cont": [
+      "cont_dark_stormy",
+      "cont_garden",
+      "cont_lab",
+      "cont_letter",
+      "cont_old_man",
+      "cont_once"
+    ],
+    "def": [
+      "def_algorithm",
+      "def_gravity",
+      "def_inflation",
+      "def_metaphor",
+      "def_osmosis",
+      "def_photosynth"
+    ],
+    "definition": [
+      "definition_term"
+    ],
+    "dialog": [
+      "dialog_greet",
+      "dialog_interview",
+      "dialog_multi",
+      "dialog_negotiate",
+      "dialog_qa"
+    ],
+    "error": [
+      "error_message",
+      "error_segfault",
+      "error_traceback",
+      "error_typeerror"
+    ],
+    "geography": [
+      "geography_desert",
+      "geography_river"
+    ],
+    "history": [
+      "history_fact",
+      "history_moon"
+    ],
+    "hypothesis": [
+      "hypothesis"
+    ],
+    "idiom": [
+      "idiom_apple",
+      "idiom_back",
+      "idiom_break_ice",
+      "idiom_horse",
+      "idiom_spill"
+    ],
+    "instr": [
+      "instr_explain",
+      "instr_list",
+      "instr_summary",
+      "instr_translate"
+    ],
+    "instruct": [
+      "instruct_recipe",
+      "instruct_step"
+    ],
+    "logic": [
+      "logic_causal2",
+      "logic_conditional2",
+      "logic_hypothesis2",
+      "logic_negation2",
+      "logic_quantifier2",
+      "logic_temporal2"
+    ],
+    "long": [
+      "long_argument",
+      "long_desc_forest",
+      "long_journey",
+      "long_lab",
+      "long_market",
+      "long_meeting",
+      "long_recipe",
+      "long_research",
+      "long_storm"
+    ],
+    "longform": [
+      "longform_essay"
+    ],
+    "math": [
+      "math_add",
+      "math_div",
+      "math_mul",
+      "math_word_problem"
+    ],
+    "negation": [
+      "negation"
+    ],
+    "poetry": [
+      "poetry_blake",
+      "poetry_dickinson",
+      "poetry_haiku",
+      "poetry_iambic"
+    ],
+    "q": [
+      "q_capital_egypt",
+      "q_capital_france",
+      "q_capital_japan",
+      "q_dna_full",
+      "q_largest_planet",
+      "q_speed_of_light",
+      "q_who_hamlet",
+      "q_wrote_iliad"
+    ],
+    "quantifier": [
+      "quantifier"
+    ],
+    "reasoning": [
+      "reasoning_eclipse",
+      "reasoning_seasons",
+      "reasoning_water"
+    ],
+    "tech": [
+      "tech_compiler",
+      "tech_database_index",
+      "tech_neural",
+      "tech_protein",
+      "tech_quantum"
+    ],
+    "technical": [
+      "technical_chem",
+      "technical_ml",
+      "technical_physics"
+    ],
+    "temporal": [
+      "temporal"
+    ]
+  },
+  "cat_winners": {
+    "biology": {
+      "meta(1, 1, 1)": 1
+    },
+    "causal": {
+      "meta(0, 1, 1)": 1
+    },
+    "code": {
+      "meta(1, 0, 1)": 2,
+      "qsigdist": 3,
+      "meta(0, 1, 1)": 1,
+      "fifo": 2,
+      "meta(1, 1, 1)": 1,
+      "meta(1, -1, 1)": 1,
+      "sigdist": 1
+    },
+    "color": {
+      "fifo": 1
+    },
+    "comparison": {
+      "meta(-1, 1, 1)": 1
+    },
+    "conditional": {
+      "meta(-1, 1, 1)": 1
+    },
+    "cont": {
+      "meta(0, 1, 1)": 2,
+      "qsigdist": 2,
+      "meta(0, -1, 0)": 1,
+      "meta(-1, 0, 1)": 1
+    },
+    "def": {
+      "fifo": 2,
+      "meta(0, -1, 0)": 1,
+      "qsigdist": 1,
+      "meta(1, 1, 1)": 1,
+      "meta(0, 1, 1)": 1
+    },
+    "definition": {
+      "qsigdist": 1
+    },
+    "dialog": {
+      "meta(1, 1, 1)": 1,
+      "qsigdist": 2,
+      "meta(-1, 0, 1)": 1,
+      "fifo": 1
+    },
+    "error": {
+      "sigdist": 1,
+      "qsigdist": 1,
+      "meta(-1, 1, 1)": 1,
+      "meta(-1, 0, 1)": 1
+    },
+    "geography": {
+      "qsigdist": 1,
+      "meta(1, 1, 1)": 1
+    },
+    "history": {
+      "qsigdist": 1,
+      "fifo": 1
+    },
+    "hypothesis": {
+      "sigdist": 1
+    },
+    "idiom": {
+      "fifo": 1,
+      "qsigdist": 2,
+      "meta(1, 0, 1)": 1,
+      "meta(1, 1, 1)": 1
+    },
+    "instr": {
+      "meta(-1, 1, 1)": 1,
+      "qsigdist": 1,
+      "meta(1, 0, 1)": 1,
+      "meta(1, -1, 0)": 1
+    },
+    "instruct": {
+      "fifo": 1,
+      "meta(0, -1, 0)": 1
+    },
+    "logic": {
+      "fifo": 1,
+      "meta(0, -1, 0)": 1,
+      "meta(-1, 1, 1)": 1,
+      "qsigdist": 3
+    },
+    "long": {
+      "fifo": 2,
+      "meta(0, 1, 1)": 2,
+      "meta(1, 0, 1)": 1,
+      "qsigdist": 2,
+      "meta(1, 1, 1)": 1,
+      "meta(1, -1, 1)": 1
+    },
+    "longform": {
+      "sigdist": 1
+    },
+    "math": {
+      "sigdist": 2,
+      "fifo": 1,
+      "meta(1, 1, 1)": 1
+    },
+    "negation": {
+      "meta(-1, 0, 1)": 1
+    },
+    "poetry": {
+      "qsigdist": 2,
+      "fifo": 2
+    },
+    "q": {
+      "sigdist": 1,
+      "fifo": 3,
+      "meta(-1, 0, 1)": 1,
+      "meta(-1, 1, 1)": 1,
+      "meta(1, -1, 1)": 1,
+      "qsigdist": 1
+    },
+    "quantifier": {
+      "fifo": 1
+    },
+    "reasoning": {
+      "qsigdist": 2,
+      "meta(1, -1, 1)": 1
+    },
+    "tech": {
+      "meta(1, 0, 1)": 2,
+      "meta(1, 1, 1)": 1,
+      "meta(-1, 0, 1)": 1,
+      "meta(0, 1, 1)": 1
+    },
+    "technical": {
+      "fifo": 1,
+      "meta(1, -1, 0)": 1,
+      "meta(-1, 1, 1)": 1
+    },
+    "temporal": {
+      "meta(1, 1, 1)": 1
+    }
+  },
+  "cat_mode_winner": {
+    "biology": "meta(1, 1, 1)",
+    "causal": "meta(0, 1, 1)",
+    "code": "qsigdist",
+    "color": "fifo",
+    "comparison": "meta(-1, 1, 1)",
+    "conditional": "meta(-1, 1, 1)",
+    "cont": "meta(0, 1, 1)",
+    "def": "fifo",
+    "definition": "qsigdist",
+    "dialog": "qsigdist",
+    "error": "sigdist",
+    "geography": "qsigdist",
+    "history": "qsigdist",
+    "hypothesis": "sigdist",
+    "idiom": "qsigdist",
+    "instr": "meta(-1, 1, 1)",
+    "instruct": "fifo",
+    "logic": "qsigdist",
+    "long": "fifo",
+    "longform": "sigdist",
+    "math": "sigdist",
+    "negation": "meta(-1, 0, 1)",
+    "poetry": "qsigdist",
+    "q": "fifo",
+    "quantifier": "fifo",
+    "reasoning": "qsigdist",
+    "tech": "meta(1, 0, 1)",
+    "technical": "fifo",
+    "temporal": "meta(1, 1, 1)"
+  },
+  "cat_entropy_bits": {
+    "biology": -1.4428232973175175e-12,
+    "causal": -1.4428232973175175e-12,
+    "code": 2.663532754794156,
+    "color": -1.4428232973175175e-12,
+    "comparison": -1.4428232973175175e-12,
+    "conditional": -1.4428232973175175e-12,
+    "cont": 1.9182958340487186,
+    "def": 2.2516291673806093,
+    "definition": -1.4428232973175175e-12,
+    "dialog": 1.9219280948815916,
+    "error": 1.9999999999942293,
+    "geography": 0.9999999999971146,
+    "history": 0.9999999999971146,
+    "hypothesis": -1.4428232973175175e-12,
+    "idiom": 1.9219280948815916,
+    "instr": 1.9999999999942293,
+    "instruct": 0.9999999999971146,
+    "logic": 1.7924812503548073,
+    "long": 2.50325833476699,
+    "longform": -1.4428232973175175e-12,
+    "math": 1.499999999995672,
+    "negation": -1.4428232973175175e-12,
+    "poetry": 0.9999999999971146,
+    "q": 2.4056390622209105,
+    "quantifier": -1.4428232973175175e-12,
+    "reasoning": 0.9182958340516041,
+    "tech": 1.9219280948815916,
+    "technical": 1.584962500716828,
+    "temporal": -1.4428232973175175e-12
+  },
+  "marginal_entropy_bits": 3.121671430189468,
+  "conditional_entropy_bits": 1.7518643175153163,
+  "mutual_information_bits": 1.3698071126741518,
+  "router_delta_pp": 6.791666666666668,
+  "router_minus_qsig_ci_pp": [
+    -3.2499999999999996,
+    4.125000000000001
+  ],
+  "oracle_delta_pp": 22.95833333333333,
+  "qsigdist_delta_pp": 6.375,
+  "headroom_captured_pct": 2.5125628140703595
+}
