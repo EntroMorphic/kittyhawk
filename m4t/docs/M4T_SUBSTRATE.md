@@ -258,6 +258,12 @@ Primitives that compose into routing and into the scalar/vector arithmetic routi
 - Mantissa arithmetic: add, sub, neg, mul, widen, saturate.
 - Block-exponent arithmetic: add, sub, align.
 - Vector ops over mantissa arrays: vec_zero, vec_add, vec_sub, vec_scale.
+- Element-wise mantissa with bx tracking: `m4t_mtfp_elementwise_mul_bx`,
+  `m4t_mtfp_elementwise_div_bx`. The div variant uses round-to-nearest,
+  ties-to-even (§8.2 standard) and returns 0 for cells with zero
+  divisor; saturating clamp to ±MAX_VAL on overflow (Case S, §8.5).
+  See `experiments/claim2_bridge/` for the consumer that drove the
+  div_bx kernel.
 - Width conversion: MTFP4↔MTFP9↔MTFP19↔MTFP39.
 
 **Routing primitives**
@@ -449,7 +455,7 @@ For readers tracing a spec section back to the code that realizes it.
 | 8.2 | Cross-block add | IMPLEMENTED — see §14.2 (round-to-nearest, named opt-in) |
 | 8.3 | Multiply (Case W widen) | Currently only scalar `m4t_mtfp_clamp64` in `m4t_mtfp.h`; full widening mul lands with a consumer |
 | 8.4 | SDOT ternary matmul (exact by contract) | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_sdot_matmul_bt`); MTFP19 variant in `m4t/src/m4t_ternary_matmul.c` |
-| 8.5 | Widen / saturate / round resolutions | Case S saturation: `m4t_mtfp_block_add`/`_sub`, `m4t_mtfp_clamp64`, `m4t_mtfp4_clamp`, `m4t_mtfp_ternary_matmul_bt` store. Case W widen: SDOT path (`m4t_mtfp4_sdot_matmul_bt` MTFP4 × ternary → MTFP19, exact). Case R: `m4t_mtfp_vec_accum_aligning` (cross-exponent, named opt-in, §14.2 IMPLEMENTED). |
+| 8.5 | Widen / saturate / round resolutions | Case S saturation: `m4t_mtfp_block_add`/`_sub`, `m4t_mtfp_clamp64`, `m4t_mtfp4_clamp`, `m4t_mtfp_ternary_matmul_bt` store, `m4t_mtfp_elementwise_mul_bx`, `m4t_mtfp_elementwise_div_bx` (also Case R round-to-nearest-ties-to-even for the divide step). Case W widen: SDOT path (`m4t_mtfp4_sdot_matmul_bt` MTFP4 × ternary → MTFP19, exact). Case R: `m4t_mtfp_vec_accum_aligning` (cross-exponent, named opt-in, §14.2 IMPLEMENTED). |
 | 9 | Cache and prefetch (128 B line = 8 blocks) | Design constraint; no explicit enforcement needed in code |
 | 10 | Width conversions | `m4t/src/m4t_mtfp4.c` (`m4t_mtfp4_to_mtfp19`, `m4t_mtfp19_to_mtfp4`) |
 | 11 | Routing-first surface | `m4t/src/m4t_route.{c,h}` (the five primitives), `m4t/src/m4t_ternary_matmul.{c,h}` (LSH-projection primitive) |

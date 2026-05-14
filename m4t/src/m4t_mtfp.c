@@ -2549,6 +2549,95 @@ void m4t_mtfp_elementwise_mul_bx_scalar_ref(
     }
 }
 
+/* Round-half-to-even integer division. Returns round(num/den) with ties
+ * (when 2|rem| == |den|) broken toward the even quotient.
+ *
+ * Both num and den must be in int128 range. den != 0 (caller's
+ * responsibility to short-circuit zero divisor). */
+static __int128 round_half_to_even_i128(__int128 num, __int128 den) {
+    int neg = ((num < 0) ^ (den < 0));
+    __int128 abs_num = (num < 0) ? -num : num;
+    __int128 abs_den = (den < 0) ? -den : den;
+    __int128 q = abs_num / abs_den;
+    __int128 r = abs_num - q * abs_den;
+    /* 2*r vs abs_den. r ∈ [0, abs_den), so 2*r ∈ [0, 2*abs_den). The
+     * comparison can use simple arithmetic since both fit __int128 with
+     * a wide margin (we cap inputs so the products stay well below
+     * __int128 limits). */
+    __int128 two_r = r + r;
+    if (two_r > abs_den) {
+        q += 1;
+    } else if (two_r == abs_den) {
+        /* Tie. Round to even. */
+        if (q & (__int128)1) q += 1;
+    }
+    return neg ? -q : q;
+}
+
+/* Shared kernel for production and scalar_ref. ARM NEON has no 64-bit
+ * SDIV; the per-cell __int128 divide is already the natural primitive,
+ * so the production and verification paths converge here. Tests still
+ * exercise both entry points to catch ABI / linkage drift. */
+static void elementwise_div_bx_impl(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n)
+{
+    if (n <= 0) return;
+    assert(y && a && b);
+    /* k = target_bx + b_bx - a_bx. Sign and magnitude both matter:
+     *   k > 0: scale numerator UP by 3^k (a_m × 3^k / b_m).
+     *   k < 0: scale denominator UP by 3^|k| (a_m / (b_m × 3^|k|)).
+     *   k = 0: plain a_m / b_m.
+     * Cap |k| at 39 (matches pow3_i64's range and the substrate
+     * convention from elementwise_mul_bx which asserts shift_exp <= 39).
+     * The int128 numerator stays safe: a_m × 3^39 ≈ 2^29 × 2^61.7 = 2^90.7,
+     * well below int128's 2^127 limit. */
+    int k = target_bx + b_bx - a_bx;
+    assert(k >= -39 && k <= 39);
+    int64_t pow3_abs = pow3_i64(k >= 0 ? k : -k);
+    for (int i = 0; i < n; i++) {
+        int32_t bi = b[i];
+        if (bi == 0) {
+            /* Divide-by-zero policy: return 0 (matches m4t_int32_recip). */
+            y[i] = 0;
+            continue;
+        }
+        __int128 num, den;
+        if (k >= 0) {
+            num = (__int128)a[i] * (__int128)pow3_abs;
+            den = (__int128)bi;
+        } else {
+            num = (__int128)a[i];
+            den = (__int128)bi * (__int128)pow3_abs;
+        }
+        __int128 q = round_half_to_even_i128(num, den);
+        /* Clamp to MTFP19 range. */
+        if (q >  (__int128)M4T_MTFP_MAX_VAL) q =  (__int128)M4T_MTFP_MAX_VAL;
+        if (q < -(__int128)M4T_MTFP_MAX_VAL) q = -(__int128)M4T_MTFP_MAX_VAL;
+        y[i] = (m4t_mtfp_t)q;
+    }
+}
+
+void m4t_mtfp_elementwise_div_bx_scalar_ref(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n)
+{
+    elementwise_div_bx_impl(y, a, a_bx, b, b_bx, target_bx, n);
+}
+
+void m4t_mtfp_elementwise_div_bx(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n)
+{
+    elementwise_div_bx_impl(y, a, a_bx, b, b_bx, target_bx, n);
+}
+
 /* V14.F: NEON bitlinear_scale_bx. Per-cell |y_raw| × |num| is uint96
  * (since num up to 2^58, y_raw up to 2^29.1, product up to 2^87.3),
  * stored as 3 × uint32 limbs. Long-divide by 127 across limbs (magic

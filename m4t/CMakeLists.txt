@@ -222,6 +222,16 @@ if(M4T_BUILD_TESTS)
     target_link_libraries(test_m4t_accum_aligning_neon PRIVATE m4t_test)
     gesh_test_undebug(test_m4t_accum_aligning_neon)
     add_test(NAME m4t_accum_aligning_neon COMMAND test_m4t_accum_aligning_neon)
+
+    # Element-wise MTFP19 division with bx tracking. Per claim 2 bridge
+    # closure (concern #3): the bridge's fp_div needs a substrate-C kernel.
+    # Round-half-to-even, saturating clamp, divide-by-zero short-circuit.
+    # Production and scalar_ref share an int128 implementation (no NEON
+    # win for int divide; matches m4t_a8_quantize / m4t_int32_recip pattern).
+    add_executable(test_m4t_mtfp_div tests/test_m4t_mtfp_div.c)
+    target_link_libraries(test_m4t_mtfp_div PRIVATE m4t_test)
+    gesh_test_undebug(test_m4t_mtfp_div)
+    add_test(NAME m4t_mtfp_div COMMAND test_m4t_mtfp_div)
     # Exhaustive bit-exact verify for shift3 (1.16e9 × 19 = 22.08e9 test
     # points, ~25s) is invoked by passing 'x' as argv:
     #   ./build/m4t/test_m4t_shift3_neon x

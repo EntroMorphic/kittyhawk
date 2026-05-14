@@ -712,6 +712,69 @@ void m4t_mtfp_elementwise_mul_bx_scalar_ref(
     const m4t_mtfp_t* b, int b_bx,
     int target_bx, int n);
 
+/* ── Elementwise divide with bx tracking ───────────────────────────────
+ *
+ * y_real[i] = a_real[i] / b_real[i], with y mantissas at target_bx.
+ *
+ * Algebraically: real_a = a_m · 3^(-a_bx), and similarly for b. So
+ *   y_real = (a_m / b_m) · 3^(b_bx - a_bx)
+ *   y_m    = y_real · 3^target_bx
+ *          = a_m · 3^(target_bx + b_bx - a_bx) / b_m
+ *
+ * Let k = target_bx + b_bx - a_bx. Then:
+ *   k > 0: numerator = a_m × 3^k,           denominator = b_m
+ *   k < 0: numerator = a_m,                 denominator = b_m × 3^|k|
+ *   k = 0: numerator = a_m,                 denominator = b_m
+ *
+ * Rounding: round-to-nearest, ties-to-even (§8.2 standard). Unlike
+ * shift3 / m4t_pow3_round_div, the divisor here can be even (when b_m
+ * is even), so ties at exactly half can occur and are broken toward
+ * the nearest even quotient.
+ *
+ * Edge cases:
+ *   - b_m[i] == 0:  y_m[i] = 0. Matches m4t_int32_recip's policy. The
+ *     consumer is responsible for ε-padding if zero divisors are
+ *     possible.
+ *   - Saturation: |q| > M4T_MTFP_MAX_VAL → clamp to ±MAX_VAL (§8.5
+ *     Case S).
+ *   - k > 19: at k = 20 the multiplier 3^20 = 3,486,784,401 ≈ 2^31.7
+ *     overflows int32 but stays within int64; we use int128 for the
+ *     numerator to be safe up to k = 35 (matching the spec's bx range).
+ *   - k < 0 with |k| > 19: divisor scaling 3^|k| gets large; we cap
+ *     |k| ≤ 35 (asserted) so the int128 denominator fits.
+ *
+ * Implementation: scalar per-cell loop. No NEON win for the integer
+ * divide step (ARM has no 64-bit SDIV; software division is slower
+ * than the simple int128 operations here). Matches the precedent set
+ * by m4t_a8_quantize and m4t_int32_recip.
+ *
+ * Aliasing: y may alias a or b (full-pointer aliasing only — y == a or
+ * y == b). Offset aliasing (e.g., y = a + 1) is NOT supported. The
+ * trivial y == a == b case is well-defined: every cell divides itself,
+ * yielding +1 except where a[i] == 0 (in which case 0).
+ *
+ * Preconditions:
+ *   - n >= 0 (n == 0 is a no-op)
+ *   - y, a, b non-NULL when n > 0
+ *   - |k| = |target_bx + b_bx - a_bx| <= 39 (matches the pow3_i64 range
+ *     and the elementwise_mul_bx convention; the int128 numerator stays
+ *     safe at a_m × 3^39 ≈ 2^91, well below int128's 2^127 limit)
+ *   - |a[i]|, |b[i]| <= M4T_MTFP_MAX_VAL (substrate invariant)
+ */
+void m4t_mtfp_elementwise_div_bx(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n);
+
+/* Scalar test oracle for m4t_mtfp_elementwise_div_bx. Bit-exact same
+ * semantics. Production must not call. */
+void m4t_mtfp_elementwise_div_bx_scalar_ref(
+    m4t_mtfp_t* y,
+    const m4t_mtfp_t* a, int a_bx,
+    const m4t_mtfp_t* b, int b_bx,
+    int target_bx, int n);
+
 /* BitLinear scale apply with explicit input bx and target output bx:
  *   y_real[i] = y_raw[i] · α_real · absmax_real / 127
  * Output at target_bx, computed as:
