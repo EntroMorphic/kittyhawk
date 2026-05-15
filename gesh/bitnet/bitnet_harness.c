@@ -243,6 +243,28 @@ static int g_kv_evict_w_qk = 0;
  * Set via BITNET_KV_EVICT_KK_PROTECT_K. K=0 reproduces qsigdist. */
 static int g_kv_evict_kk_protect_k = 0;
 
+/* Trit Lattice LSH FFN — phase η validation (2026-05-14). Dumps the
+ * FFN-input activation (post-attention layernorm output, the input
+ * to gate/up projections) per (prompt, position, layer) so the
+ * synthetic LSH protocol can be replayed on real activations.
+ *
+ * Env vars:
+ *   BITNET_DUMP_FFN_INPUTS_DIR  — output directory (created if missing)
+ *   BITNET_DUMP_FFN_INPUTS_LAYERS — comma-separated layer ids, or "all"
+ *   BITNET_DUMP_LABEL           — prompt label for filename prefix
+ *
+ * Format: raw binary, hidden_size × m4t_mtfp_t (int16), no header.
+ * Python reads via np.fromfile(path, dtype=np.int16).
+ *
+ * Filename: {dir}/{label}_p{position}_l{layer}.bin
+ *
+ * Read-only on the inference path: no semantic effect, just I/O. */
+#define BITNET_DUMP_MAX_LAYERS 64
+static const char* g_dump_ffn_inputs_dir = NULL;
+static int  g_dump_ffn_inputs_layer_mask[BITNET_DUMP_MAX_LAYERS] = {0};
+static int  g_dump_ffn_inputs_any = 0;  /* 1 if any layer to dump */
+static const char* g_dump_label = "unlabeled";
+
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
         case BITNET_KV_EVICT_NONE:    return "none";
@@ -287,6 +309,32 @@ static void bitnet_kv_evict_init_from_env(void) {
     if (kpk_s) { int v = atoi(kpk_s);
                  if (v >= 0) g_kv_evict_kk_protect_k = v;
                  else fprintf(stderr, "[harness] BITNET_KV_EVICT_KK_PROTECT_K must be ≥0, using 0\n"); }
+
+    /* FFN-input activation dump (Trit Lattice LSH FFN validation) */
+    g_dump_ffn_inputs_dir = getenv("BITNET_DUMP_FFN_INPUTS_DIR");
+    const char* dlbl = getenv("BITNET_DUMP_LABEL");
+    if (dlbl) g_dump_label = dlbl;
+    const char* dlayers = getenv("BITNET_DUMP_FFN_INPUTS_LAYERS");
+    if (g_dump_ffn_inputs_dir != NULL) {
+        if (!dlayers || !strcasecmp(dlayers, "all")) {
+            for (int i = 0; i < BITNET_DUMP_MAX_LAYERS; i++) g_dump_ffn_inputs_layer_mask[i] = 1;
+            g_dump_ffn_inputs_any = 1;
+        } else {
+            /* Parse comma-separated list. */
+            const char* p = dlayers;
+            while (*p) {
+                int v = atoi(p);
+                if (v >= 0 && v < BITNET_DUMP_MAX_LAYERS) {
+                    g_dump_ffn_inputs_layer_mask[v] = 1;
+                    g_dump_ffn_inputs_any = 1;
+                }
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+        }
+        fprintf(stderr, "[harness] FFN input dump → %s, label=%s, layers=%s\n",
+                g_dump_ffn_inputs_dir, g_dump_label, dlayers ? dlayers : "all");
+    }
     const char* w = getenv("BITNET_KV_WINDOW");
     if (w) {
         int v = atoi(w);
@@ -1798,6 +1846,26 @@ void bitnet_forward_block(
     m4t_mtfp_rmsnorm_bx(s->x_norm, s->x, w->gamma_post_attn_norm,
                         BITNET_ACT_BX, w->gamma_post_attn_norm_block_exp,
                         BITNET_ACT_BX, /*eps=*/1, BITNET_HIDDEN_SIZE);
+
+    /* Trit Lattice LSH FFN validation: dump x_norm (FFN input) per
+     * (prompt, position, layer) when enabled. Read-only on the
+     * inference path; semantic effect is zero. See BITNET_DUMP_FFN_INPUTS_*
+     * env-var docs above. */
+    if (g_dump_ffn_inputs_any &&
+        g_dump_ffn_inputs_dir != NULL &&
+        layer_idx >= 0 && layer_idx < BITNET_DUMP_MAX_LAYERS &&
+        g_dump_ffn_inputs_layer_mask[layer_idx]) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s_p%04d_l%02d.bin",
+                 g_dump_ffn_inputs_dir, g_dump_label, position, layer_idx);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            fwrite(s->x_norm, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+            fclose(f);
+        } else {
+            fprintf(stderr, "[harness] WARN: failed to open %s for FFN dump\n", path);
+        }
+    }
 
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
      * input — A8-quantize ONCE and reuse (RC-11 fix). */

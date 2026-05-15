@@ -1,0 +1,8 @@
+{
+  "layers": [
+    27,
+    15,
+    2
+  ],
+  "results_summary": "{(2, 10): {'n': 445, 'n_categories': 11}, (2, 20): {'n': 445, 'n_categories': 11}, (15, 10): {'n': 445, 'n_categories': 11}, (15, 20): {'n': 445, 'n_categories': 11}, (27, 10): {'n': 445, 'n_categories': 11}, (27, 20): {'n': 445, 'n_categories': 11}}"
+}
