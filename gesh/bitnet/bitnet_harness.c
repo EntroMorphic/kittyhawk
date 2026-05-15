@@ -1925,6 +1925,24 @@ void bitnet_forward_block(
         memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
 
+    /* B1.6 — FFN output dump (post-down_proj, pre-residual). Mirror of
+     * the FFN-input dump: same env vars, same per-(prompt, position,
+     * layer) file naming with "_out" suffix. Captures the dense FFN's
+     * contribution that an LSH FFN tile would need to predict. */
+    if (g_dump_ffn_inputs_any &&
+        g_dump_ffn_inputs_dir != NULL &&
+        layer_idx >= 0 && layer_idx < BITNET_DUMP_MAX_LAYERS &&
+        g_dump_ffn_inputs_layer_mask[layer_idx]) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s_p%04d_l%02d_out.bin",
+                 g_dump_ffn_inputs_dir, g_dump_label, position, layer_idx);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            fwrite(s->x, sizeof(m4t_mtfp_t), BITNET_HIDDEN_SIZE, f);
+            fclose(f);
+        }
+    }
+
     /* x = residual + x (V13.A: NEON via libm4t's saturating-add
      * primitive — same MTFP19 clamp semantics as the previous scalar
      * loop, no scalar production code per condition (5) of the
