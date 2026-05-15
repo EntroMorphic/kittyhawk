@@ -23,18 +23,7 @@ LAYERS = "2,15,27"
 DUMP_DIR = os.path.join(THIS, "results/ffn_dump")
 
 # Hand-picked prompts: one per category where category has >= 1 prompt
-SELECTED = [
-    "tech_neural", "tech_quantum",        # tech
-    "code_python_fn", "code_sql",          # code
-    "dialog_qa", "dialog_greet",           # dialog
-    "q_capital_egypt", "q_dna_full",       # q
-    "math_word_problem", "math_div",       # math
-    "logic_causal2", "logic_negation2",    # logic
-    "long_storm", "long_meeting",          # long
-    "poetry_haiku", "poetry_blake",        # poetry
-    "idiom_horse", "idiom_back",           # idiom
-    "def_metaphor", "history_moon",        # def + history
-]
+SELECTED = None  # None = use all available prompts from the N=100 battery
 
 
 def load_prompts():
@@ -51,10 +40,13 @@ def load_prompts():
 def main():
     os.makedirs(DUMP_DIR, exist_ok=True)
     prompts = load_prompts()
-    missing = [l for l in SELECTED if l not in prompts]
-    if missing:
-        print(f"WARN: missing labels {missing}")
-    selected = [(l, prompts[l]) for l in SELECTED if l in prompts]
+    if SELECTED is None:
+        selected = sorted(prompts.items())
+    else:
+        missing = [l for l in SELECTED if l not in prompts]
+        if missing:
+            print(f"WARN: missing labels {missing}")
+        selected = [(l, prompts[l]) for l in SELECTED if l in prompts]
     print(f"Dumping FFN inputs for {len(selected)} prompts "
           f"× layers={LAYERS} × gen={GEN}\n")
     t0 = time.time()
