@@ -265,6 +265,59 @@ static int  g_dump_ffn_inputs_layer_mask[BITNET_DUMP_MAX_LAYERS] = {0};
 static int  g_dump_ffn_inputs_any = 0;  /* 1 if any layer to dump */
 static const char* g_dump_label = "unlabeled";
 
+/* Routed FFN — Step 1 PoC of "routed compute throughout" arc (2026-05-14).
+ *
+ * Replaces the dense FFN compute (gate/up/relu²/mul/sub_norm/down) with a
+ * routed lookup: input signature → bucket → atom-composition tile → output.
+ *
+ * Calibration (offline): build_lsh_dict.py reads dump corpus, fits per-layer
+ * atom dictionary + per-bucket recipes, serializes to a binary dict file.
+ *
+ * Env vars:
+ *   BITNET_FFN_LSH_DICT     — path to dict file
+ *   BITNET_FFN_LSH_LAYERS   — comma-separated layer ids to route, or "all"
+ *
+ * The architecture is "fully routed" in the substrate-vision sense: the
+ * dispatch is signature-based; the tile content is shared atoms (ternary)
+ * + per-bucket recipe (sparse coefficients). No dense matmul in the FFN
+ * compute path at routed layers.
+ *
+ * NOTE Step 1 PoC: this skips the dense FFN compute entirely at routed
+ * layers; subsequent steps will integrate routed BitLinear projections,
+ * routed attention, etc. See journal/path_forward_2026-05-15.md (TBD). */
+typedef struct {
+    uint32_t recipe_len;
+    uint32_t* atom_idx;     /* recipe_len entries */
+    double*   scale;        /* recipe_len entries */
+} bitnet_lsh_recipe_t;
+
+typedef struct {
+    int32_t  layer_idx;
+    int32_t* mu;            /* d_model entries (int32) */
+    int8_t*  atoms;         /* m_atoms × d_model trits */
+    /* Bucket recipes indexed by bucket_id ∈ [0, 3^k_lsh).
+     * Sparse: most buckets unset (recipe_len = 0). */
+    bitnet_lsh_recipe_t* by_bucket;
+    uint32_t  num_possible_buckets; /* 3^k_lsh */
+} bitnet_lsh_layer_t;
+
+typedef struct {
+    int loaded;
+    uint32_t num_layers;
+    uint32_t d_model;
+    uint32_t k_lsh;
+    uint32_t m_atoms;
+    uint32_t k_recipe_max;
+    int32_t  tau;
+    /* Layer index → pointer into layers[] (NULL if not in dict) */
+    bitnet_lsh_layer_t* by_layer_idx[BITNET_DUMP_MAX_LAYERS];
+    bitnet_lsh_layer_t* layers;
+} bitnet_lsh_dict_t;
+
+static bitnet_lsh_dict_t g_lsh_dict = {0};
+static int g_lsh_active_layers[BITNET_DUMP_MAX_LAYERS] = {0};
+static int g_lsh_any_active = 0;
+
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
         case BITNET_KV_EVICT_NONE:    return "none";
@@ -309,6 +362,101 @@ static void bitnet_kv_evict_init_from_env(void) {
     if (kpk_s) { int v = atoi(kpk_s);
                  if (v >= 0) g_kv_evict_kk_protect_k = v;
                  else fprintf(stderr, "[harness] BITNET_KV_EVICT_KK_PROTECT_K must be ≥0, using 0\n"); }
+
+    /* Routed FFN — Step 1 PoC. Load LSH dict + active-layer set. */
+    const char* lsh_dict_path = getenv("BITNET_FFN_LSH_DICT");
+    const char* lsh_layers_s  = getenv("BITNET_FFN_LSH_LAYERS");
+    if (lsh_dict_path && lsh_layers_s) {
+        FILE* df = fopen(lsh_dict_path, "rb");
+        if (!df) {
+            fprintf(stderr, "[harness] WARN: failed to open LSH dict %s\n", lsh_dict_path);
+        } else {
+            char magic[4];
+            if (fread(magic, 1, 4, df) != 4 || memcmp(magic, "GLFF", 4) != 0) {
+                fprintf(stderr, "[harness] WARN: LSH dict bad magic\n");
+                fclose(df);
+            } else {
+                uint32_t hdr[6]; int32_t tau;
+                fread(hdr, sizeof(uint32_t), 6, df);  /* version, num_layers, d_model, k_lsh, m_atoms, k_recipe_max */
+                fread(&tau, sizeof(int32_t), 1, df);
+                g_lsh_dict.num_layers = hdr[1];
+                g_lsh_dict.d_model = hdr[2];
+                g_lsh_dict.k_lsh = hdr[3];
+                g_lsh_dict.m_atoms = hdr[4];
+                g_lsh_dict.k_recipe_max = hdr[5];
+                g_lsh_dict.tau = tau;
+                if (g_lsh_dict.d_model != BITNET_HIDDEN_SIZE) {
+                    fprintf(stderr, "[harness] WARN: LSH dict d_model %u != %d\n",
+                            g_lsh_dict.d_model, BITNET_HIDDEN_SIZE);
+                }
+                /* 3^k_lsh — compute */
+                uint32_t n_buckets_possible = 1;
+                for (uint32_t i = 0; i < g_lsh_dict.k_lsh; i++) n_buckets_possible *= 3;
+                g_lsh_dict.layers = (bitnet_lsh_layer_t*)calloc(g_lsh_dict.num_layers,
+                                                                  sizeof(bitnet_lsh_layer_t));
+                for (uint32_t li = 0; li < g_lsh_dict.num_layers; li++) {
+                    uint32_t lh[2];
+                    fread(lh, sizeof(uint32_t), 2, df);  /* layer_idx, num_buckets */
+                    bitnet_lsh_layer_t* L = &g_lsh_dict.layers[li];
+                    L->layer_idx = (int32_t)lh[0];
+                    L->num_possible_buckets = n_buckets_possible;
+                    L->mu = (int32_t*)malloc(g_lsh_dict.d_model * sizeof(int32_t));
+                    L->atoms = (int8_t*)malloc((size_t)g_lsh_dict.m_atoms * g_lsh_dict.d_model);
+                    L->by_bucket = (bitnet_lsh_recipe_t*)calloc(n_buckets_possible,
+                                                                  sizeof(bitnet_lsh_recipe_t));
+                    fread(L->mu, sizeof(int32_t), g_lsh_dict.d_model, df);
+                    fread(L->atoms, 1, (size_t)g_lsh_dict.m_atoms * g_lsh_dict.d_model, df);
+                    uint32_t num_buckets_in_dict = lh[1];
+                    for (uint32_t bi = 0; bi < num_buckets_in_dict; bi++) {
+                        uint32_t bh[2];
+                        fread(bh, sizeof(uint32_t), 2, df);  /* bucket_id, recipe_len */
+                        bitnet_lsh_recipe_t* R = &L->by_bucket[bh[0]];
+                        R->recipe_len = bh[1];
+                        if (R->recipe_len > 0) {
+                            R->atom_idx = (uint32_t*)malloc(R->recipe_len * sizeof(uint32_t));
+                            R->scale = (double*)malloc(R->recipe_len * sizeof(double));
+                            fread(R->atom_idx, sizeof(uint32_t), R->recipe_len, df);
+                            fread(R->scale, sizeof(double), R->recipe_len, df);
+                        }
+                    }
+                    if (L->layer_idx >= 0 && L->layer_idx < BITNET_DUMP_MAX_LAYERS) {
+                        g_lsh_dict.by_layer_idx[L->layer_idx] = L;
+                    }
+                }
+                fclose(df);
+                g_lsh_dict.loaded = 1;
+                fprintf(stderr, "[harness] LSH dict loaded: %u layers, d_model=%u, "
+                        "k_lsh=%u, m_atoms=%u, tau=%d\n",
+                        g_lsh_dict.num_layers, g_lsh_dict.d_model,
+                        g_lsh_dict.k_lsh, g_lsh_dict.m_atoms, g_lsh_dict.tau);
+            }
+        }
+        /* Parse active layers */
+        if (g_lsh_dict.loaded) {
+            if (!strcasecmp(lsh_layers_s, "all")) {
+                for (uint32_t li = 0; li < g_lsh_dict.num_layers; li++) {
+                    int32_t lid = g_lsh_dict.layers[li].layer_idx;
+                    if (lid >= 0 && lid < BITNET_DUMP_MAX_LAYERS) {
+                        g_lsh_active_layers[lid] = 1;
+                        g_lsh_any_active = 1;
+                    }
+                }
+            } else {
+                const char* p = lsh_layers_s;
+                while (*p) {
+                    int v = atoi(p);
+                    if (v >= 0 && v < BITNET_DUMP_MAX_LAYERS &&
+                        g_lsh_dict.by_layer_idx[v] != NULL) {
+                        g_lsh_active_layers[v] = 1;
+                        g_lsh_any_active = 1;
+                    }
+                    while (*p && *p != ',') p++;
+                    if (*p == ',') p++;
+                }
+            }
+            fprintf(stderr, "[harness] LSH FFN active on layers: %s\n", lsh_layers_s);
+        }
+    }
 
     /* FFN-input activation dump (Trit Lattice LSH FFN validation) */
     g_dump_ffn_inputs_dir = getenv("BITNET_DUMP_FFN_INPUTS_DIR");
@@ -1867,6 +2015,41 @@ void bitnet_forward_block(
         }
     }
 
+    /* Routed FFN — Step 1 PoC. If LSH FFN is active for this layer:
+     * compute s->x = mu + sum(scale_j × atoms[idx_j]); skip dense FFN.
+     * Otherwise fall through to the dense compute below. */
+    if (g_lsh_any_active && layer_idx >= 0 && layer_idx < BITNET_DUMP_MAX_LAYERS &&
+        g_lsh_active_layers[layer_idx] && g_lsh_dict.by_layer_idx[layer_idx] != NULL) {
+        const bitnet_lsh_layer_t* L = g_lsh_dict.by_layer_idx[layer_idx];
+        /* Threshold-extract first k_lsh trits of x_norm to compute bucket. */
+        uint64_t bucket = 0; uint64_t pow3 = 1;
+        const int32_t tau = g_lsh_dict.tau;
+        for (uint32_t i = 0; i < g_lsh_dict.k_lsh; i++) {
+            int32_t v = (int32_t)s->x_norm[i];
+            int trit;
+            if (v > tau)       trit = 2;  /* +1 → digit 2 */
+            else if (v < -tau) trit = 0;  /* -1 → digit 0 */
+            else               trit = 1;  /*  0 → digit 1 */
+            bucket += (uint64_t)trit * pow3;
+            pow3 *= 3;
+        }
+        const bitnet_lsh_recipe_t* R = &L->by_bucket[bucket];
+        /* Predict s->x = mu + sum(scale_j × atoms[atom_idx_j]). */
+        for (uint32_t d = 0; d < g_lsh_dict.d_model; d++) {
+            double acc = (double)L->mu[d];
+            for (uint32_t j = 0; j < R->recipe_len; j++) {
+                int8_t a = L->atoms[R->atom_idx[j] * g_lsh_dict.d_model + d];
+                if (a != 0) acc += R->scale[j] * (double)a;
+            }
+            /* Clamp to mtfp range; round to nearest. */
+            if (acc > 2147483647.0) acc = 2147483647.0;
+            if (acc < -2147483647.0) acc = -2147483647.0;
+            s->x[d] = (m4t_mtfp_t)(acc + (acc >= 0 ? 0.5 : -0.5));
+        }
+        /* Skip the dense FFN compute; jump to residual add. */
+        goto bitnet_block_ffn_residual;
+    }
+
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
      * input — A8-quantize ONCE and reuse (RC-11 fix). */
     if (w->w_gate != NULL && w->w_up != NULL) {
@@ -1943,6 +2126,7 @@ void bitnet_forward_block(
         }
     }
 
+bitnet_block_ffn_residual:
     /* x = residual + x (V13.A: NEON via libm4t's saturating-add
      * primitive — same MTFP19 clamp semantics as the previous scalar
      * loop, no scalar production code per condition (5) of the
