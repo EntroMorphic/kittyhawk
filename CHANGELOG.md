@@ -4,6 +4,47 @@ Notable changes to Glyph since the 2026-05-01 ground-zero rebuild. Older entries
 
 ## [Unreleased]
 
+### LSH FFN red-team — fallback confound found in Step 1.5a (2026-05-15)
+
+Per `journal/lsh_ffn_redteam_2026-05-15.md`. The Step 1.5a result
+("n_min=10 gives 0.596 mean match, hypothesis confirmed") was
+overclaimed. Red-team at 100/100 intensity scrutinized the PoC:
+
+  RT#1 PASS   Fallback path bit-identical to dense
+  RT#2 PASS   Routing counter correctly tracks routed-vs-fallback calls
+  RT#3 PASS   Dense bit-identically reproducible
+  RT#4 PASS   Python ↔ C lookup math bit-identical (9/9 buckets, 0 disagreeing dims)
+  RT#5 PARTIAL  Headline 0.596 confounded by fallback dominance
+  RT#6 NEG    Per-prompt: more routing → worse match (r = -0.455)
+
+Per-prompt attribution at n_min=10:
+  Mean routing fraction: 13.4%   (most compute is dense fallback)
+  Mean match: 0.596
+  Correlation routing% vs match: r = -0.455 (negative)
+  8 prompts with routing < 10%: mean match 0.667 (FALLBACK WIN)
+  12 prompts with routing >= 10%: mean match ~0.547
+
+n_min=1 (all-routed) comparison: 96.2% routed, mean match 0.354.
+When routing fires on nearly every position, generation degrades
+significantly — the architecture's tile fidelity (atom-comp at
+M=16 K=4 from 2180 calibration samples) doesn't preserve dense-
+equivalent output.
+
+Mechanical correctness verified (RT#1-#4 all pass). Quality claim
+partially refuted (RT#5+#6). The Step 1.5a framing of "hypothesis
+confirmed" mixed two contributions:
+  (a) Selecting better buckets (real architectural signal)
+  (b) Routing less and falling back to dense (fallback win)
+
+These weren't separated in yesterday's headline.
+
+Architectural path forward changes: variant B2-b (per-bucket SUBSET
+of dense FFN) becomes the next architectural move, not "more
+calibration data with same atom-comp tiles." B2-b's tile content
+is EXACT compute on selected cells, not a statistical approximation
+— its fidelity is bounded by subset coverage, not by per-bucket
+sample count.
+
 ### Integrative qsig_filter — new best KV-eviction policy on tech workloads (2026-05-14)
 
 Per `journal/integrative_qsig_filter_2026-05-14.md` and

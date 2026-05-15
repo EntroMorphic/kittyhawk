@@ -317,6 +317,9 @@ typedef struct {
 static bitnet_lsh_dict_t g_lsh_dict = {0};
 static int g_lsh_active_layers[BITNET_DUMP_MAX_LAYERS] = {0};
 static int g_lsh_any_active = 0;
+/* Red-team counters: how many FFN calls take routed path vs fallback. */
+static uint64_t g_lsh_routed_count = 0;
+static uint64_t g_lsh_fallback_count = 0;
 
 static const char* bitnet_kv_evict_mode_name(bitnet_kv_evict_mode_t m) {
     switch (m) {
@@ -2044,6 +2047,7 @@ void bitnet_forward_block(
         /* If recipe_len == 0, this bucket was uncalibrated (or skipped
          * for low sample count). Fall through to dense FFN. */
         if (R->recipe_len > 0) {
+            g_lsh_routed_count++;
             /* Predict s->x = mu + sum(scale_j × atoms[atom_idx_j]). */
             for (uint32_t d = 0; d < g_lsh_dict.d_model; d++) {
                 double acc = (double)L->mu[d];
@@ -2060,6 +2064,7 @@ void bitnet_forward_block(
             goto bitnet_block_ffn_residual;
         }
         /* else: fall through to dense compute */
+        g_lsh_fallback_count++;
     }
 
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as
@@ -2120,10 +2125,12 @@ void bitnet_forward_block(
         memset(s->x, 0, BITNET_HIDDEN_SIZE * sizeof(m4t_mtfp_t));
     }
 
-    /* B1.6 — FFN output dump (post-down_proj, pre-residual). Mirror of
-     * the FFN-input dump: same env vars, same per-(prompt, position,
-     * layer) file naming with "_out" suffix. Captures the dense FFN's
-     * contribution that an LSH FFN tile would need to predict. */
+bitnet_block_ffn_residual:
+    /* B1.6 — FFN output dump (post-FFN, pre-residual). Captures s->x
+     * regardless of whether dense or routed compute produced it.
+     * (Pre-RT moved this dump to the residual-label so routed-FFN
+     * outputs also get dumped — previously it sat after the dense
+     * compute, so the routed goto bypassed it.) */
     if (g_dump_ffn_inputs_any &&
         g_dump_ffn_inputs_dir != NULL &&
         layer_idx >= 0 && layer_idx < BITNET_DUMP_MAX_LAYERS &&
@@ -2138,7 +2145,6 @@ void bitnet_forward_block(
         }
     }
 
-bitnet_block_ffn_residual:
     /* x = residual + x (V13.A: NEON via libm4t's saturating-add
      * primitive — same MTFP19 clamp semantics as the previous scalar
      * loop, no scalar production code per condition (5) of the
@@ -2639,6 +2645,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, " %d", generated_tokens[i]);
         }
         fprintf(stderr, "\n");
+    }
+    if (g_lsh_any_active) {
+        uint64_t total = g_lsh_routed_count + g_lsh_fallback_count;
+        double pct = total > 0 ? 100.0 * (double)g_lsh_routed_count / (double)total : 0.0;
+        fprintf(stderr, "     LSH FFN routed/fallback     = %llu/%llu (%.1f%% routed)\n",
+                (unsigned long long)g_lsh_routed_count,
+                (unsigned long long)g_lsh_fallback_count, pct);
     }
 
     bitnet_block_scratch_free(&s);
