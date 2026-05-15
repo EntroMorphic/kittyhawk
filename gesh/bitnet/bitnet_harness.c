@@ -2015,9 +2015,16 @@ void bitnet_forward_block(
         }
     }
 
-    /* Routed FFN — Step 1 PoC. If LSH FFN is active for this layer:
-     * compute s->x = mu + sum(scale_j × atoms[idx_j]); skip dense FFN.
-     * Otherwise fall through to the dense compute below. */
+    /* Routed FFN — Step 1 PoC. If LSH FFN is active for this layer AND
+     * the bucket has a calibrated recipe (recipe_len > 0): compute
+     * s->x = mu + sum(scale_j × atoms[idx_j]); skip dense FFN.
+     * Otherwise (uncalibrated bucket OR layer not active): fall through
+     * to the dense compute below.
+     *
+     * Step 1.5a hybrid: buckets whose recipe was skipped at calibration
+     * (n < n_min) have recipe_len = 0 in the dict → harness falls back
+     * to dense. This preserves dense compute for poorly-populated
+     * buckets while routing well-populated ones. */
     if (g_lsh_any_active && layer_idx >= 0 && layer_idx < BITNET_DUMP_MAX_LAYERS &&
         g_lsh_active_layers[layer_idx] && g_lsh_dict.by_layer_idx[layer_idx] != NULL) {
         const bitnet_lsh_layer_t* L = g_lsh_dict.by_layer_idx[layer_idx];
@@ -2034,20 +2041,25 @@ void bitnet_forward_block(
             pow3 *= 3;
         }
         const bitnet_lsh_recipe_t* R = &L->by_bucket[bucket];
-        /* Predict s->x = mu + sum(scale_j × atoms[atom_idx_j]). */
-        for (uint32_t d = 0; d < g_lsh_dict.d_model; d++) {
-            double acc = (double)L->mu[d];
-            for (uint32_t j = 0; j < R->recipe_len; j++) {
-                int8_t a = L->atoms[R->atom_idx[j] * g_lsh_dict.d_model + d];
-                if (a != 0) acc += R->scale[j] * (double)a;
+        /* If recipe_len == 0, this bucket was uncalibrated (or skipped
+         * for low sample count). Fall through to dense FFN. */
+        if (R->recipe_len > 0) {
+            /* Predict s->x = mu + sum(scale_j × atoms[atom_idx_j]). */
+            for (uint32_t d = 0; d < g_lsh_dict.d_model; d++) {
+                double acc = (double)L->mu[d];
+                for (uint32_t j = 0; j < R->recipe_len; j++) {
+                    int8_t a = L->atoms[R->atom_idx[j] * g_lsh_dict.d_model + d];
+                    if (a != 0) acc += R->scale[j] * (double)a;
+                }
+                /* Clamp to mtfp range; round to nearest. */
+                if (acc > 2147483647.0) acc = 2147483647.0;
+                if (acc < -2147483647.0) acc = -2147483647.0;
+                s->x[d] = (m4t_mtfp_t)(acc + (acc >= 0 ? 0.5 : -0.5));
             }
-            /* Clamp to mtfp range; round to nearest. */
-            if (acc > 2147483647.0) acc = 2147483647.0;
-            if (acc < -2147483647.0) acc = -2147483647.0;
-            s->x[d] = (m4t_mtfp_t)(acc + (acc >= 0 ? 0.5 : -0.5));
+            /* Skip the dense FFN compute; jump to residual add. */
+            goto bitnet_block_ffn_residual;
         }
-        /* Skip the dense FFN compute; jump to residual add. */
-        goto bitnet_block_ffn_residual;
+        /* else: fall through to dense compute */
     }
 
     /* gate, up = x_norm projected (BitLinear, A8). They share x_norm as

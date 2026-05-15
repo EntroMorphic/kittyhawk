@@ -145,26 +145,32 @@ def fit_recipe(target, atoms_f, K):
     return indices, scales
 
 
-def calibrate_layer(layer, M_atoms, K_recipe):
+def calibrate_layer(layer, M_atoms, K_recipe, n_min=1):
     print(f"  Layer {layer}: loading dumps...", flush=True)
     ins, outs = load_layer_pairs(layer)
     n = ins.shape[0]
     print(f"  Layer {layer}: {n} samples")
     sig = threshold_extract_first_k(ins, K_LSH, TAU)
     buckets = hash_buckets(sig)
-    print(f"  Layer {layer}: {len(set(buckets.tolist()))} unique buckets")
+    n_unique = len(set(buckets.tolist()))
+    print(f"  Layer {layer}: {n_unique} unique buckets")
     atoms, mu = build_atom_dictionary(outs, M_atoms)
     atoms_f = atoms.astype(np.float64)
     by_b = defaultdict(list)
     for i in range(n):
         by_b[int(buckets[i])].append(outs[i])
     recipes = {}
+    n_skipped = 0
     for b, samples in by_b.items():
+        if len(samples) < n_min:
+            n_skipped += 1
+            continue  # Don't build recipe; harness will fall back to dense
         arr = np.stack(samples, axis=0)
         target = arr.mean(axis=0) - mu
         indices, scales = fit_recipe(target, atoms_f, K_recipe)
         recipes[b] = (indices, scales)
-    print(f"  Layer {layer}: {len(recipes)} bucket recipes built")
+    print(f"  Layer {layer}: {len(recipes)} bucket recipes built "
+          f"({n_skipped} skipped due to n_min={n_min})")
     # Round mu to int32
     mu_i32 = np.clip(mu, -2**31 + 1, 2**31 - 1).astype(np.int32)
     return mu_i32, atoms, recipes
@@ -204,6 +210,10 @@ def main():
     ap.add_argument("--m-atoms", type=int, default=M_ATOMS)
     ap.add_argument("--k-recipe", type=int, default=K_RECIPE)
     ap.add_argument("--output", default=os.path.join(THIS, "results/lsh_ffn_dict.bin"))
+    ap.add_argument("--n-min", type=int, default=1,
+                    help="Minimum bucket sample count to include recipe; "
+                         "buckets below threshold get NO recipe and harness "
+                         "should fall back to dense FFN.")
     args = ap.parse_args()
 
     layers = [int(x) for x in args.layers.split(",")]
@@ -215,7 +225,7 @@ def main():
 
     layer_data = {}
     for layer in layers:
-        layer_data[layer] = calibrate_layer(layer, args.m_atoms, args.k_recipe)
+        layer_data[layer] = calibrate_layer(layer, args.m_atoms, args.k_recipe, args.n_min)
 
     serialize(args.output, layer_data, args.m_atoms, args.k_recipe)
 
